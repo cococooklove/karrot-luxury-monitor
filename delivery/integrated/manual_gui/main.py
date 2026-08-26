@@ -111,6 +111,25 @@ class NotifyTestThread(QtCore.QThread):
         self.result.emit(res)
 
 
+class HealthCheckThread(QtCore.QThread):
+    """프록시 풀 진단 — IP 당 1요청. 네트워크가 GUI 를 멈추지 않게 별도 스레드."""
+    result = QtCore.pyqtSignal(dict)
+    progress = QtCore.pyqtSignal(int, int)
+
+    def __init__(self, parent, proxies):
+        super().__init__(parent)
+        self.proxies = list(proxies)
+
+    def run(self):
+        from daangn_ext.health import health_check
+        try:
+            res = health_check(self.proxies,
+                               on_progress=lambda d, t: self.progress.emit(d, t))
+        except Exception as e:
+            res = {"error": f"{type(e).__name__}: {e}"}
+        self.result.emit(res)
+
+
 class MyProgressDialog(QProgressDialog):
     def closeEvent(self, a0: QCloseEvent):  # type: ignore
         if a0.spontaneous():
@@ -892,6 +911,7 @@ class MainWindow(QMainWindow):
         self.ui.detailView.setOpenExternalLinks(False)
         self.ui.detailView.anchorClicked.connect(self._open_detail_link)
         self.sb: QtWidgets.QStatusBar = self.statusBar()  # type: ignore
+        self._setup_health_indicator()
 
         for edit in (self.ui.minimumEdit, self.ui.maximumEdit):
             edit.setValidator(
@@ -902,6 +922,78 @@ class MainWindow(QMainWindow):
         self.ui.prdImg.setFixedSize(*self.preview_image_size)
 
         self._setup_extra_ui()
+
+    def _setup_health_indicator(self):
+        """상태바 우측 상시 표시 — 쓸 수 있는 IP 수 + 현재 요청간격(자동감속 반영).
+        차단 대응은 전부 자동이라, 사용자에게 필요한 건 설정이 아니라 **지금 상태**다."""
+        self.healthLabel = QtWidgets.QLabel("")
+        self.healthLabel.setStyleSheet("color:#4E5968; font-size:12px;")
+        self.healthBtn = QtWidgets.QPushButton("진단")
+        self.healthBtn.setFixedHeight(24)
+        self.healthBtn.setToolTip(
+            "프록시를 IP 당 1회씩 찔러 '지금 막힌 건지, 막혔으면 어디가 문제인지' 판정")
+        self.healthBtn.clicked.connect(self.on_health_check_clicked)
+        self.sb.addPermanentWidget(self.healthLabel)
+        self.sb.addPermanentWidget(self.healthBtn)
+        self._health_thread = None
+        self._health_timer = QtCore.QTimer(self)
+        self._health_timer.timeout.connect(self._refresh_health_indicator)
+        self._health_timer.start(2000)
+
+    def _refresh_health_indicator(self):
+        from daangn_ext import proxy_budget, throttle
+        if not getattr(self, "controller", None):
+            return
+        try:
+            pool = self._collect_proxies()
+        except Exception:
+            return
+        st = proxy_budget.pool_status(pool)
+        parts = [f"IP {st['alive']}/{st['total']}"]
+        if st["cooling"]:
+            parts[0] += f" (쿨다운 {st['cooling']}, {st['next_free_in']:.0f}초 후 해제)"
+        parts.append(throttle.describe(self.controller.req_min_ms))
+        self.healthLabel.setText("  ·  ".join(parts))
+
+    def on_health_check_clicked(self):
+        if self._health_thread and self._health_thread.isRunning():
+            return
+        pool = self._collect_proxies()
+        if not pool and not self.ask("등록된 프록시가 없습니다. 직결 IP 만 진단할까요?"):
+            return
+        self.healthBtn.setEnabled(False)
+        self.healthBtn.setText("진단 중…")
+        self._health_thread = HealthCheckThread(self, pool)
+        self._health_thread.progress.connect(
+            lambda d, t: self.sb.showMessage(f"진단 중… {d}/{t}"))
+        self._health_thread.result.connect(self._show_health_report)
+        self._health_thread.start()
+
+    def _show_health_report(self, res: dict):
+        self.healthBtn.setEnabled(True)
+        self.healthBtn.setText("진단")
+        self._health_thread = None
+        if res.get("error"):
+            self.alert(f"진단 실패: {res['error']}")
+            return
+        from daangn_ext.health import report_text
+        self.sb.showMessage(res["verdict"])
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("프록시 진단")
+        dlg.resize(720, 520)
+        v = QtWidgets.QVBoxLayout(dlg)
+        head = QtWidgets.QLabel(f"판정: {res['verdict']}")
+        head.setStyleSheet("font-weight:800; font-size:15px; color:#191F28;")
+        act = QtWidgets.QLabel(f"대응: {res['action']}")
+        act.setWordWrap(True)
+        v.addWidget(head); v.addWidget(act)
+        box = QtWidgets.QPlainTextEdit(report_text(res))
+        box.setReadOnly(True)
+        box.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        v.addWidget(box, 1)
+        btn = QtWidgets.QPushButton("닫기"); btn.clicked.connect(dlg.accept)
+        v.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
+        dlg.exec()
 
     def _open_detail_link(self, url: QUrl) -> None:
         """상세뷰 링크 = 시스템 브라우저로. 상대경로면 당근 도메인 부착."""

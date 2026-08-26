@@ -1,9 +1,10 @@
 """
 IP 요청예산 관리 — 스로틀 걸린 프록시를 쿨다운시켜 재사용을 막는다.
 
-실측(2026-08-26): 한 IP는 세션 워밍 후 ~8~10지역까지 정상 응답하고 그 뒤 스로틀.
-그 상태로 계속 쓰면 예산이 더 줄어든다(같은 IP 반복 테스트 실패율 3/12 → 5/12 악화).
-따라서 "빈응답이 연속으로 N회" = 워밍이 아니라 **예산 소진**으로 보고 IP를 쉬게 해야 한다.
+쿨다운 대상은 **하드 차단·네트워크 오류를 낸 IP 뿐**이다.
+빈응답(0건)은 쿨다운 사유가 아니다 — 실환경 실측(2026-08-26)에서 20회 연속 빈응답이던 IP 3개가
+몇 분 뒤 각각 1·7·13회만에 성공했다. 빈응답은 그 IP 가 소진됐다는 신호가 아니라 시점별 변동이다.
+빈응답에는 쿨다운 대신 **다음 IP 로 즉시 교체**로 대응한다(robust 참조).
 
 robust 가 이 모듈로 프록시를 고르면:
   - 쿨다운 중인 IP 는 후보에서 제외
@@ -16,15 +17,16 @@ import random
 import threading
 import time
 
-COOLDOWN_SEC = 300.0        # 예산 소진 판정 시 그 IP 를 쉬게 할 기본 시간
-EMPTY_ROTATE_AFTER = 5      # 연속 빈응답 이 횟수 넘으면 예산 소진으로 간주
+COOLDOWN_SEC = 120.0        # 하드차단·네트워크오류 낸 IP 를 쉬게 할 기본 시간
+EMPTY_ROTATE_AFTER = 1      # 빈응답 이 횟수마다 IP 교체(실측상 1 = 즉시교체가 최적)
 
 _lock = threading.Lock()
 _cooldown: dict[str, float] = {}     # proxy -> 해제 시각(epoch)
 
 
 def mark_exhausted(proxy: str | None, seconds: float = COOLDOWN_SEC) -> None:
-    """이 프록시를 seconds 동안 후보에서 제외."""
+    """이 프록시를 seconds 동안 후보에서 제외. 하드차단·네트워크오류에만 쓸 것
+    (빈응답에 쓰면 멀쩡한 IP 가 풀에서 빠져 풀이 말라버린다)."""
     if not proxy:
         return
     with _lock:
@@ -66,6 +68,18 @@ def stats() -> list[dict]:
         return [{"proxy": p, "cooling_for": round(t - now, 1)}
                 for p, t in sorted(_cooldown.items(), key=lambda kv: -kv[1])
                 if t > now]
+
+
+def pool_status(pool: list | None) -> dict:
+    """GUI 표시용 — 풀에서 지금 몇 개가 쓸 수 있는지."""
+    pool = pool or []
+    now = time.time()
+    with _lock:
+        cooling = [p for p in pool if _cooldown.get(p, 0.0) > now]
+        soonest = min((_cooldown[p] for p in cooling), default=0.0)
+    return {"total": len(pool), "cooling": len(cooling),
+            "alive": len(pool) - len(cooling),
+            "next_free_in": round(soonest - now, 1) if soonest else 0.0}
 
 
 def reset() -> None:

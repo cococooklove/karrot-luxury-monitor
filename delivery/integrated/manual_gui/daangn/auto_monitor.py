@@ -18,7 +18,8 @@ from datetime import datetime, timedelta
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from daangn_ext.search_filters import KeywordRule
-from daangn_ext.adaptive import collect_region, load_gu_regions
+from daangn_ext.adaptive import collect_region, collect_lanes, load_gu_regions
+from daangn_ext import throttle
 from daangn_ext.rest_scheduler import _rand_between
 from daangn.notify import TelegramSender, SheetWriter
 
@@ -28,6 +29,13 @@ CYCLE_REST_MIN = 10.0      # 사이클 사이 최소 휴식(초). 이하 = 무�
 CYCLE_REST_MAX = 3600.0    # 사이클 사이 최대 휴식(초)
 REGION_GAP_MIN = 0.3       # 지역 간 최소 휴식(초). 이하 = 연타 → IP 스로틀
 REGION_GAP_MAX = 10.0      # 지역 간 최대 휴식(초). 이상 = 전국 1바퀴 비현실적
+
+# ── 레인 병렬 ──
+# 레인은 프록시 풀을 샤딩해 쓴다. 레인당 IP 가 1개뿐이면 빈응답이 나도 교체할 곳이
+# 없어 그 레인이 통째로 멈춘다(실측: 고정 IP 재시도는 성공 4/6, 중앙값 23.5회).
+# 레인당 최소 이만큼은 줘야 교체가 의미를 갖는다.
+MIN_IP_PER_LANE = 3
+MAX_LANES = 16
 
 
 def _clamp_range(lo, hi, floor, ceil, dflt_lo, dflt_hi):
@@ -83,9 +91,13 @@ class AutoMonitor(QThread):
     def stop(self):
         self._stop = True
 
-    def _rest(self, rmin, rmax):
-        """휴식 — _stop 시 즉시 깨어남(종료 지연 방지)."""
+    def _rest(self, rmin, rmax, adapt: bool = False):
+        """휴식 — _stop 시 즉시 깨어남(종료 지연 방지).
+        adapt=True 면 자동감속 배수를 곱한다(차단 신호가 잦으면 지역 간 간격도 벌어진다).
+        사이클 휴식은 사용자가 정한 폴링 주기라 곱하지 않는다."""
         d = _rand_between(rmin, rmax)
+        if adapt:
+            d = throttle.scale(d)
         end = time.monotonic() + d
         while not self._stop:
             left = end - time.monotonic()
@@ -111,6 +123,23 @@ class AutoMonitor(QThread):
             return None, None
         it = itertools.cycle(proxies)
         return next(it), (lambda: next(it))
+
+    def _plan_lanes(self, proxies) -> int:
+        """이번 사이클에 쓸 레인 수.
+
+        레인은 프록시를 **샤딩**해 쓴다(같은 IP 동시요청 = 전멸, 실측 8/8 빈응답).
+        따라서 레인 수는 프록시 수를 절대 넘을 수 없고, 레인당 IP 가 너무 적으면
+        빈응답 교체 여지가 사라져 오히려 느려진다 → 레인당 최소 MIN_IP_PER_LANE 개 확보.
+
+        cfg["lanes"] 로 사용자가 지정 가능. 0/None 이면 자동(프록시 수 기준).
+        """
+        n_proxy = len(proxies or [])
+        if n_proxy <= 1:
+            return 1
+        want = _pi(self.cfg.get("lanes")) or 0
+        auto = max(1, n_proxy // MIN_IP_PER_LANE)
+        n = want if want > 0 else auto
+        return max(1, min(n, n_proxy // MIN_IP_PER_LANE or 1, MAX_LANES))
 
     # ── 알림 ──
     def notify(self, region, article, price, changed=None):
@@ -214,6 +243,14 @@ class AutoMonitor(QThread):
             cycle = 0
             while not self._stop:
                 cycle += 1
+                # 프록시 변경은 **사이클 경계에서만** 반영한다. 레인은 시작 시점에
+                # 풀을 샤딩해 나눠 갖기 때문에, 도중에 목록이 바뀌면 레인끼리
+                # 같은 IP 를 쥐게 될 수 있다(= 동시요청 전멸 조건).
+                fresh = self._live_proxies()
+                if fresh != cur_proxies:
+                    self.log.emit(
+                        f"[프록시] {len(cur_proxies)}개 → {len(fresh)}개 (변경 반영)")
+                    cur_proxies = fresh
                 self.log.emit(f"── 사이클 {cycle} ──")
                 for cond in conditions:
                     if self._stop:
@@ -223,46 +260,77 @@ class AutoMonitor(QThread):
                                        exclude=cond.get("exclude") or None)
                     done = 0
                     total_new = 0
-                    for reg in regions:
-                        if self._stop:
-                            break
-                        # 구 하나 시작할 때마다 프록시 재조회 → UI 에서 추가/삭제한 게 즉시 반영
-                        fresh = self._live_proxies()
-                        if fresh != cur_proxies:
-                            self.log.emit(
-                                f"[프록시] {len(cur_proxies)}개 → {len(fresh)}개 (변경 반영)")
-                            cur_proxies = fresh
-                        # 지역 간 랜덤 휴식 — 무휴식 연타 = 봇 패턴 → IP 스로틀
-                        if done:
-                            self._rest(gmin, gmax)
-                            if self._stop:
-                                break
-                        # 진행 상황(멈춘 것처럼 안 보이게)
-                        self.status.emit(
-                            f"사이클 {cycle} · [{done + 1}/{len(regions)}] "
-                            f"{reg.split('-')[0]} '{cond['keyword']}' 검색 중…")
+                    missed_total = 0
+                    n_lanes = self._plan_lanes(cur_proxies)
+
+                    def on_result(reg_d, arts, cstats, _cond=cond, _rule=rule,
+                                  _lanes=n_lanes):
+                        """지역 하나가 끝나는 즉시 호출. 레인들이 동시에 부르지만
+                        collect_lanes 가 락으로 직렬화해 준다. 중복제거·알림을 여기서
+                        스트리밍 처리 — 전국이 끝날 때까지 기다리지 않는다."""
+                        nonlocal done, total_new, missed_total
+                        reg = reg_d["in"]
                         try:
-                            arts, _ = collect_region(
-                                cond["keyword"], reg,
-                                only_on_sale=True, access_token=token,
-                                proxies=cur_proxies or None,
-                                should_stop=lambda: self._stop)
-                            filtered = [a for a in arts if rule.match(_P(a))]
-                            new, chg = self._dedup_notify(filtered, reg,
-                                               cond.get("min"), cond.get("max"),
-                                               cond.get("days"))
+                            if cstats.get("missed"):
+                                missed_total += len(cstats["missed"])
+                                self.log.emit(
+                                    f"\u26a0\ufe0f [{reg}] '{_cond['keyword']}' 가격구간 "
+                                    f"{len(cstats['missed'])}개 확인 실패(IP/세션 차단) — "
+                                    "다음 사이클에 재시도. 프록시 부족 의심")
+                            if cstats.get("expanded"):
+                                self.log.emit(
+                                    f"[우회] '{_cond['keyword']}' 응답 억제 → "
+                                    f"'{cstats['expanded'][0]}' 로 대체 수집")
+                            filtered = [a for a in arts if _rule.match(_P(a))]
+                            new, chg = self._dedup_notify(
+                                filtered, reg, _cond.get("min"), _cond.get("max"),
+                                _cond.get("days"))
                             self._flush_notify()
                             done += 1
                             total_new += new
-                            # 진행 로그 (되고 있는지 눈으로 확인)
                             self.log.emit(
-                                f"[{done}/{len(regions)}] {reg} · '{cond['keyword']}' "
+                                f"[{done}/{len(regions)}] {reg} · '{_cond['keyword']}' "
                                 f"수집 {len(filtered)} · 신규 {new}"
                                 + (f" · 변동 {chg}" if chg else "")
                                 + f"  (누적 신규 {total_new})")
                         except Exception as e:
                             done += 1
                             self.log.emit(f"[{done}/{len(regions)}] {reg} 오류: {e}")
+                        self.status.emit(
+                            f"사이클 {cycle} · [{done}/{len(regions)}] "
+                            f"'{_cond['keyword']}' 수집 중… (레인 {_lanes})")
+
+                    self.log.emit(
+                        f"[레인] {n_lanes}개 병렬 (프록시 {len(cur_proxies)}개"
+                        + (f", 레인당 IP {len(cur_proxies)//n_lanes}개 전용)"
+                           if n_lanes > 1 else " — 1레인 순차)"))
+                    self.status.emit(
+                        f"사이클 {cycle} · [0/{len(regions)}] "
+                        f"'{cond['keyword']}' 수집 중… (레인 {n_lanes})")
+                    try:
+                        _, lsm = collect_lanes(
+                            cond["keyword"],
+                            [{"in": r} for r in regions],
+                            proxies=cur_proxies or None,
+                            lanes=n_lanes,
+                            only_on_sale=True,
+                            access_token=token,
+                            should_stop=lambda: self._stop,
+                            rest_range=(gmin, gmax),
+                            on_result=on_result,
+                        )
+                        if lsm.get("skipped"):
+                            self.log.emit(f"[중단] 미처리 지역 {lsm['skipped']}개")
+                    except Exception as e:
+                        self.log.emit(f"[수집 오류] {type(e).__name__}: {e}")
+
+                    # 조건 1개 끝 — 커버리지 요약(누락을 눈에 보이게)
+                    if missed_total:
+                        self.log.emit(
+                            f"[커버리지] '{cond['keyword']}' 확인 실패 구간 {missed_total}개 "
+                            f"/ 지역 {len(regions)}개 — 이번 사이클 결과는 불완전할 수 있음")
+                    else:
+                        self.log.emit(f"[커버리지] '{cond['keyword']}' 전 구간 확인 완료")
                 if self._stop:
                     break
                 d = self._rest(rmin, rmax)

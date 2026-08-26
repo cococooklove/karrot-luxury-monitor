@@ -272,7 +272,11 @@ class CrawlThread(QThread):
         self.stop_event = threading.Event()
         self.proxy_manager = ProxyManager(proxies, req_min_ms)
         self.req_min_ms = req_min_ms
-        self.max_workers = max_workers
+        # 동시요청 수는 **살아있는 IP 수를 넘을 수 없다**. 같은 IP 로 동시요청하면
+        # 실측상 전멸(8/8 빈응답, adaptive 문서 참조)이라 워커가 프록시보다 많으면
+        # 스스로 IP 를 태우는 꼴이 된다. 설정값은 상한일 뿐, 실제값은 여기서 깎는다.
+        self.max_workers = max(1, min(max_workers, len(proxies))) if proxies else max_workers
+        self.workers_clamped = self.max_workers < max_workers
         self.tasks = tasks
 
     def run(self) -> None:
@@ -282,6 +286,12 @@ class CrawlThread(QThread):
         completed = 0
         retry_cnt = 0
         no_proxy_limitter = ReqLimitter(self.req_min_ms)
+
+        if self.workers_clamped:
+            self.message.emit(
+                f"동시 요청을 {self.max_workers}개로 낮췄습니다 "
+                f"(프록시 {len(self.proxy_manager.proxies)}개 — 같은 IP 동시요청은 차단을 부릅니다)"
+            )
 
         total_req_per_proxy = {
             proxy: 0 for proxy in ["No Proxy", *self.proxy_manager.proxies]
@@ -328,8 +338,10 @@ class CrawlThread(QThread):
                                 exclude=task.exclude_keywords or None,
                             )
                             fn = api.get_products_adaptive if task.adaptive else api.get_products
-                            # 적응형(구단위, 다요청)은 전체 프록시 풀로 매 요청 분산
-                            pool = self.proxy_manager.proxies if task.adaptive else None
+                            # 프록시 풀을 항상 넘긴다 — robust 가 빈응답마다 IP 를 교체할 수
+                            # 있어야 한다(A/B 실측: 교체 6/6 성공 vs 고정 4/6, 중앙값 5.5회 vs 23.5회).
+                            # 종전에는 적응형에만 풀을 줘서 일반 검색은 한 IP 로 30회를 두드렸다.
+                            pool = self.proxy_manager.proxies or None
                             products = fn(
                                 area_code,
                                 area_name,

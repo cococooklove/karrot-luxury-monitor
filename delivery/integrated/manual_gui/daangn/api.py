@@ -57,6 +57,11 @@ def get_products(
     if should_stop and should_stop():
         return []
     if not articles:
+        # 재시도 소진 = 매물이 없는 게 아니라 확인 실패. 문구로 구분해준다.
+        if meta.get("exhausted"):
+            raise Exception(
+                f"재시도 소진 — 매물 유무 확인 실패 (빈응답 {meta['empties']}·차단 {meta['blocked']}). "
+                "프록시를 늘리거나 잠시 후 재시도하세요.")
         raise Exception(f"상품 리스트 가져오기 실패 (빈응답 {meta['empties']}·차단 {meta['blocked']})")
 
     products = [

@@ -3,6 +3,7 @@ import time
 from PIL import Image
 
 from daangn.errors import DaangnCancelledError
+from daangn_ext import throttle
 
 
 def image_contain_resize(img: Image.Image, size: tuple[int, int]):
@@ -29,7 +30,8 @@ class ReqLimitter:
     def wait(self, ev: threading.Event):
         with self.lock:
             elapsed_ms = (time.time() - self.last_req) * 1000
-            wait_ms = self.min_delay_ms - elapsed_ms
+            # 설정값 x 자동감속 배수 (차단 신호가 나오면 프록시 없는 요청도 함께 느려진다)
+            wait_ms = throttle.scale(self.min_delay_ms) - elapsed_ms
 
             if wait_ms > 0:
                 if ev.wait(wait_ms / 1000.0):

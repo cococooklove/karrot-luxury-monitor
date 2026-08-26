@@ -7,10 +7,17 @@
 
 대응: 빈 결과 = 소프트블록으로 간주 → 세션 유지(쿠키) + 재시도(같은/다음 프록시).
 
-단, 빈응답에는 두 종류가 있다:
-  - **초기 워밍** — 몇 번 더 두드리면 뚫린다. 같은 IP 유지가 정답(교체하면 콜드세션 재워밍).
-  - **예산 소진** — 그 IP 는 이미 스로틀. 계속 두드리면 예산이 더 나빠진다(실측).
-연속 빈응답이 empty_rotate_after 를 넘으면 후자로 보고 proxy_budget 에 쿨다운을 걸고 IP 교체.
+빈응답이 나면 **같은 IP 로 버티지 말고 즉시 다른 IP 로 교체**하는 게 실측상 최적이다.
+프록시 풀 20개로 6개 지역 A/B (2026-08-26):
+
+  A) 한 IP 고정 재시도    성공 4/6, 성공까지 요청 median 23.5회, 총 549s
+  B) 빈응답마다 IP 교체    성공 6/6, 성공까지 요청 median  5.5회, 총 379s
+
+즉 빈응답은 "그 IP 를 더 두드리면 뚫리는 워밍"이 아니라 **시점별 변동**이라, 다음 IP 를
+뽑는 편이 빠르다(같은 IP·같은 지역이 몇 분 사이 1회 ↔ 25회로 요동하는 것도 확인).
+같은 이유로 빈응답에는 쿨다운을 걸지 않는다 — 20회 연속 빈응답이던 IP 가 몇 분 뒤
+1~13회만에 성공했다. 쿨다운은 하드차단·네트워크오류 낸 IP 에만.
+백오프 길이는 유의차 없었다(0.1s vs 0.8s → 요청당 4.99s vs 5.52s). 요청 자체가 느려서 묻힌다.
 """
 from __future__ import annotations
 
@@ -21,10 +28,22 @@ from typing import Callable
 from bs4 import BeautifulSoup as Soup
 from curl_cffi import requests
 
-from . import proxy_budget
+from . import proxy_budget, throttle
 from .auth import build_headers
+from .block_signals import NOT_IP_FAULT, classify, summarize
 
 BUYSELL = "https://www.daangn.com/kr/buy-sell/"
+
+# ── 카나리아 ──
+# 당근은 일부 브랜드 키워드('샤넬' 등)에 확률적으로 빈 결과를 준다(실측 성공률 2/12).
+# 이건 IP·세션 차단이 아니라 쿼리 종속이라, IP 를 갈아도 재시도해도 대부분 헛돈다.
+# 그래서 빈응답이 연속되면 같은 세션·같은 IP 로 '결과가 확실한 쿼리'를 1회 쏴서 구분한다.
+#   카나리아 성공 → 세션·IP 는 멀쩡 = 이 쿼리만 억제됨/진짜 0건 → 조기 종료
+#   카나리아 실패 → 세션·IP 문제 = 계속 재시도 + 로테이션
+# 실측(2026-08-26): '삽니다' 는 종로구·보은군·부안군·강남구 4/4 성공(10~255건).
+CANARY_KEYWORD = "삽니다"
+CANARY_AFTER = 3        # 빈응답 이만큼 연속되면 카나리아 1회
+CANARY_MAX = 2          # 카나리아 총 횟수 상한
 
 
 def parse_articles(html: str) -> list | None:
@@ -58,30 +77,37 @@ def robust_fetch_articles(
     min_price: int | None = None,
     max_price: int | None = None,
     access_token: str | None = None,
-    max_retry: int = 15,
-    empty_backoff: float = 0.8,
+    max_retry: int = 45,          # 실측 22회 필요 사례 확인(2026-08-26) → 30 은 소진 위험
+    empty_backoff: float = 0.5,   # 0.1~0.8 유의차 없음 → 중간값
     next_proxy: Callable[[], str | None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     proxies: list | None = None,
     empty_rotate_after: int = proxy_budget.EMPTY_ROTATE_AFTER,
     cooldown_sec: float = proxy_budget.COOLDOWN_SEC,
+    give_up_after: int = 3,       # IP 탓 아닌 실패(PARSE/5xx) 연속 이 횟수면 조기중단
+    canary_after: int = CANARY_AFTER,     # 빈응답 연속 이 횟수면 카나리아로 원인 판별
+    canary_max: int = CANARY_MAX,
 ) -> tuple[list, dict]:
     """실매물 나올 때까지 재시도. (articles, meta) 반환.
     meta = {tries, empties, blocked, rotations, proxy}. 빈응답 극복이 핵심.
     proxies 를 주면 풀에서 선택(쿨다운 중인 IP 는 제외).
-    연속 빈응답이 empty_rotate_after 를 넘으면 그 IP 를 예산소진으로 보고 쿨다운+교체.
+    빈응답 empty_rotate_after(기본 1)회마다 다음 IP 로 교체 — 쿨다운은 걸지 않는다.
+    쿨다운은 하드차단·네트워크오류 낸 IP 에만 cooldown_sec 만큼.
     should_stop() 이 True 면 즉시 중단(자동 모니터 정지 반응)."""
     params = build_params(keyword, area_code, only_on_sale, min_price, max_price)
     headers = build_headers(BUYSELL, access_token)     # 기본값이면 daangn엔 미주입
-    sess = requests.Session(impersonate="chrome")      # 쿠키 유지 = 세션 워밍업
-    # 이 요청은 한 프록시로 워밍 유지(빠름). 실패 시에만 풀에서 교체.
+    sess = requests.Session(impersonate="chrome")      # 브라우저 지문 위장(TLS/JA3)
+    # 시작 IP. 빈응답이 나면 곧바로 다음 IP 로 넘어간다.
     cur_proxy = proxy or proxy_budget.pick(proxies)
-    empties = blocked = rotations = streak = 0
+    empties = blocked = rotations = streak = not_ip_streak = 0
+    empty_run = canaries = 0        # 카나리아 판별용
+    kinds: dict = {}
 
-    def rotate(exhausted: bool):
-        """프록시 교체 + 세션 리셋. exhausted 면 그 IP 에 쿨다운."""
+    def rotate(cooldown: bool):
+        """프록시 교체 + 세션 리셋. cooldown=True 는 하드차단·네트워크오류에만
+        (빈응답은 그 IP 잘못이 아니므로 쿨다운 없이 교체만)."""
         nonlocal cur_proxy, sess, rotations, streak
-        if exhausted:
+        if cooldown:
             proxy_budget.mark_exhausted(cur_proxy, cooldown_sec)
         if proxies:
             nxt = proxy_budget.pick(proxies, exclude=cur_proxy)
@@ -92,42 +118,81 @@ def robust_fetch_articles(
         if nxt and nxt != cur_proxy:
             rotations += 1
         cur_proxy = nxt
-        sess = requests.Session(impersonate="chrome")   # 콜드세션 재워밍
+        sess = requests.Session(impersonate="chrome")   # IP 바뀌면 세션도 새로
         streak = 0
+        # empty_run 은 여기서 리셋하지 않는다. 빈응답 1회마다 로테이션이 돌기 때문에
+        # 리셋하면 카나리아 임계(3연속)에 영원히 도달하지 못한다.
+        # 여러 IP 에서 연달아 빈응답 = 쿼리 종속 억제 신호이므로 IP 를 넘어 누적해야 한다.
         return True
+
+    def _canary_ok():
+        """같은 세션·같은 IP 로 결과가 확실한 쿼리를 1회. True 면 세션·IP 는 정상."""
+        try:
+            cp = build_params(CANARY_KEYWORD, area_code, only_on_sale, None, None)
+            cr = sess.get(BUYSELL, params=cp, proxy=cur_proxy,
+                          headers=headers or None, timeout=8)
+            ca = parse_articles(cr.text)
+        except Exception:
+            return False
+        return bool(ca)
+
+    def meta(tries, **extra):
+        m = {"tries": tries, "empties": empties, "blocked": blocked,
+             "rotations": rotations, "proxy": cur_proxy,
+             "canaries": canaries,
+             "kinds": dict(kinds), "diagnosis": summarize(kinds)}
+        m.update(extra)
+        return m
 
     for i in range(max_retry):
         if should_stop and should_stop():
-            return [], {"tries": i, "empties": empties, "blocked": blocked,
-                        "rotations": rotations, "proxy": cur_proxy, "stopped": True}
+            return [], meta(i, stopped=True)
         try:
             r = sess.get(BUYSELL, params=params, proxy=cur_proxy,
                          headers=headers or None, timeout=8)
+            status, html, hdrs = r.status_code, r.text, r.headers
         except Exception:
-            blocked += 1
-            rotate(exhausted=False)     # 네트워크 실패는 예산 문제 아님
-            time.sleep(empty_backoff)
+            status, html, hdrs = None, None, None
+        arts = parse_articles(html) if html is not None else None
+        kind, cool = classify(status, html, arts, hdrs)
+        kinds[kind] = kinds.get(kind, 0) + 1
+        throttle.observe(kind)      # 차단신호면 전역 감속, 조용하면 서서히 회복
+
+        if kind == "OK":
+            return arts, meta(i + 1)
+        if kind == "EMPTY":
+            # 시점별 변동 → 그 IP 를 더 두드리지 말고 바로 다음 IP 로(A/B 실측).
+            empties += 1
+            streak += 1
+            empty_run += 1
+            # 빈응답이 연속되면 원인 판별: 세션·IP 문제인가, 이 쿼리만 그런가.
+            if empty_run >= canary_after and canaries < canary_max:
+                canaries += 1
+                if _canary_ok():
+                    # 같은 세션·같은 IP 로 다른 쿼리는 정상 → 재시도해봐야 헛돈다.
+                    return [], meta(i + 1, suppressed=True, canary="ok")
+                empty_run = 0        # 카나리아도 실패 = 진짜 차단 → 계속 재시도
+            if streak >= empty_rotate_after:
+                rotate(cooldown=False)
+            time.sleep(throttle.scale(empty_backoff))
             continue
-        arts = parse_articles(r.text)
-        if arts is None:                # 차단/구조변경 = 하드
-            blocked += 1
-            rotate(exhausted=True)      # 하드차단은 그 IP 를 쉬게 함
-            time.sleep(empty_backoff)
+
+        blocked += 1
+        if kind in NOT_IP_FAULT:
+            # PARSE(구조변경)·SERVER(5xx) 는 IP 를 갈아도 안 풀린다.
+            # 여러 IP 에서 연속으로 나면 더 태우지 말고 조기중단.
+            not_ip_streak += 1
+            if not_ip_streak >= give_up_after:
+                return [], meta(i + 1, gave_up=kind)
+            time.sleep(throttle.scale(empty_backoff))
             continue
-        if arts:                        # 정상
-            return arts, {"tries": i + 1, "empties": empties, "blocked": blocked,
-                          "rotations": rotations, "proxy": cur_proxy}
-        # 빈응답: 초반이면 워밍(같은 IP 유지), 연속으로 쌓이면 예산소진(교체).
-        empties += 1
-        streak += 1
-        if streak >= empty_rotate_after:
-            rotate(exhausted=True)
-        time.sleep(empty_backoff)
-    # 재시도 소진 — 마지막까지 빈응답이었다면 그 IP 는 쉬게 둔다.
-    if streak >= empty_rotate_after:
-        proxy_budget.mark_exhausted(cur_proxy, cooldown_sec)
-    return [], {"tries": max_retry, "empties": empties, "blocked": blocked,
-                "rotations": rotations, "proxy": cur_proxy}
+        not_ip_streak = 0
+        proxy_budget.mark_exhausted(cur_proxy, cool or cooldown_sec)
+        rotate(cooldown=False)          # 쿨다운은 위에서 분류별 길이로 이미 걸었음
+        time.sleep(throttle.scale(empty_backoff))
+    # 재시도 소진 = "매물 0건" 이 아니라 "확인 실패". 호출측이 구분할 수 있게 표시한다.
+    # (이 구분이 없으면 소프트차단이 조용한 누락으로 둔갑 — 실측: 샤넬 0건 ↔ 270건)
+    return [], meta(max_retry, exhausted=True)
 
 
 async def robust_fetch_articles_async(
@@ -139,28 +204,30 @@ async def robust_fetch_articles_async(
     min_price: int | None = None,
     max_price: int | None = None,
     access_token: str | None = None,
-    max_retry: int = 15,
-    empty_backoff: float = 0.8,
+    max_retry: int = 45,          # 실측 22회 필요 사례 확인(2026-08-26) → 30 은 소진 위험
+    empty_backoff: float = 0.5,   # 0.1~0.8 유의차 없음 → 중간값
     next_proxy: Callable[[], str | None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     proxies: list | None = None,
     empty_rotate_after: int = proxy_budget.EMPTY_ROTATE_AFTER,
     cooldown_sec: float = proxy_budget.COOLDOWN_SEC,
+    give_up_after: int = 3,       # IP 탓 아닌 실패(PARSE/5xx) 연속 이 횟수면 조기중단
 ) -> tuple[list, dict]:
-    """auto(aiohttp)용 — 빈응답=소프트블록 재시도. 같은 session 재사용해 워밍업 1회.
-    session 은 aiohttp.ClientSession(cookie_jar 기본). 여러 지역에 재사용 권장.
-    sync 판과 동일하게 프록시 로테이션·예산 쿨다운 지원(교체 시 cookie_jar 를 비워 콜드세션 시작).
+    """auto(aiohttp)용 — 빈응답=소프트블록 재시도. sync 판과 동일한 교체 전략.
+    session 은 aiohttp.ClientSession. (실측상 세션 재사용이 성공률을 올려주진 않았다 —
+    같은 세션으로 이어 붙여도 지역마다 25회/12회/1회로 요동. 재사용은 연결 재활용 이득만.)
     ※ 같은 IP 로 동시요청하면 전멸(실측 8/8 빈응답) → 레인당 1워커 순차로 호출할 것."""
     import asyncio
     from aiohttp import ClientTimeout
     params = build_params(keyword, area_code, only_on_sale, min_price, max_price)
     headers = build_headers(BUYSELL, access_token)
     cur_proxy = proxy or proxy_budget.pick(proxies)
-    empties = blocked = rotations = streak = 0
+    empties = blocked = rotations = streak = not_ip_streak = 0
+    kinds: dict = {}
 
-    def rotate(exhausted: bool):
+    def rotate(cooldown: bool):
         nonlocal cur_proxy, rotations, streak
-        if exhausted:
+        if cooldown:
             proxy_budget.mark_exhausted(cur_proxy, cooldown_sec)
         if proxies:
             nxt = proxy_budget.pick(proxies, exclude=cur_proxy)
@@ -178,35 +245,50 @@ async def robust_fetch_articles_async(
         streak = 0
         return True
 
+    def meta(tries, **extra):
+        m = {"tries": tries, "empties": empties, "blocked": blocked,
+             "rotations": rotations, "proxy": cur_proxy,
+             "kinds": dict(kinds), "diagnosis": summarize(kinds)}
+        m.update(extra)
+        return m
+
     for i in range(max_retry):
         if should_stop and should_stop():
-            return [], {"tries": i, "empties": empties, "blocked": blocked,
-                        "rotations": rotations, "proxy": cur_proxy, "stopped": True}
+            return [], meta(i, stopped=True)
+        status = html = hdrs = None
         try:
             async with session.get(BUYSELL, params=params, proxy=cur_proxy,
                                    headers=headers or None,
                                    timeout=ClientTimeout(8)) as resp:
+                status, hdrs = resp.status, resp.headers
                 html = await resp.text()
         except Exception:
-            blocked += 1
-            rotate(exhausted=False)
-            await asyncio.sleep(empty_backoff)
+            pass
+        arts = parse_articles(html) if html is not None else None
+        kind, cool = classify(status, html, arts, hdrs)
+        kinds[kind] = kinds.get(kind, 0) + 1
+        throttle.observe(kind)      # 차단신호면 전역 감속, 조용하면 서서히 회복
+
+        if kind == "OK":
+            return arts, meta(i + 1)
+        if kind == "EMPTY":
+            empties += 1
+            streak += 1
+            if streak >= empty_rotate_after:
+                rotate(cooldown=False)
+            await asyncio.sleep(throttle.scale(empty_backoff))
             continue
-        arts = parse_articles(html)
-        if arts is None:
-            blocked += 1
-            rotate(exhausted=True)
-            await asyncio.sleep(empty_backoff)
+
+        blocked += 1
+        if kind in NOT_IP_FAULT:
+            not_ip_streak += 1
+            if not_ip_streak >= give_up_after:
+                return [], meta(i + 1, gave_up=kind)
+            await asyncio.sleep(throttle.scale(empty_backoff))
             continue
-        if arts:
-            return arts, {"tries": i + 1, "empties": empties, "blocked": blocked,
-                          "rotations": rotations, "proxy": cur_proxy}
-        empties += 1
-        streak += 1
-        if streak >= empty_rotate_after:
-            rotate(exhausted=True)
-        await asyncio.sleep(empty_backoff)
-    if streak >= empty_rotate_after:
-        proxy_budget.mark_exhausted(cur_proxy, cooldown_sec)
-    return [], {"tries": max_retry, "empties": empties, "blocked": blocked,
-                "rotations": rotations, "proxy": cur_proxy}
+        not_ip_streak = 0
+        proxy_budget.mark_exhausted(cur_proxy, cool or cooldown_sec)
+        rotate(cooldown=False)
+        await asyncio.sleep(throttle.scale(empty_backoff))
+    # sync 판과 동일 — 소진은 "0건" 이 아니라 "확인 실패"
+    return [], meta(max_retry, exhausted=True)

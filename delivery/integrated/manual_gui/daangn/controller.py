@@ -102,10 +102,17 @@ class MainController(QObject):
             self.proxies.append(proxy)
         return err
 
+    def effective_workers(self) -> int:
+        """실제 동시 요청 수 — 프록시 수를 넘을 수 없다(같은 IP 동시요청 = 차단)."""
+        n = len(self.proxies)
+        return max(1, min(self.max_workers, n)) if n else self.max_workers
+
     def status_summary(self) -> str:
+        eff = self.effective_workers()
+        workers = f"{eff}개" if eff == self.max_workers else f"{eff}개(설정 {self.max_workers})"
         return (
             f"당근 검색기 (프록시 {len(self.proxies)}개, "
-            f"동시 요청 {self.max_workers}개, 요청별 최소 대기 시간 {self.req_min_ms}ms)"
+            f"동시 요청 {workers}, 요청별 최소 대기 시간 {self.req_min_ms}ms)"
         )
 
     def start_task(

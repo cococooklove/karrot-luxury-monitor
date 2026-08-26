@@ -44,7 +44,7 @@ ck("검색폼→CrawlTask(추가/제외/적응형/가격)",
 
 print("\n=== 3. 수동 실데이터 경로 (프록시로 실수집) ===")
 try:
-    prods = api.get_products_adaptive("강남구-381", "강남구", "샤넬가방", True, 500000, 3000000,
+    prods = api.get_products_adaptive("강남구-381", "강남구", "샤넬", True, 500000, 3000000,
                                       proxy=PROXIES[0],
                                       rule=KeywordRule(required=["샤넬"], exclude=["레플", "미러"]))
     ck("적응형+필터+가격 실수집", len(prods) > 0, f"{len(prods)}건")
