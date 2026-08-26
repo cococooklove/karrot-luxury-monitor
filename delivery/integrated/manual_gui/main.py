@@ -892,10 +892,10 @@ class MainWindow(QMainWindow):
         sel = self._selected_auto_regions()
         if sel:
             cfg["scope"] = "regions"; cfg["regions"] = sel
-            self.autoLog.append(f"[지역] 선택 {len(sel)}개 구")
+            self.autoLog.append(f"[지역] 선택 {len(sel)}개 동")
         else:
             cfg["scope"] = "nationwide"
-            self.autoLog.append("[지역] 전국(구단위)")
+            self.autoLog.append("[지역] 전국(동 단위)")
         self.auto_monitor = AutoMonitor(self, cfg)
         self.auto_monitor.log.connect(lambda m: self.autoLog.append(m))
         self.auto_monitor.found.connect(self.on_auto_found)

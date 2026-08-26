@@ -168,6 +168,28 @@ ck("접미어 시도 상한 준수",
    sum(1 for k in seq2 if k.startswith("샤넬") and k != "샤넬") <= adaptive.EXPAND_TRIES,
    f"{[k for k in seq2 if k != '샤넬']}")
 
+print("\n=== B4. 지역 코드: 동 단위여야 함 (구 ID 는 폴백) ===")
+
+dongs = adaptive.load_dong_regions("./OUT.json")
+gus = adaptive.load_gu_regions("./OUT.json")
+ck("동 목록 로드", len(dongs) > 6000, f"{len(dongs)}개")
+ck("구 대비 25배 이상", len(dongs) / max(len(gus), 1) > 20, f"동 {len(dongs)} / 구 {len(gus)}")
+import json as _json
+_ids = {l["id"] for b in _json.load(open("./OUT.json", encoding="utf-8"))
+        for l in b.get("locations", []) if l.get("depth") == 3}
+ck("동 코드가 전부 실제 동 ID",
+   all(int(r["in"].rsplit("-", 1)[1]) in _ids for r in dongs[:200]),
+   f"샘플 200개 검사")
+ck("구 코드는 동 ID 가 아님(폴백 원인)",
+   all(int(r["in"].rsplit("-", 1)[1]) not in _ids for r in gus[:50]),
+   f"예: {gus[0]['in']}")
+
+import daangn.auto_monitor as am
+am_regions = am.AutoMonitor.__dict__["_regions"]
+_dummy = type("D", (), {"cfg": {"scope": "nationwide", "out_json": "./OUT.json"}})()
+ck("전국 스코프가 동 목록을 사용", len(am_regions(_dummy)) == len(dongs),
+   f"{len(am_regions(_dummy))}개")
+
 print("\n=== C. get_products: 소진과 실패 메시지 구분 ===")
 
 import daangn.api as api

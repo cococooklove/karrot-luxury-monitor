@@ -3,14 +3,14 @@ import sys, os, time, json, csv, random, threading
 import concurrent.futures as cf
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from daangn_ext.adaptive import collect_region, load_gu_regions
+from daangn_ext.adaptive import collect_region, load_dong_regions
 from daangn_ext.search_filters import KeywordRule
 
 BRAND = sys.argv[1] if len(sys.argv) > 1 else "샤넬"
 OUT = "/private/tmp/claude-501/-Users-younglee---------/efe67086-6c00-4dc8-804b-6e28b11e67aa/scratchpad/manual/OUT.json"
 PROXIES = [l.strip() for l in open("proxies.txt") if l.strip()]
 
-gus = [r["in"] for r in load_gu_regions(OUT)]
+gus = [r["in"] for r in load_dong_regions(OUT)]   # 구 ID 는 폴백됨 → 동 단위
 rule = KeywordRule(required=[BRAND], exclude=["레플", "미러", "이미테이션", "st", "스타일"])
 print(f"브랜드 '{BRAND}' / 전국 구 {len(gus)}개 / 프록시 {len(PROXIES)}개")
 

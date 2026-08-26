@@ -3,8 +3,10 @@
 
 원리:
   - 당근은 요청당 ~290건 상한 + 페이징 없음.
-  - 동(6537) 대신 **구(252)** 단위로 훑으면 26배 적은 요청.
-  - 구가 상한에 차면(포화=매물 잘림) **가격 범위를 이분 재귀 분할**해 상한 우회.
+  - `in` 파라미터는 **동 ID 만** 받는다. 구 ID 를 넣으면 에러 없이 대표 동 하나로
+    폴백해 나머지 동을 통째로 누락시킨다(실측: 강남구-381 → 역삼동 258건만,
+    동 6개 합집합 1,544건 중 1,286건 유실). 반드시 load_dong_regions() 로 순회할 것.
+  - 동이 상한에 차면(포화=매물 잘림) **가격 범위를 이분 재귀 분할**해 상한 우회.
     [0,1억] → 포화면 [0,5천만]+[5천만,1억] → 또 포화면 계속 반분. + [1억,∞) 초고가 버킷.
   - 전 구간 합집합을 id 로 중복제거 → 완전 수집.
 
@@ -125,8 +127,38 @@ def collect_region(
     return list(seen.values()), stats
 
 
+def load_dong_regions(out_json_path: str) -> list[dict]:
+    """OUT.json → 전국 동(depth 3) 목록 [{'in':'역삼동-6035', ...}].
+
+    당근 웹의 `in` 파라미터는 **동 ID 만** 받는다. 구 ID 를 넘기면 에러가 아니라
+    임의의 대표 동 하나로 폴백해 조용히 그 동 결과만 돌려준다.
+    실측(2026-08-27, '가방'): 강남구-381 → 258건인데 전부 역삼동.
+    역삼동-6035 와 100% 동일하고, 대치/청담/논현/삼성/압구정 매물은 0건 포함.
+    동 6개만 합쳐도 1,544건 → 구 조회는 강남구 31개 동 중 1개만 커버(약 3%).
+    """
+    import json
+    d = json.load(open(out_json_path, encoding="utf-8"))
+    out, seen = [], set()
+    for b in d:
+        for l in b.get("locations", []):
+            if l.get("depth") != 3:
+                continue
+            code = f"{l['name']}-{l['id']}"
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append({"in": code, "name1": l.get("name1"),
+                        "name2": l.get("name2"), "name3": l.get("name3")})
+    return out
+
+
 def load_gu_regions(out_json_path: str) -> list[dict]:
-    """OUT.json → 전국 구(name2) 목록 [{'in':'강남구-381','name1':..,'name2':..}]."""
+    """⚠️ 수집에 쓰지 말 것 — 구 ID 는 당근 `in` 파라미터가 받지 않는다.
+
+    반환하는 'in'(예: '강남구-381')을 그대로 조회하면 대표 동 하나로 폴백해
+    구의 나머지 동이 통째로 누락된다. 지역 목록 표시 등 비수집 용도로만.
+    수집은 load_dong_regions() 를 쓸 것.
+    """
     import json
     d = json.load(open(out_json_path, encoding="utf-8"))
     locs = []

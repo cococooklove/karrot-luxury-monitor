@@ -22,6 +22,7 @@ from .rest_scheduler import sleep_between, asleep_between
 from .robust import (robust_fetch_articles, robust_fetch_articles_async,
                      parse_articles, build_params)
 from .adaptive import (collect_region, collect_nationwide, load_gu_regions,
+                       load_dong_regions,
                        collect_region_async, collect_nationwide_async,
                        collect_lanes, collect_lanes_async,
                        shard_proxies, plan_lanes)
@@ -40,7 +41,7 @@ __all__ = [
     "fetch_detail", "fetch_details", "crawl_refused", "report_text",
     "robust_fetch_articles", "robust_fetch_articles_async",
     "parse_articles", "build_params",
-    "collect_region", "collect_nationwide", "load_gu_regions",
+    "collect_region", "collect_nationwide", "load_gu_regions", "load_dong_regions",
     "collect_region_async", "collect_nationwide_async",
     "collect_lanes", "collect_lanes_async", "shard_proxies", "plan_lanes",
 ]

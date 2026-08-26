@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from daangn_ext.search_filters import KeywordRule
-from daangn_ext.adaptive import collect_region, collect_lanes, load_gu_regions
+from daangn_ext.adaptive import collect_region, collect_lanes, load_dong_regions
 from daangn_ext import throttle
 from daangn_ext.rest_scheduler import _rand_between
 from daangn.notify import TelegramSender, SheetWriter
@@ -189,7 +189,8 @@ class AutoMonitor(QThread):
     # ── 대상 지역 ──
     def _regions(self):
         if self.cfg.get("scope") == "nationwide":
-            return [r["in"] for r in load_gu_regions(self.cfg["out_json"])]
+            # 동 단위여야 한다. 구 ID 는 당근이 대표 동으로 폴백시켜 나머지를 통째로 누락시킴.
+            return [r["in"] for r in load_dong_regions(self.cfg["out_json"])]
         return self.cfg.get("regions", [])
 
     def _dedup_notify(self, arts, region, min_p, max_p, days):
@@ -239,7 +240,7 @@ class AutoMonitor(QThread):
         self.log.emit(f"[휴식] 사이클 {rmin:.0f}~{rmax:.0f}s · 지역 간 {gmin:.1f}~{gmax:.1f}s")
         try:
             regions = self._regions()
-            self.log.emit(f"[지역] {len(regions)}개 (전국 구단위)")
+            self.log.emit(f"[지역] {len(regions)}개 (동 단위)")
             cycle = 0
             while not self._stop:
                 cycle += 1

@@ -65,7 +65,7 @@ print("\n=== 5. 자동 모니터 end-to-end (실데이터, 프록시, 3구) ==="
 dbp = tempfile.mktemp(suffix=".db")
 cfg = {"keyword": "샤넬", "extra": [], "exclude": ["레플", "미러"], "min": None, "max": None,
        "days": None, "rest_min": 1, "rest_max": 2, "proxies": PROXIES,
-       "scope": "regions", "regions": ["강남구-381", "서초구-379", "송파구-383"],
+       "scope": "regions", "regions": ["역삼동-6035", "대치동-6032", "청담동-386"],   # 동 코드여야 함(구 ID 는 폴백됨)
        "out_json": "./OUT.json", "db_path": dbp}
 mon = AutoMonitor(w, cfg)
 logs = []
