@@ -1,0 +1,33 @@
+# ── 자격증명 / 비밀 (절대 커밋 금지) ──
+# settings.txt: 1줄 간격, 2줄 동시요청, 3줄~ 프록시(계정:암호 포함)
+settings.txt
+proxies.txt
+report_*.log
+accounts.json
+# 텔레그램 봇 토큰
+notify.json
+# 구글 서비스계정 키
+credentials.json
+# 추출된 인증/디바이스 헤더
+data/config.json
+# mitmproxy 캡처(토큰 원문 포함 가능)
+data/capture.jsonl
+
+# ── 런타임 상태 / 산출물 ──
+*.db
+*.sqlite3
+*.xlsx
+
+# ── 환경 ──
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# ── 도구 부산물 ──
+.playwright-mcp/
+.claude/settings.local.json
+.DS_Store

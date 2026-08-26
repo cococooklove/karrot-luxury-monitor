@@ -1,0 +1,2 @@
+class DaangnCancelledError(BaseException):
+    pass

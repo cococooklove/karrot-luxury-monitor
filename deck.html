@@ -1,0 +1,324 @@
+<title>당근부동산 수집 타당성</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gothic+A1:wght@500;700;800;900&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap">
+
+<style>
+:root{
+  --bg:#FBF7F2; --surface:#FFFFFF; --surface2:#F4EDE4;
+  --ink:#241C15; --muted:#6B5D50; --faint:#9A8B7C;
+  --line:rgba(36,28,21,.12); --line2:rgba(36,28,21,.06);
+  --accent:#E8590C; --accent-soft:rgba(232,89,12,.10);
+  --good:#2F7A4D; --warn:#B7791F; --crit:#C0392B;
+  --display:'Gothic A1',system-ui,sans-serif;
+  --body:'Noto Sans KR',system-ui,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#1A1512; --surface:#241D18; --surface2:#2E251E;
+    --ink:#F5EEE6; --muted:#B0A192; --faint:#7C6E60;
+    --line:rgba(245,238,230,.14); --line2:rgba(245,238,230,.06);
+    --accent:#FF7A2E; --accent-soft:rgba(255,122,46,.14);
+    --good:#5FB07E; --warn:#E0A94A; --crit:#E06B5C;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#1A1512; --surface:#241D18; --surface2:#2E251E;
+  --ink:#F5EEE6; --muted:#B0A192; --faint:#7C6E60;
+  --line:rgba(245,238,230,.14); --line2:rgba(245,238,230,.06);
+  --accent:#FF7A2E; --accent-soft:rgba(255,122,46,.14);
+  --good:#5FB07E; --warn:#E0A94A; --crit:#E06B5C;
+}
+
+*{box-sizing:border-box}
+html{scroll-snap-type:y mandatory;scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--body);line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  font-variant-numeric:tabular-nums;
+}
+
+.slide{
+  min-height:100dvh;scroll-snap-align:start;
+  display:flex;flex-direction:column;justify-content:center;
+  padding:clamp(28px,6vw,110px);
+  position:relative;border-bottom:1px solid var(--line2);
+}
+.inner{width:100%;max-width:1000px;margin:0 auto}
+
+.eyebrow{
+  font-family:var(--display);font-weight:700;font-size:.74rem;
+  letter-spacing:.22em;text-transform:uppercase;color:var(--accent);
+  display:flex;align-items:center;gap:.7em;margin-bottom:1.4rem;
+}
+.eyebrow::before{content:"";width:26px;height:2px;background:var(--accent)}
+
+h1{
+  font-family:var(--display);font-weight:900;
+  font-size:clamp(2.1rem,6.4vw,4.6rem);line-height:1.04;
+  letter-spacing:-.02em;text-wrap:balance;margin:0 0 1.2rem;
+}
+h2{
+  font-family:var(--display);font-weight:800;
+  font-size:clamp(1.6rem,4vw,2.9rem);line-height:1.1;
+  letter-spacing:-.015em;text-wrap:balance;margin:0 0 1.6rem;
+}
+.lead{font-size:clamp(1.05rem,2vw,1.4rem);color:var(--muted);max-width:60ch;text-wrap:pretty}
+p{margin:0 0 1rem;max-width:64ch}
+strong{font-weight:700;color:var(--ink)}
+.hl{color:var(--accent);font-weight:700}
+
+/* title slide */
+.title-badge{
+  display:inline-flex;align-items:center;gap:.55em;
+  font-family:var(--display);font-weight:700;font-size:.8rem;
+  letter-spacing:.05em;color:var(--muted);
+  border:1px solid var(--line);border-radius:100px;
+  padding:.5em 1em;margin-bottom:2.2rem;
+}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--accent)}
+.title-meta{margin-top:2.6rem;display:flex;gap:2.4rem;flex-wrap:wrap;
+  font-size:.9rem;color:var(--faint)}
+.title-meta b{display:block;color:var(--ink);font-family:var(--display);font-weight:700;font-size:1rem;margin-top:.2rem}
+
+/* stat grid */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;
+  background:var(--line2);border:1px solid var(--line2);border-radius:14px;overflow:hidden;margin-top:.5rem}
+.stat{background:var(--surface);padding:1.5rem 1.4rem}
+.stat .num{font-family:var(--display);font-weight:900;font-size:clamp(1.8rem,4vw,2.7rem);
+  line-height:1;letter-spacing:-.02em;color:var(--accent)}
+.stat .num.ink{color:var(--ink)}
+.stat .lab{margin-top:.6rem;font-size:.82rem;color:var(--muted);line-height:1.4}
+
+/* compare rows */
+.rows{display:flex;flex-direction:column;gap:.7rem;margin-top:.5rem}
+.row{display:grid;grid-template-columns:auto 1fr;gap:1rem;align-items:baseline;
+  padding:1rem 1.2rem;background:var(--surface);border:1px solid var(--line);border-radius:12px}
+.row .k{font-family:var(--display);font-weight:800;font-size:.95rem;white-space:nowrap}
+.row .v{color:var(--muted);font-size:.95rem}
+.tag{font-family:var(--display);font-weight:700;font-size:.7rem;letter-spacing:.04em;
+  padding:.25em .7em;border-radius:100px;white-space:nowrap}
+.tag.no{background:rgba(192,57,43,.12);color:var(--crit)}
+.tag.yes{background:rgba(47,122,77,.14);color:var(--good)}
+.tag.warn{background:rgba(183,121,31,.14);color:var(--warn)}
+
+/* data table */
+table{width:100%;border-collapse:collapse;margin-top:.5rem;font-size:.95rem}
+th,td{text-align:left;padding:.85rem 1rem;border-bottom:1px solid var(--line)}
+th{font-family:var(--display);font-weight:700;font-size:.76rem;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--faint)}
+td.n{text-align:right;font-family:var(--mono);font-weight:500}
+td .big{font-family:var(--display);font-weight:800;color:var(--accent);font-size:1.15rem}
+tr:last-child td{border-bottom:none}
+
+.mono{font-family:var(--mono);font-size:.86rem;background:var(--surface2);
+  padding:.15em .5em;border-radius:6px;color:var(--ink)}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:2.4rem}
+@media(max-width:720px){.two{grid-template-columns:1fr;gap:1.4rem}}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:1.5rem}
+.card h3{font-family:var(--display);font-weight:800;font-size:1.1rem;margin:0 0 .8rem;display:flex;align-items:center;gap:.5em}
+.card ul{margin:0;padding-left:1.1em;color:var(--muted);font-size:.94rem}
+.card li{margin-bottom:.5rem}
+.card li::marker{color:var(--accent)}
+
+.steps{counter-reset:s;display:flex;flex-direction:column;gap:.8rem;margin-top:.5rem}
+.step{display:grid;grid-template-columns:auto 1fr;gap:1.1rem;align-items:baseline;
+  padding:1rem 1.3rem;background:var(--surface);border:1px solid var(--line);border-radius:12px}
+.step::before{counter-increment:s;content:counter(s);font-family:var(--display);font-weight:900;
+  color:var(--accent);font-size:1.3rem;line-height:1}
+.step b{font-family:var(--display);font-weight:700}
+.step span{color:var(--muted);font-size:.92rem}
+
+/* nav */
+.nav{position:fixed;right:clamp(14px,2.5vw,34px);top:50%;transform:translateY(-50%);
+  display:flex;flex-direction:column;gap:12px;z-index:20}
+.nav a{width:9px;height:9px;border-radius:50%;background:var(--line);
+  border:1px solid transparent;transition:background .2s,transform .2s;display:block}
+.nav a:hover{background:var(--faint)}
+.nav a.on{background:var(--accent);transform:scale(1.35)}
+.counter{position:fixed;left:clamp(16px,3vw,40px);bottom:clamp(16px,3vw,34px);
+  font-family:var(--mono);font-size:.8rem;color:var(--faint);z-index:20}
+.counter b{color:var(--ink)}
+.hint{position:fixed;right:clamp(16px,3vw,40px);bottom:clamp(16px,3vw,34px);
+  font-size:.72rem;color:var(--faint);z-index:20;font-family:var(--display);letter-spacing:.04em}
+.toggle{position:fixed;left:clamp(16px,3vw,40px);top:clamp(16px,3vw,28px);z-index:20;
+  font-family:var(--display);font-weight:700;font-size:.72rem;letter-spacing:.06em;
+  background:var(--surface);color:var(--muted);border:1px solid var(--line);
+  border-radius:100px;padding:.5em .9em;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
+.note{font-size:.8rem;color:var(--faint);margin-top:1.4rem}
+
+/* PDF/인쇄: 슬라이드 1장 = 1페이지 (가로) */
+@media print{
+  @page{size:1280px 720px;margin:0}
+  html{scroll-snap-type:none}
+  body{background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .nav,.counter,.hint,.toggle{display:none!important}
+  .slide{min-height:720px;height:720px;page-break-after:always;break-after:page;
+    border:none;padding:70px 90px}
+  .slide:last-child{page-break-after:auto}
+}
+</style>
+
+<button class="toggle" id="tg" aria-label="테마 전환">◑ 테마</button>
+<nav class="nav" id="nav" aria-label="슬라이드"></nav>
+<div class="counter"><b id="cur">01</b> / 07</div>
+<div class="hint">↓ 또는 → 로 이동</div>
+
+<!-- 1 -->
+<section class="slide" id="s1">
+  <div class="inner">
+    <span class="title-badge"><span class="dot"></span>당근부동산 매물 수집 · 타당성 &amp; 성능 보고</span>
+    <h1>토큰 없이,<br>전국 매물을 수집한다</h1>
+    <p class="lead">에뮬레이터 토큰 방식은 구조적으로 막힌다. 그러나 <span class="hl">당근부동산 웹 API가 무인증으로 매물 데이터를 반환</span>한다 — 실측으로 확인.</p>
+    <div class="title-meta">
+      <div>결론<b>구현 가능 · 더 안정적</b></div>
+      <div>전국 규모<b>약 50만 건</b></div>
+      <div>기본 수집<b>약 3시간</b></div>
+    </div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="slide" id="s2">
+  <div class="inner">
+    <span class="eyebrow">문제</span>
+    <h2>토큰 재생 방식이 막히는 이유</h2>
+    <p class="lead">당근 <strong>앱</strong>은 토큰 하나로 인증하지 않는다. 요청마다 아래를 함께 검사 — 하나만 빠져도 차단.</p>
+    <div class="rows">
+      <div class="row"><span class="k">기기 바인딩</span><span class="v">토큰이 로그인한 기기에 묶임 — 다른 환경이면 불일치</span></div>
+      <div class="row"><span class="k">무결성 검사</span><span class="v">Play Integrity — 에뮬레이터(LD플레이어)는 통과 불가</span></div>
+      <div class="row"><span class="k">요청 서명</span><span class="v">앱 런타임이 생성하는 서명 헤더 — 스크립트엔 없음</span></div>
+    </div>
+    <p class="note">→ “토큰 추출 → HTTP 재생”은 세팅 문제가 아니라 <strong>방식의 한계</strong>. 우회보다 경로 전환이 정답.</p>
+  </div>
+</section>
+
+<!-- 3 -->
+<section class="slide" id="s3">
+  <div class="inner">
+    <span class="eyebrow">전환</span>
+    <h2>웹 GraphQL — 인증 자체가 필요 없다</h2>
+    <p class="lead">당근부동산 웹(<span class="mono">realty.daangn.com</span>)의 데이터 API는 로그아웃 상태로 실제 매물을 전부 반환한다. 토큰·기기·에뮬 문제가 <span class="hl">전부 소멸</span>.</p>
+    <div class="stats">
+      <div class="stat"><div class="num ink">0</div><div class="lab">필요한 인증 헤더<br>(토큰·기기·서명 없음)</div></div>
+      <div class="stat"><div class="num ink">200</div><div class="lab">로그아웃 상태<br>실제 매물 응답 확인</div></div>
+      <div class="stat"><div class="num">전건</div><div class="lab">주소·사진·중개사·<br>매물유형·좌표 반환</div></div>
+    </div>
+    <p class="note">유일한 관문: 서버가 <strong>등록된 쿼리(Persisted Query)만 허용</strong> → sha256 해시 1회 추출(2분)로 해결.</p>
+  </div>
+</section>
+
+<!-- 4 -->
+<section class="slide" id="s4">
+  <div class="inner">
+    <span class="eyebrow">실측 데이터</span>
+    <h2>측정된 사실</h2>
+    <div class="two">
+      <div>
+        <div class="rows">
+          <div class="row"><span class="k">엔드포인트</span><span class="v mono">realty.kr.karrotmarket.com/graphql</span></div>
+          <div class="row"><span class="k">인증</span><span class="v"><span class="tag yes">불필요</span> content-type + platform 헤더만</span></div>
+          <div class="row"><span class="k">레이트리밋</span><span class="v"><span class="tag warn">100 / 60초</span> IP당</span></div>
+          <div class="row"><span class="k">응답 지연</span><span class="v">서버 145ms · 왕복 ~185ms</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>지역별 매물수 (실측 예)</h3>
+        <table>
+          <tr><td>강남구</td><td class="n"><span class="big">15,150</span></td></tr>
+          <tr><td>관악구</td><td class="n">14,506</td></tr>
+          <tr><td>안산 상록구</td><td class="n">8,311</td></tr>
+          <tr><td>평택시</td><td class="n">7,520</td></tr>
+          <tr><td>마포구</td><td class="n">7,478</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 5 -->
+<section class="slide" id="s5">
+  <div class="inner">
+    <span class="eyebrow">규모</span>
+    <h2>전국 총 매물 ≈ 50만 건</h2>
+    <div class="stats">
+      <div class="stat"><div class="num">~50만</div><div class="lab">전국 추정 총계</div></div>
+      <div class="stat"><div class="num ink">~25만</div><div class="lab">수도권 (실측 합산)</div></div>
+      <div class="stat"><div class="num ink">지역+유형</div><div class="lab">검색 단위<br>(키워드 검색 아님)</div></div>
+    </div>
+    <p class="note">수도권 실측: 서울 ~9.5만 · 인천 ~3만 · 경기 ~12만. 수도권이 통상 50~55% → 전국 45만~55만.
+    정확값은 전국 <span class="mono">articleClusters</span> 스윕으로 자동 산출.</p>
+  </div>
+</section>
+
+<!-- 6 -->
+<section class="slide" id="s6">
+  <div class="inner">
+    <span class="eyebrow">성능</span>
+    <h2>전국 수집 소요시간</h2>
+    <table>
+      <thead><tr><th>수집 범위</th><th class="n" style="text-align:right">요청 수</th><th class="n" style="text-align:right">단일 IP</th></tr></thead>
+      <tbody>
+        <tr><td><strong>매물 기본정보</strong><br><span style="color:var(--faint);font-size:.85rem">목록 페이지네이션</span></td><td class="n">~17,000</td><td class="n"><span class="big">~3시간</span></td></tr>
+        <tr><td><strong>전건 상세정보</strong><br><span style="color:var(--faint);font-size:.85rem">매물 1건 = 1요청</span></td><td class="n">~500,000</td><td class="n"><span class="big">~80시간</span></td></tr>
+        <tr><td>신규 매물 모니터<br><span style="color:var(--faint);font-size:.85rem">최신 목록만 폴링</span></td><td class="n">지역별 소량</td><td class="n">수분</td></tr>
+      </tbody>
+    </table>
+    <p class="note">병목은 응답 속도가 아니라 <strong>요청 제한(분당 100건)</strong>. 병렬 IP N대 → 시간 1/N (상세수집 IP 10대 ≈ 8시간).</p>
+  </div>
+</section>
+
+<!-- 7 -->
+<section class="slide" id="s7">
+  <div class="inner">
+    <span class="eyebrow">다음 단계 &amp; 유의</span>
+    <h2>착수 준비 완료</h2>
+    <div class="two">
+      <div>
+        <div class="steps">
+          <div class="step"><b>쿼리 해시 추출</b><span>clusters·목록·상세 3개, DevTools 1회 (2분)</span></div>
+          <div class="step"><b>전국 카운트 스윕</b><span>정확 총계 + 지역별 분포 자동 집계</span></div>
+          <div class="step"><b>수집 &amp; 모니터 가동</b><span>지역 필터 + 신규 매물 알림</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--warn)">⚠ 유의사항</h3>
+        <ul>
+          <li>당근 약관상 자동수집은 <strong>계정·IP 제재 리스크</strong> — 속도·용도 조율 필수</li>
+          <li>분당 100건 초과 시 429 → 자동 대기 반영</li>
+          <li>쿼리 해시는 배포마다 변경 가능 → 주기 점검(유지보수 포인트)</li>
+        </ul>
+      </div>
+    </div>
+    <p class="note">수집기·진단킷·실측 문서 구축 완료. 해시 확보 즉시 전국 수집 착수 가능.</p>
+  </div>
+</section>
+
+<script>
+const n=7, nav=document.getElementById('nav'), cur=document.getElementById('cur');
+const slides=[...document.querySelectorAll('.slide')];
+for(let i=0;i<n;i++){const a=document.createElement('a');a.href='#s'+(i+1);a.setAttribute('aria-label','슬라이드 '+(i+1));nav.appendChild(a);}
+const dots=[...nav.children];
+const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){
+  const i=slides.indexOf(e.target);dots.forEach((d,j)=>d.classList.toggle('on',j===i));
+  cur.textContent=String(i+1).padStart(2,'0');
+}})},{threshold:.5});
+slides.forEach(s=>io.observe(s));
+addEventListener('keydown',e=>{
+  const i=slides.findIndex(s=>s.getBoundingClientRect().top>=-window.innerHeight/2);
+  if(e.key==='ArrowDown'||e.key==='ArrowRight'||e.key===' '){e.preventDefault();slides[Math.min(i+1,n-1)]?.scrollIntoView();}
+  if(e.key==='ArrowUp'||e.key==='ArrowLeft'){e.preventDefault();slides[Math.max(i-1,0)]?.scrollIntoView();}
+});
+const tg=document.getElementById('tg'),root=document.documentElement;
+let saved;try{saved=localStorage.getItem('deck-theme')}catch(e){}
+if(saved)root.setAttribute('data-theme',saved);
+tg.onclick=()=>{const d=getComputedStyle(root).getPropertyValue('--bg').trim().startsWith('#1')||root.getAttribute('data-theme')==='dark';
+  const t=d?'light':'dark';root.setAttribute('data-theme',t);try{localStorage.setItem('deck-theme',t)}catch(e){}};
+</script>

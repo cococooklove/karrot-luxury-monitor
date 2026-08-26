@@ -1,0 +1,6 @@
+{
+  "tg_token": "123456789:AA_텔레그램봇토큰",
+  "tg_chat": "-1001234567890",
+  "sheet_url": "https://docs.google.com/spreadsheets/d/시트ID/edit",
+  "sheet_cred": "./credentials.json"
+}

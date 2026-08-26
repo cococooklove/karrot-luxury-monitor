@@ -1,0 +1,29 @@
+[
+  {
+    "name": "acc1",
+    "serial": "emulator-5554",
+    "ld_index": 0,
+    "ldconsole": "C:\\LDPlayer\\LDPlayer9\\ldconsole.exe",
+    "proxy": "http://user:pass@resi-ip-1:port",
+    "headers_file": "data/headers_acc1.json",
+    "token_key": "auth_token",
+    "token_header": "authorization",
+    "token_prefix": "Bearer ",
+    "daily_cap": 250,
+    "warmup_days": 3,
+    "min_gap": 3.0,
+    "first_day": "20260826"
+  },
+  {
+    "name": "acc2",
+    "serial": "emulator-5556",
+    "ld_index": 1,
+    "ldconsole": "C:\\LDPlayer\\LDPlayer9\\ldconsole.exe",
+    "proxy": "http://user:pass@resi-ip-2:port",
+    "headers_file": "data/headers_acc2.json",
+    "token_key": "auth_token",
+    "daily_cap": 250,
+    "warmup_days": 3,
+    "min_gap": 3.0
+  }
+]
