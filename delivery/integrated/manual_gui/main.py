@@ -324,6 +324,16 @@ class MainWindow(QMainWindow):
         self.autoRestMax.setToolTip("사이클(전국 1바퀴) 사이 랜덤 휴식. 10~3600초")
         self.autoGapMin.setToolTip("지역(구) 요청 사이 랜덤 휴식. 0.3~10.0초")
         self.autoGapMax.setToolTip("지역(구) 요청 사이 랜덤 휴식. 0.3~10.0초")
+        # 레인 = 동시에 도는 수집 갈래. 프록시를 샤딩해 나눠 쓰므로 프록시 수를 넘을 수 없고,
+        # 레인당 IP 가 3개 미만이면 빈응답 시 교체할 곳이 없어 오히려 느려진다.
+        # 0 = 자동(프록시 수 ÷ 3). 실측: 레인4 = 순차 대비 2.5배, 매물 손실 0.
+        self.autoLanes = QtWidgets.QSpinBox(w)
+        self.autoLanes.setRange(0, 16); self.autoLanes.setValue(0)
+        self.autoLanes.setSpecialValueText("자동"); self.autoLanes.setFixedWidth(72)
+        self.autoLanes.setToolTip(
+            "동시 수집 갈래(레인) 수. 0=자동(프록시 수 ÷ 3).\n"
+            "레인은 프록시를 나눠 갖는다 — 같은 IP 로 동시요청하면 전부 빈응답이 된다.\n"
+            "프록시가 부족하면 지정값보다 낮게 자동 조정된다.")
         self.autoTokenRefresh = QtWidgets.QCheckBox("토큰 갱신", w)
         self._notify = self._load_notify()
         self.auto_conditions = []
@@ -345,6 +355,8 @@ class MainWindow(QMainWindow):
         r2.addSpacing(16)
         r2.addWidget(QtWidgets.QLabel("지역 간")); r2.addWidget(self.autoGapMin)
         r2.addWidget(QtWidgets.QLabel("~")); r2.addWidget(self.autoGapMax); r2.addWidget(QtWidgets.QLabel("초"))
+        r2.addSpacing(16)
+        r2.addWidget(QtWidgets.QLabel("레인")); r2.addWidget(self.autoLanes)
         r2.addStretch(1)
         fv.addLayout(r0); fv.addLayout(r1); fv.addLayout(r2)
         lay.addWidget(fc)
@@ -865,6 +877,7 @@ class MainWindow(QMainWindow):
             "rest_max": self.autoRestMax.value(),
             "gap_min": self.autoGapMin.value(),
             "gap_max": self.autoGapMax.value(),
+            "lanes": self.autoLanes.value(),        # 0 = 자동(프록시 수 기준)
             "tg_token": self._notify["tg_token"] or None,
             "tg_chat": self._notify["tg_chat"] or None,
             "sheet_url": self._notify["sheet_url"] or None,
