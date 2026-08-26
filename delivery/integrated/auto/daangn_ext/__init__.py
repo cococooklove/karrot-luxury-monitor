@@ -11,6 +11,8 @@ daangn_ext — 기존 manual/auto 수집기에 얹는 드롭인 확장.
   차단 신호 기반 자동 감속(AIMD)      → throttle
   차단 판정(403/429/캡차/구조변경)    → block_signals
   "지금 막혔나" 즉시 진단             → health.health_check
+  프록시별 레인 병렬 수집             → adaptive.collect_lanes
+  상세 수집 + 크롤거부 존중           → detail.fetch_details
 통합 방법: integration_examples.py + DELIVERY.md
 """
 from .token_manager import TokenManager, Account, token_exp, token_code
