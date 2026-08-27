@@ -335,6 +335,10 @@ class MainWindow(QMainWindow):
             "레인은 프록시를 나눠 갖는다 — 같은 IP 로 동시요청하면 전부 빈응답이 된다.\n"
             "프록시가 부족하면 지정값보다 낮게 자동 조정된다.")
         self.autoTokenRefresh = QtWidgets.QCheckBox("토큰 갱신", w)
+        self.autoTokenRefresh.setChecked(True)   # 기본 ON — LDPlayer 자동수확(제로컨피그)
+        self.autoTokenRefresh.setToolTip(
+            "체크 시 LDPlayer 정품앱이 갱신한 access 토큰을 자동 수확(WAF 우회). "
+            "LDPlayer 실행+로그인 상태면 별도 설정 불필요.")
         self._notify = self._load_notify()
         self.auto_conditions = []
 
