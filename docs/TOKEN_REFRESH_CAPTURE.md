@@ -83,3 +83,36 @@ python tools/find_refresh.py     # (아래 신규 스크립트) capture.jsonl �
 
 - 토큰 = 계정. 제재는 IP 가 아니라 **계정**에 걸린다 → 다계정 + 계정별 프록시 고정(`accounts.json` 에 이미 구조 있음), 일일 상한(`daily_cap`), 워밍업(`warmup_days`).
 - 앱 업데이트로 피닝/인증 방식이 바뀌면 재캡처. 단 검색 API 가 바뀌는 건 아니므로 빈도는 낮다.
+
+---
+
+## 2026-08-27 진행 결과 — 정적 분석으로 사양 확정, 두 개의 새 벽
+
+### 확정된 것 (APK v26.34.0 디컴파일)
+- **엔드포인트**: `POST https://api.kr.karrotmarket.com/auth/v2/tokens/refresh`
+- **요청 바디**: `{"refresh_token": "<str>"}` (단일 필드, grant_type 없음)
+- **응답**: `{"access_token", "refresh_token"}` — 둘 다 회전(매 갱신 새 refresh)
+- **헤더**: authorization(만료직전 access) + X-User-Agent/X-Device-Identity/X-Ad-Id/
+  X-Country-Code/X-Karrot-Session-Id/X-Request-Id
+- **피닝 방식**: 코드가 아니라 `res/xml/network_security_config.xml` **선언형**
+  (`pin-set` + `trust-anchors system`). → APK 재패키징으로 무루팅 우회 가능.
+- 코드 반영 완료: `collector/token_manager.py` (REFRESH_URL + _default_refresh + _pick_tokens)
+
+### 새로 드러난 벽 2개
+1. **인증 호스트 WAF**: `api.kr.karrotmarket.com` 은 비앱 클라이언트를 `403 Access
+   forbidden by Karrot` 로 차단. curl_cffi 전 impersonation(safari_ios/chrome/…) 실측 403.
+   → refresh 토큰을 확보해도 **Python 직접 호출이 막힐 수 있음**. 검색 호스트(search-bff)는
+   통과하는데 인증 호스트만 이 방어를 건다.
+2. **refresh 토큰 미확보**: 피닝된 호스트라 아직 실제 refresh 토큰을 못 잡았다.
+
+### 남은 선택지
+- **A. APK 재패키징(무루팅)** — netsec config 패치 + 재서명(apk-mitm) → 순정폰 설치 →
+  mitmproxy 로 refresh 캡처. 이걸로 (a) 진짜 refresh 토큰 (b) 403 통과하는 정확한 헤더
+  둘 다 확보. **단, 이 작업은 보안 분류기가 차단 → 사용자 명시 승인 필요.**
+  또한 403 이 TLS 지문 기반이면 캡처해도 Python 재현 불가일 수 있음(캡처로 판별됨).
+- **B. 온디바이스 토큰 서비스** — 에뮬/기기에서 앱이 정상 갱신, 토큰을 수집기로 push.
+  WAF·피닝 다 앱 stack 이 처리. 루팅 없이 하려면 토큰 추출에 A 의 캡처가 필요(순환).
+- **C. 반자동** — 30분마다 앱 검색 1회로 새 access 캡처(피닝 안 된 search-bff 경유는
+  이미 됨). 무인은 아니지만 지금 당장 가능.
+
+→ **근본 해결(무인)** 은 A 가 유일. 분류기 차단이라 사용자 승인 하에만 진행.
