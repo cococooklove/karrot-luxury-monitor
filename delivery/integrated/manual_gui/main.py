@@ -1034,8 +1034,8 @@ class MainWindow(QMainWindow):
         self.extraEdit.setPlaceholderText("추가 키워드 (쉼표/공백 구분, 모두 포함)")
         self.excludeEdit = QtWidgets.QLineEdit()
         self.excludeEdit.setPlaceholderText("제외 키워드 (쉼표/공백 구분)")
-        self.adaptiveCheck = QtWidgets.QCheckBox("구 단위 고속(적응형)")
         self.tokenRefreshCheck = QtWidgets.QCheckBox("검색 전 토큰 갱신")
+        self.tokenRefreshCheck.setChecked(True)   # app-API 통일 → 토큰 필수 → 기본 ON(LDPlayer 자동수확)
         self.accountsBtn = QtWidgets.QPushButton("계정·프록시")
         self.accountsBtn.clicked.connect(self.on_accounts_btn_clicked)
         self.proxyViewBtn = QtWidgets.QPushButton("프록시 목록 보기")
@@ -1063,7 +1063,7 @@ class MainWindow(QMainWindow):
         self.ui.minimumEdit.setPlaceholderText("최소가"); self.ui.minimumEdit.setFixedWidth(96)
         self.ui.maximumEdit.setPlaceholderText("최대가"); self.ui.maximumEdit.setFixedWidth(96)
         self.ui.startBtn.setText("검색")
-        self.adaptiveCheck.setText("구단위 고속"); self.tokenRefreshCheck.setText("토큰 갱신")
+        self.tokenRefreshCheck.setText("토큰 갱신")
 
         fc = QtWidgets.QGroupBox(center); fc.setTitle("")
         fv = QtWidgets.QVBoxLayout(fc); fv.setContentsMargins(14, 12, 14, 12); fv.setSpacing(8)
@@ -1075,7 +1075,6 @@ class MainWindow(QMainWindow):
         r1.addWidget(self.extraEdit, 1); r1.addWidget(self.excludeEdit, 1)
         r1.addSpacing(10)
         r1.addWidget(self.ui.onlyTradeableCheck); r1.addSpacing(18)
-        r1.addWidget(self.adaptiveCheck); r1.addSpacing(18)
         r1.addWidget(self.tokenRefreshCheck)
         fv.addLayout(r0); fv.addLayout(r1)
         cl.addWidget(fc)
@@ -1304,7 +1303,9 @@ class MainWindow(QMainWindow):
             return [k for k in re.split(r"[,\s]+", text.strip()) if k]
         extra = split_kw(self.extraEdit.text())
         exclude = split_kw(self.excludeEdit.text())
-        adaptive = self.adaptiveCheck.isChecked()
+        # 앱API 통일: 수동도 항상 app-API(search-bff) 경로. 웹크롤(robust_fetch) 폐지.
+        # (체크박스와 무관하게 True — 자동/수동 동일 데이터소스)
+        adaptive = True
 
         # 검색 전 토큰 갱신(옵션)
         access_token = None
