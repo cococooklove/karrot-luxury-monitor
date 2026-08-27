@@ -911,7 +911,7 @@ class MainWindow(QMainWindow):
             cfg["scope"] = "nationwide"
             self.autoLog.append("[지역] 전국(동 단위)")
         self.auto_monitor = AutoMonitor(self, cfg)
-        self.auto_monitor.log.connect(lambda m: self.autoLog.append(m))
+        self.auto_monitor.log.connect(lambda m: (self.autoLog.append(m), print("[자동]", m)))
         self.auto_monitor.found.connect(self.on_auto_found)
         self.auto_monitor.status.connect(self.on_auto_status)
         self.auto_monitor.finished.connect(
@@ -1856,9 +1856,59 @@ def load_bundled_fonts() -> list[str]:
     return families
 
 
+def _setup_logging():
+    """exe 옆 karrot_monitor.log 에 stdout/stderr + 모든 미처리 예외 기록(원격 디버깅용)."""
+    import sys as _sys, os as _os, traceback as _tb, datetime as _dt
+    base = _os.path.dirname(_sys.executable) if getattr(_sys, "frozen", False) \
+        else _os.path.dirname(_os.path.abspath(__file__))
+    try:
+        logf = open(_os.path.join(base, "karrot_monitor.log"), "a",
+                    encoding="utf-8", buffering=1)
+    except Exception:
+        return
+    def stamp():
+        return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logf.write(f"\n===== 시작 {stamp()} =====\n")
+
+    class _Tee:
+        def __init__(self, *s): self.s = [x for x in s if x]
+        def write(self, d):
+            for x in self.s:
+                try: x.write(d)
+                except Exception: pass
+        def flush(self):
+            for x in self.s:
+                try: x.flush()
+                except Exception: pass
+    _sys.stdout = _Tee(_sys.__stdout__, logf)
+    _sys.stderr = _Tee(_sys.__stderr__, logf)
+
+    def _hook(et, ev, tb):
+        logf.write(f"[{stamp()}] 미처리 예외:\n"
+                   + "".join(_tb.format_exception(et, ev, tb)) + "\n")
+        logf.flush()
+    _sys.excepthook = _hook
+    try:
+        import threading as _th
+        def _thook(a):
+            logf.write(f"[{stamp()}] 스레드 예외:\n"
+                       + "".join(_tb.format_exception(a.exc_type, a.exc_value, a.exc_traceback)) + "\n")
+            logf.flush()
+        _th.excepthook = _thook
+    except Exception:
+        pass
+    print(f"[로그] {logf.name}")
+
+
 if __name__ == "__main__":
-    app = QApplication([])
-    load_bundled_fonts()
-    window = MainWindow()
-    window.show()
-    app.exec()
+    _setup_logging()
+    try:
+        app = QApplication([])
+        load_bundled_fonts()
+        window = MainWindow()
+        window.show()
+        app.exec()
+    except Exception:
+        import traceback
+        traceback.print_exc()   # _Tee 로 로그파일에도 기록됨
+        raise
