@@ -25,8 +25,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-# 발급/refresh 서버 — scan 결과로 확정 후 기입
-REFRESH_URL = ""            # 예: "https://<vendor-host>/auth/refresh"
+# 발급/refresh 서버 — 디컴파일(v26.34.0)로 확정. docs/APP_API.md, TOKEN_REFRESH_CAPTURE.md 참고.
+#   KarrotTokenApi.refreshToken → @rin("auth/v2/tokens/refresh") = POST
+#   baseUrl ph40.b(): ["api","<region>","karrotmarket.com"] .join(".") → 리전 kr
+#   body: {"refresh_token": <str>}   응답: {"access_token","refresh_token"}(둘 다 회전)
+# ⚠️ 이 호스트는 WAF 로 비앱 클라이언트를 403 차단한다(실측). 프록시/헤더로 우회되는지
+#    미검증 — 직접 호출이 막히면 온디바이스 갱신 경로 필요(TOKEN_REFRESH_CAPTURE.md).
+REFRESH_URL = "https://api.kr.karrotmarket.com/auth/v2/tokens/refresh"
 REFRESH_SKEW_SEC = 90       # 만료 이 초 전이면 미리 갱신 (검색 중 만료 방지)
 
 
@@ -65,28 +70,75 @@ class Account:
 RefreshFn = Callable[["Account"], "tuple[str, str | None]"]
 
 
+# 디바이스 헤더(캡처로 확보) — data/config.json 에서 로드해 앱과 동일 헤더로 요청.
+# 없으면 최소 헤더로 시도(WAF 403 가능성 높음).
+_DEVICE_HEADERS = None
+
+
+def _device_headers() -> dict:
+    global _DEVICE_HEADERS
+    if _DEVICE_HEADERS is not None:
+        return _DEVICE_HEADERS
+    hdrs = {}
+    try:
+        cfg = json.load(open("data/config.json", encoding="utf-8"))
+        src = cfg.get("headers", {})
+        for k in ("x-user-agent", "user-agent", "x-device-identity", "x-ad-id",
+                  "x-country-code", "x-karrot-session-id", "accept-language"):
+            if k in src:
+                hdrs[k] = src[k]
+    except Exception:
+        pass
+    _DEVICE_HEADERS = hdrs
+    return hdrs
+
+
+def _pick_tokens(data: dict) -> tuple[str, str | None]:
+    """응답에서 access/refresh 추출. 필드명이 흔들려도 JWT exp 로 재구분한다.
+
+    확정 스키마: {"access_token","refresh_token"}(둘 다 회전).
+    다만 디컴파일에서 $$serializer 를 직접 못 봐서, 안전하게 exp 로 교차검증한다:
+    access 는 TTL 짧고(≈30분) refresh 는 길다(≈수시간+). 뒤바뀌면 바로잡는다.
+    """
+    a = data.get("access_token") or data.get("accessToken") or data.get("access") or ""
+    r = data.get("refresh_token") or data.get("refreshToken") or data.get("refresh") or ""
+    now = int(time.time())
+    ttl = lambda t: max(0, token_exp(t) - now) if t else 0
+    # 둘 다 JWT 면 TTL 로 검증: 짧은 쪽이 access
+    if a and r and ttl(r) and ttl(a) and ttl(r) < ttl(a):
+        a, r = r, a
+    if not a:
+        raise RuntimeError(f"refresh 응답에 access 없음: {list(data)}")
+    return a, (r or None)
+
+
 def _default_refresh(acc: Account) -> tuple[str, str | None]:
-    """REFRESH_URL 로 refresh 토큰 제출 → 새 access(+refresh) 수신.
-    발급서버 스펙 확정 후 body/헤더/응답키만 맞추면 됨."""
-    if not REFRESH_URL:
-        raise RuntimeError("REFRESH_URL 미설정 — scan_token_endpoint 결과로 채워라")
-    from curl_cffi import requests                    # manual 스택과 동일
+    """확정 사양으로 갱신. POST /auth/v2/tokens/refresh, body {"refresh_token"}.
+
+    앱 인터셉터는 만료 직전 access 를 authorization 으로 함께 싣는다(network/a.java).
+    디바이스 헤더는 config.json 에서 재현. WAF 403 이면 프록시(acc.proxy)나
+    온디바이스 경로 필요.
+    """
+    if not acc.refresh:
+        raise RuntimeError(f"[{acc.code}] refresh 토큰 없음 — 최초 캡처 필요")
+    from curl_cffi import requests
+    headers = {"content-type": "application/json", "accept": "application/json",
+               **_device_headers()}
+    if acc.access:
+        headers["authorization"] = f"Bearer {acc.access}"
     r = requests.post(
         REFRESH_URL,
-        json={"refresh_token": acc.refresh, "code": acc.code},
-        headers={"authorization": f"Bearer {acc.refresh}"},
-        impersonate="chrome",
+        json={"refresh_token": acc.refresh},          # 확정: 단일 필드
+        headers=headers,
+        impersonate="safari_ios",
         proxy=acc.proxy,
         timeout=15,
     )
+    if r.status_code == 403:
+        raise RuntimeError("403 Access forbidden — 인증 호스트 WAF 차단(비앱 클라이언트). "
+                           "프록시(KR)/온디바이스 갱신 필요")
     r.raise_for_status()
-    data = r.json()
-    # 응답 키는 서버 확정 후 조정 (access_token/accessToken/token 등)
-    new_access = data.get("access_token") or data.get("accessToken") or data.get("access")
-    new_refresh = data.get("refresh_token") or data.get("refreshToken")
-    if not new_access:
-        raise RuntimeError(f"refresh 응답에 access 없음: {list(data)}")
-    return new_access, new_refresh
+    return _pick_tokens(r.json())
 
 
 class TokenManager:
