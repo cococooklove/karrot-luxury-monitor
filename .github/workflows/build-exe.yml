@@ -1,21 +1,23 @@
 name: build-exe
 
-# 당근 명품 모니터 Windows 실행파일 빌드.
-# 수동 실행(Actions 탭 > Run workflow) 또는 app/** 변경 푸시 시.
-# 결과: Artifacts 에서 KarrotLuxuryMonitor.exe 다운로드.
+# 당근 명품 모니터 — 풀 PyQt6 앱(manual_gui) Windows exe 빌드.
+# 수동 실행(Actions > Run workflow) 또는 관련 경로 변경 푸시 시.
+# 결과: Artifacts 에서 KarrotMonitor 폴더(exe + 설정예제) 다운로드.
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - "app/**"
-      - "collector/**"
+      - "delivery/integrated/manual_gui/**"
       - "tools/ld_harvest.py"
       - ".github/workflows/build-exe.yml"
 
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: delivery/integrated/manual_gui
     steps:
       - uses: actions/checkout@v4
 
@@ -26,27 +28,33 @@ jobs:
       - name: 의존성 설치
         run: |
           python -m pip install --upgrade pip
-          pip install "httpx[http2]" pyinstaller
+          pip install "bs4>=0.0.2" "curl-cffi>=0.13.0" "openpyxl>=3.1.5" "pillow>=12.0.0" "pyqt6>=6.10.0" "gspread>=6.0.0" pyinstaller
 
       - name: exe 빌드
         run: >
-          pyinstaller --onefile --windowed --name KarrotLuxuryMonitor
-          --add-data "collector;collector"
-          --add-data "tools;tools"
-          --add-data "app/config.json;."
-          --hidden-import h2
-          --hidden-import httpx
-          --hidden-import httpx._transports.default
-          --collect-submodules httpx
-          app/karrot_monitor.py
+          pyinstaller --onefile --windowed --name KarrotMonitor
+          --collect-all curl_cffi
+          --collect-all PyQt6
+          --collect-submodules daangn
+          --collect-submodules daangn_ext
+          --hidden-import gspread
+          --hidden-import openpyxl
+          --hidden-import PIL
+          main.py
 
-      - name: config.json 동봉(exe 옆 편집용)
-        run: copy app\config.json dist\config.json
+      - name: 설정 예제 동봉
+        run: |
+          copy settings.example.txt dist\settings.txt
+          copy notify.example.json dist\notify.json
+          if (Test-Path proxies.example.txt) { copy proxies.example.txt dist\proxies.txt }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: KarrotLuxuryMonitor
+          name: KarrotMonitor
           path: |
-            dist/KarrotLuxuryMonitor.exe
-            dist/config.json
+            delivery/integrated/manual_gui/dist/KarrotMonitor.exe
+            delivery/integrated/manual_gui/dist/settings.txt
+            delivery/integrated/manual_gui/dist/notify.json
+            delivery/integrated/manual_gui/dist/proxies.txt
           retention-days: 30
+          if-no-files-found: warn
