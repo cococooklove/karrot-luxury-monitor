@@ -1,7 +1,7 @@
 """
 .ldbk 안 당근 앱 인증데이터 추출 — 토큰 구조·refresh·엔드포인트 파악용.
 
-.ldbk(7z) 안 디스크이미지(vmdk) 내부 /data/data/kr.co.towneers.www/shared_prefs 등에
+.ldbk(7z) 안 디스크이미지(vmdk) 내부 /data/data/com.towneers.www/shared_prefs 등에
 access/refresh 토큰·인증 URL 이 평문 저장됨. 디스크를 추출해 바이트 스캔으로 뽑는다.
 (계정은 정지됐어도 토큰 '형식/키이름/엔드포인트'는 살아있는 계정과 동일 → 설계에 그대로 사용)
 

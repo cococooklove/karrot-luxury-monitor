@@ -41,6 +41,56 @@ SCAN_EXT_SKIP = (".so", ".dex", ".png", ".jpg", ".webp", ".ttf", ".tflite",
 MAX_FILE = 20 * 1024 * 1024        # 20MB 넘는 파일은 스킵(이미지 blob 등)
 
 
+# ── karrot_token.ds proto 파서 ──
+# Jetpack Proto DataStore(평문). 메시지 d7w: field1=refreshToken, 2=accessToken, 3=authToken.
+# 전부 protobuf string(wire type 2, length-delimited). 태그 바이트: 0x0A/0x12/0x1A.
+TOKEN_DS_NAME = "karrot_token.ds"
+PROTO_FIELD = {1: "refresh", 2: "access", 3: "auth"}
+
+
+def _read_varint(buf, i):
+    shift = 0
+    val = 0
+    while i < len(buf):
+        b = buf[i]
+        val |= (b & 0x7F) << shift
+        i += 1
+        if not (b & 0x80):
+            return val, i
+        shift += 7
+    return val, i
+
+
+def parse_token_ds(data: bytes) -> dict:
+    """karrot_token.ds(protobuf) → {"refresh":..,"access":..,"auth":..}. 실패 시 {}."""
+    out = {}
+    i = 0
+    n = len(data)
+    while i < n:
+        tag, i = _read_varint(data, i)
+        field = tag >> 3
+        wtype = tag & 0x07
+        if wtype == 2:                       # length-delimited (string/bytes)
+            ln, i = _read_varint(data, i)
+            chunk = data[i:i + ln]
+            i += ln
+            name = PROTO_FIELD.get(field)
+            if name:
+                try:
+                    out[name] = chunk.decode("utf-8")
+                except Exception:
+                    pass
+        elif wtype == 0:                     # varint
+            _, i = _read_varint(data, i)
+        elif wtype == 5:
+            i += 4
+        elif wtype == 1:
+            i += 8
+        else:
+            break
+    return out
+
+
 def jwt_payload(tok: str) -> dict:
     try:
         p = tok.split(".")[1]
@@ -79,11 +129,32 @@ def scan(root: str):
     jwts = {}          # token -> info
     headers = {}       # key -> value (best-effort)
     files_scanned = 0
+    ds_hits = []       # karrot_token.ds 직접 파싱 결과 [(파일, {refresh,access,auth})]
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
+            fp = os.path.join(dirpath, fn)
+            # ★ karrot_token.ds 는 proto 로 직접 파싱(불투명 토큰도 확실히 잡음)
+            if fn == TOKEN_DS_NAME:
+                try:
+                    with open(fp, "rb") as f:
+                        toks = parse_token_ds(f.read())
+                    if toks:
+                        ds_hits.append((fp, toks))
+                        # refresh/access 를 jwts 풀에도 넣어(계정 분류 통일)
+                        for kind in ("refresh", "access"):
+                            t = toks.get(kind)
+                            if t:
+                                info = classify(t) or {"kind": kind, "sub": "?",
+                                                       "ttl": None, "alive": None,
+                                                       "exp": None, "token": t,
+                                                       "client": None}
+                                info["kind"] = kind    # proto 필드가 권위
+                                info["file"] = fp
+                                jwts[t] = info
+                except Exception:
+                    pass
             if fn.lower().endswith(SCAN_EXT_SKIP):
                 continue
-            fp = os.path.join(dirpath, fn)
             try:
                 if os.path.getsize(fp) > MAX_FILE:
                     continue
@@ -108,7 +179,7 @@ def scan(root: str):
             for hm in HDR_RE.finditer(txt):
                 k = hm.group(1).lower().replace("-", "_")
                 headers.setdefault(k, hm.group(2))
-    return jwts, headers, files_scanned
+    return jwts, headers, files_scanned, ds_hits
 
 
 def build_accounts(jwts: dict, headers: dict) -> list:
@@ -151,8 +222,15 @@ def main():
         sys.exit(1)
 
     print(f"스캔: {args.root}")
-    jwts, headers, n = scan(args.root)
+    jwts, headers, n, ds_hits = scan(args.root)
     print(f"파일 {n}개 스캔 · JWT {len(jwts)}개 발견")
+
+    if ds_hits:
+        print(f"  ★ karrot_token.ds {len(ds_hits)}개 직접 파싱(proto 평문)")
+        for fp, toks in ds_hits:
+            acct = os.path.basename(os.path.dirname(os.path.dirname(fp)))
+            print(f"     {acct}: refresh={'O' if toks.get('refresh') else 'X'} "
+                  f"access={'O' if toks.get('access') else 'X'}")
 
     if not jwts:
         print("\n❌ JWT 0건. 가능성:")

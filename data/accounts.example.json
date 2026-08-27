@@ -12,7 +12,11 @@
     "daily_cap": 250,
     "warmup_days": 3,
     "min_gap": 3.0,
-    "first_day": "20260826"
+    "first_day": "20260826",
+    "region_id": "6128",
+    "lat": 37.498082,
+    "lon": 127.026598,
+    "_note": "region_id/lat/lon = 알림 수신 동네. alert_pipeline 이 매물 해석에 쓴다"
   },
   {
     "name": "acc2",
@@ -24,6 +28,10 @@
     "token_key": "auth_token",
     "daily_cap": 250,
     "warmup_days": 3,
-    "min_gap": 3.0
+    "min_gap": 3.0,
+    "region_id": "6035",
+    "lat": 37.500622,
+    "lon": 127.036456,
+    "_note": "region_id/lat/lon = 알림 수신 동네. alert_pipeline 이 매물 해석에 쓴다"
   }
 ]

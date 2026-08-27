@@ -29,7 +29,7 @@ refresh 토큰 N개를 `accounts.json` 에 등록 → 이후 완전 무인.
   - 에뮬레이터: LDPlayer(Windows) / Android Studio AVD(Mac). 당근 무결성 검사 때문에
     **Magisk + PlayIntegrityFix** 필요할 수 있음(로그인 실패하면 이것)
 - PC: `mitmproxy`, `frida-tools`, `adb`
-- 당근 계정 로그인된 앱 (패키지 `kr.co.towneers.www`)
+- 당근 계정 로그인된 앱 (패키지 `com.towneers.www`)
 
 ```bash
 pip install frida-tools
@@ -49,7 +49,7 @@ mitmdump -s capture/karrot_dump.py --listen-port 8080
 
 ### 2. 피닝 우회 상태로 앱 실행
 ```bash
-frida -U -f kr.co.towneers.www -l capture/frida/ssl_unpin.js
+frida -U -f com.towneers.www -l capture/frida/ssl_unpin.js
 ```
 콘솔에 `[unpin] active` 뜨면 성공. `api.kr.karrotmarket.com` TLS 실패가 사라진다.
 > 만약 여전히 실패하면 커스텀 피닝 → 콘솔 로그 보고 `ssl_unpin.js` 에 대상 클래스 추가.

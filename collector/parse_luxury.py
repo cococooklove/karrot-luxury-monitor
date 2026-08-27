@@ -11,7 +11,7 @@ import json
 import re
 
 # ── [A] 정규화 MAP ──────────────────────────────────────────────
-# 캡처 응답(앱: kr.co.towneers.www / 웹: window.__remixContext) 확인 후 실제 경로로 교체.
+# 캡처 응답(앱: com.towneers.www / 웹: window.__remixContext) 확인 후 실제 경로로 교체.
 # 점표기 지원. 빈 list_path 면 최장 dict-list 자동탐색.
 MAP = {
     "list_path": "",

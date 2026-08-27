@@ -12,10 +12,20 @@ capture/
   frida/ssl_unpin.js    cert pinning 우회
   frida/sign_hook.js    동적 서명 함수 후킹 + RPC
 tools/
+  build_keyword_set.py       브랜드×접미어 알림 키워드셋 생성
+  screen_keywords.py         info 로 등록가능 키워드 선별 (금지 키워드 제거)
+  probe_keyword_endpoints.py OPTIONS 프리플라이트로 등록/목록 경로 탐색
+  find_keyword_alert.py      캡처에서 알림 요청 추출
+  setup_keyword_alerts.py    계정별 알림 등록 + 상한 실측
+  notification_listener.py   adb 알림함 폴링 → 매물 신호
+  selftest_alert.py          알림 파이프라인 오프라인 회귀 게이트
   analyze_capture.py    ★ 차단 원인 자동 리포트 (mine.json 불필요)
   diff_requests.py      성공요청 vs 내요청 수동 diff
   extract_token.py      인증/디바이스 헤더 추출 → data/config.json
 collector/
+  keyword_alert.py      ★ 키워드 알림 API — 폴링을 푸시로 (info 확정 / 등록·목록 캡처대기)
+  app_search.py         앱 API v5 중고거래 검색 (spatialContext 2곳 + pageToken)
+  alert_pipeline.py     알림 → 매물 해석 → 정규화 저장
   karrot_api.py         공유 클라: 헤더 재현 + 레이트제한 + (옵션)Frida서명
   parse.py              응답 JSON → 매물 정규화 (MAP 한번 맞추면 끝)
   collect_listings.py   지역별 페이지 순회 수집

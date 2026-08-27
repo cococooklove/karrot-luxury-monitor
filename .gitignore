@@ -13,6 +13,16 @@ data/config.json
 # mitmproxy 캡처(토큰 원문 포함 가능)
 data/capture.jsonl
 
+# ── 키워드 알림 파이프라인 산출물 ──
+data/keyword_alert_endpoints.json
+data/alert_hits.jsonl
+data/alert_seen.json
+data/alert_resolved.json
+data/alert_assignments.json
+data/keywords_screened.json
+data/listings_luxury.jsonl
+data/new_listings.jsonl
+
 # ── 런타임 상태 / 산출물 ──
 *.db
 *.sqlite3

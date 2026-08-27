@@ -11,7 +11,7 @@ Frida 서명 사이드카 감독기 — 안정성 #3(자동복구).
   - 헬스체크: 마지막 성공 서명 이후 경과 시간 노출
 
 용법(단독 데몬):
-  python collector/frida_supervisor.py --serial emulator-5554 --app kr.co.towneers.www
+  python collector/frida_supervisor.py --serial emulator-5554 --app com.towneers.www
 용법(코드):
   s = FridaSigner(serial="emulator-5554"); sig = s.sign(payload)
 karrot_api 는 이 FridaSigner.sign 을 주입받아 요청마다 호출.
@@ -22,7 +22,7 @@ import threading
 import time
 
 SCRIPT = "capture/frida/sign_hook.js"
-DEFAULT_APP = "kr.co.towneers.www"
+DEFAULT_APP = "com.towneers.www"
 
 
 class FridaSigner:

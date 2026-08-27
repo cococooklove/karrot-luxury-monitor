@@ -7,7 +7,7 @@
 
 구성 파일: data/accounts.json
 [
-  {"name":"acc1","serial":"emulator-5554","app":"kr.co.towneers.www",
+  {"name":"acc1","serial":"emulator-5554","app":"com.towneers.www",
    "headers_file":"data/headers_acc1.json","daily_cap":300},
   {"name":"acc2","serial":"emulator-5556","headers_file":"data/headers_acc2.json"}
 ]
@@ -35,7 +35,7 @@ class Worker:
     def __init__(self, spec, use_frida=True):
         self.name = spec["name"]
         self.serial = spec.get("serial")
-        self.app = spec.get("app", "kr.co.towneers.www")
+        self.app = spec.get("app", "com.towneers.www")
         self.base_cap = spec.get("daily_cap", 300)
         self.min_gap = spec.get("min_gap", 2.0)     # 요청간 최소 간격(초)
         self.jitter = spec.get("jitter", 2.5)

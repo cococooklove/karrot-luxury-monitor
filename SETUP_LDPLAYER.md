@@ -1,7 +1,7 @@
 # LD플레이어 캡처 환경 세팅 (정확한 단계)
 
 목표: 당근 앱 실제 트래픽을 mitmproxy 로 잡아 `data/capture.jsonl` 생성.
-당근 패키지명: `kr.co.towneers.www`
+당근 패키지명: `com.towneers.www`
 
 ## 1. mitmproxy 실행 (PC)
 ```bash
@@ -52,7 +52,7 @@ adb shell "/data/local/tmp/frida-server &"
 PC 에서:
 ```bash
 frida-ps -U | grep -i daangn        # 앱 뜨는지 확인
-frida -U -f kr.co.towneers.www -l capture/frida/ssl_unpin.js
+frida -U -f com.towneers.www -l capture/frida/ssl_unpin.js
 ```
 `[unpin] active` 뜬 상태로 앱 사용 → 트래픽 잡힘.
 

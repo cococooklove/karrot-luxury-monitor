@@ -51,7 +51,7 @@ class KarrotClient:
 
     def _attach_frida(self):
         import frida  # 동적서명 경로에서만 필요
-        app = os.environ.get("KARROT_APP", "kr.co.towneers.www")
+        app = os.environ.get("KARROT_APP", "com.towneers.www")
         dev = frida.get_usb_device()
         pid = dev.attach(app)
         with open("capture/frida/sign_hook.js", encoding="utf-8") as f:

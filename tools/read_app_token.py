@@ -20,7 +20,7 @@ import argparse
 import re
 import subprocess
 
-PKG = "kr.co.towneers.www"
+PKG = "com.towneers.www"
 PREFS_DIR = "/data/data/{pkg}/shared_prefs"
 # 토큰형 값: 긴 JWT(eyJ...) 또는 고엔트로피 32+ 문자열
 TOKENISH = re.compile(r'(eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'
