@@ -37,6 +37,7 @@ jobs:
           --collect-all PyQt6
           --collect-submodules daangn
           --collect-submodules daangn_ext
+          --hidden-import ld_autoharvest
           --hidden-import gspread
           --hidden-import openpyxl
           --hidden-import PIL

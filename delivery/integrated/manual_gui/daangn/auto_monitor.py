@@ -231,6 +231,15 @@ class AutoMonitor(QThread):
         }]
         proxy0, next_proxy = self._proxy_cycle()
         token = cfg.get("access_token")
+        # 자동수확 연동(옵션): token_provider() 가 있으면 사이클마다 최신 access 로 갱신.
+        # LDPlayer 온디바이스 수확(ld_harvest)이 accounts.json 을 신선하게 유지 → 여기서 읽음.
+        token_provider = cfg.get("token_provider")
+        if token_provider:
+            try:
+                token = token_provider() or token
+                self.log.emit("[토큰] 자동수확 연동 — 사이클마다 갱신")
+            except Exception as e:
+                self.log.emit(f"[토큰] provider 초기화 실패: {e}")
         rmin, rmax = _clamp_range(cfg.get("rest_min", 30), cfg.get("rest_max", 90),
                                   CYCLE_REST_MIN, CYCLE_REST_MAX, 30.0, 90.0)
         gmin, gmax = _clamp_range(cfg.get("gap_min", 0.4), cfg.get("gap_max", 1.2),
@@ -244,6 +253,15 @@ class AutoMonitor(QThread):
             cycle = 0
             while not self._stop:
                 cycle += 1
+                # 사이클 시작마다 최신 access 재조회(자동수확 연동 시). access 30분 만료 대응.
+                if token_provider:
+                    try:
+                        nt = token_provider()
+                        if nt and nt != token:
+                            token = nt
+                            self.log.emit("[토큰] 갱신 반영")
+                    except Exception as e:
+                        self.log.emit(f"[토큰] 갱신 조회 실패: {e}")
                 # 프록시 변경은 **사이클 경계에서만** 반영한다. 레인은 시작 시점에
                 # 풀을 샤딩해 나눠 갖기 때문에, 도중에 목록이 바뀌면 레인끼리
                 # 같은 IP 를 쥐게 될 수 있다(= 동시요청 전멸 조건).

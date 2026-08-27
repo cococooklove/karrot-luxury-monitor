@@ -886,6 +886,8 @@ class MainWindow(QMainWindow):
             # 실행 중 프록시 추가/삭제 반영용 (조건 루프마다 재조회)
             "proxy_provider": self._collect_proxies,
             "access_token": token,
+            # 사이클마다 최신 access 재조회(자동수확 연동). 스레드세이프(GUI 미접근).
+            "token_provider": self._harvest_token_quiet if self.autoTokenRefresh.isChecked() else None,
             "out_json": "./OUT.json",
             "db_path": "./auto_seen.db",
         }
@@ -1320,18 +1322,61 @@ class MainWindow(QMainWindow):
             self._leave_task()
             self.alert(str(e))
 
+    def _harvest_token_quiet(self) -> str | None:
+        """스레드세이프 토큰 provider — AutoMonitor 스레드서 사이클마다 호출.
+        GUI 미접근(showMessage/alert 금지). LDPlayer 수확 → 최신 access 반환."""
+        import json as _json
+        try:
+            import ld_autoharvest
+            ld_autoharvest.harvest_all("./accounts.json", nudge=True)
+        except Exception:
+            pass
+        try:
+            from daangn_ext.token_manager import token_exp
+            best = None
+            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+                acc = a.get("access") or ""
+                if acc and (best is None or token_exp(acc) > token_exp(best)):
+                    best = acc
+            return best
+        except Exception:
+            return None
+
     def _refresh_tokens(self) -> str | None:
-        """계정 저장소 로드 → 검색 전 access 토큰 일괄 갱신. 첫 토큰 반환(옵션)."""
+        """검색 전 access 토큰 확보. LDPlayer 온디바이스 수확 우선(WAF 우회),
+        실패 시 기존 HTTP refresh 폴백. 최신 access 반환."""
+        import json as _json
+        # 1) LDPlayer 온디바이스 수확 — 정품 앱이 갱신한 access 를 su 로 직접 읽어 accounts.json 병합.
+        #    HTTP refresh(api.kr.karrotmarket.com)는 WAF 403 이라 이 경로가 실질 갱신책.
+        try:
+            import ld_autoharvest
+            ld_autoharvest.harvest_all(
+                "./accounts.json", nudge=True,
+                log=lambda m: self.sb.showMessage(m, 4000))
+        except Exception as e:
+            self.sb.showMessage(f"[수확 건너뜀] {str(e)[:60]}", 4000)
+        # 2) accounts.json 에서 남은 수명이 가장 긴 access 반환
+        try:
+            from daangn_ext.token_manager import token_exp
+            best = None
+            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+                acc = a.get("access") or ""
+                if acc and (best is None or token_exp(acc) > token_exp(best)):
+                    best = acc
+            if best:
+                return best
+        except Exception:
+            pass
+        # 3) 폴백: 기존 HTTP refresh (LDPlayer 없음/수확실패 시. WAF면 실패할 수 있음)
         try:
             from daangn_ext import TokenManager, AccountStore, bind_to_token_manager
             store = AccountStore("./accounts.json")
             if not store.rows:
-                self.alert("등록된 계정이 없습니다. '계정+프록시 추가'로 먼저 등록하세요.")
+                self.alert("계정 없음. LDPlayer 를 켜거나 '계정+프록시 추가'로 등록하세요.")
                 return None
             tm = TokenManager()
             bind_to_token_manager(store, tm)
-            res = tm.refresh_all()
-            self.sb.showMessage(f"토큰 갱신: {res}", 5000)
+            tm.refresh_all()
             accs = list(tm.accounts.values())
             return tm.ensure_safe(accs[0]) if accs else None
         except Exception as e:
