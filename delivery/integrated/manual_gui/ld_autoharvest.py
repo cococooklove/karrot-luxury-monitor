@@ -19,12 +19,23 @@ PKG = "com.towneers.www"
 APP_DATA = f"/data/data/{PKG}"
 _SAFE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_.-"
 
-LD_ADB_PATHS = [
-    r"C:\LDPlayer\LDPlayer9\adb.exe",
-    r"C:\LDPlayer\LDPlayer4.0\adb.exe",
-    r"C:\Program Files\LDPlayer\LDPlayer9\adb.exe",
-    r"D:\LDPlayer\LDPlayer9\adb.exe",
-]
+import glob as _glob
+# LDPlayer 설치 폴더 후보(버전 무관 glob 포함). adb.exe/ldconsole.exe 가 여기 있음.
+_LD_DIRS = []
+for _root in (r"C:\LDPlayer", r"D:\LDPlayer", r"C:\Program Files\LDPlayer",
+              r"C:\Program Files (x86)\LDPlayer"):
+    for _v in ("LDPlayer14", "LDPlayer9", "LDPlayer4.0", "LDPlayer64", ""):
+        _LD_DIRS.append(_root + ("\\" + _v if _v else ""))
+    try:
+        _LD_DIRS += _glob.glob(_root + r"\LDPlayer*")   # 설치된 실제 버전 폴더 자동수집
+    except Exception:
+        pass
+# 중복 제거(순서 유지)
+_seen = set(); _LD_DIRS = [d for d in _LD_DIRS if not (d in _seen or _seen.add(d))]
+
+LD_ADB_PATHS = [d + r"\adb.exe" for d in _LD_DIRS]
+LD_CONSOLE_NAMES = ["ldconsole.exe", "dnconsole.exe"]
+LD_CONSOLE_PATHS = list(_LD_DIRS)
 
 
 # ── karrot_token.ds proto 파싱 (field1=refresh, 2=access, 3=auth; wire2 string) ──
@@ -99,6 +110,80 @@ def list_instances(adb_bin):
         return []
 
 
+# ── LDPlayer 자동 부팅 (클라가 LDPlayer 안 켜도 되게) ──
+def find_ldconsole(adb_bin=None):
+    import os.path
+    cands = []
+    if adb_bin and os.path.exists(adb_bin):
+        d = os.path.dirname(adb_bin)
+        cands += [os.path.join(d, n) for n in LD_CONSOLE_NAMES]
+    for base in LD_CONSOLE_PATHS:
+        cands += [os.path.join(base, n) for n in LD_CONSOLE_NAMES]
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def ld_list(console):
+    """ldconsole list2 → [(index, name, is_running)]."""
+    try:
+        p = subprocess.run([console, "list2"], capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        rows = []
+        for line in p.stdout.decode("utf-8", "ignore").splitlines():
+            f = line.split(",")
+            if len(f) >= 2 and f[0].strip().lstrip("-").isdigit():
+                # list2: index,name,top_hwnd,bind_hwnd,android_started(0/1),pid,...
+                running = len(f) >= 5 and f[4].strip() not in ("0", "", "-1")
+                rows.append((f[0].strip(), f[1].strip(), running))
+        return rows
+    except Exception:
+        return []
+
+
+def ld_launch(console, index):
+    try:
+        subprocess.run([console, "launch", "--index", str(index)], timeout=30,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return True
+    except Exception:
+        return False
+
+
+def ensure_ldplayer(adb_bin, boot_wait=120, log=None):
+    """adb 에 기기가 없으면 LDPlayer 인스턴스를 부팅해 올라올 때까지 대기.
+    반환: 사용가능 serial 리스트."""
+    log = log or (lambda m: None)
+    cur = list_instances(adb_bin)
+    if cur:
+        return cur
+    console = find_ldconsole(adb_bin)
+    if not console:
+        log("[LDPlayer] ldconsole.exe 못찾음 — LDPlayer 설치경로 확인")
+        return []
+    insts = ld_list(console)
+    if not insts:
+        log("[LDPlayer] 인스턴스 없음 — .ldbk 복원 필요")
+        return []
+    to_boot = [i for i in insts if not i[2]]
+    if to_boot:
+        log(f"[LDPlayer] {len(to_boot)}개 인스턴스 부팅…")
+        for idx, name, _ in to_boot:
+            ld_launch(console, idx)
+    # adb 기기 올라올 때까지 폴링
+    waited = 0
+    while waited < boot_wait:
+        time.sleep(5); waited += 5
+        cur = list_instances(adb_bin)
+        if len(cur) >= len(insts):
+            log(f"[LDPlayer] {len(cur)}개 기동 완료 ({waited}s)")
+            return cur
+    cur = list_instances(adb_bin)
+    log(f"[LDPlayer] {len(cur)}/{len(insts)}개 기동 (대기 {boot_wait}s 초과)")
+    return cur
+
+
 def _find_token_path(adb_bin, serial):
     try:
         out = _adb(adb_bin, serial, "exec-out", "su", "-c",
@@ -161,7 +246,10 @@ def harvest_all(accounts_fp="./accounts.json", adb_bin=None, serials=None,
     adb_bin = find_adb(adb_bin)
     use = list(serials or []) or list_instances(adb_bin)
     if not use:
-        log("[수확] LDPlayer 인스턴스 없음 — LDPlayer 켜졌는지 확인")
+        # LDPlayer 자동 부팅(클라가 안 켜도 됨) 후 재시도
+        use = ensure_ldplayer(adb_bin, log=log)
+    if not use:
+        log("[수확] LDPlayer 인스턴스 없음 — 설치/.ldbk 복원 확인")
         return (0, 0, 0, 0)
     rows = []
     for s in use:
