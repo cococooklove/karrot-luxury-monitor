@@ -35,7 +35,7 @@ def _load_template(path):
 
 
 class KarrotClient:
-    def __init__(self, path, min_delay=1.5, max_delay=4.0):
+    def __init__(self, path, min_delay=1.5, max_delay=4.0, token_provider=None):
         self.tpl = _load_template(path)
         self.headers = {k: v for k, v in self.tpl["req_headers"].items()
                         if k.lower() not in DROP}
@@ -44,6 +44,9 @@ class KarrotClient:
         self.path = self.tpl["path"]
         self.min_delay = min_delay
         self.max_delay = max_delay
+        # token_provider(): 매 요청 최신 access 문자열 반환(온디바이스 수확 결과).
+        # None 이면 캡처 템플릿의 박제 access 를 그대로 사용(정적 경로, 하위호환).
+        self.token_provider = token_provider
         self._client = httpx.Client(http2=True, timeout=15)
         self._frida = None
         if os.environ.get("KARROT_FRIDA") == "1":
@@ -69,9 +72,20 @@ class KarrotClient:
         h["x-signature"] = sig  # 실제 서명 헤더명은 diff 로 확인 후 교체
         return h
 
+    def _inject_token(self, headers):
+        """온디바이스 수확이 갱신한 최신 access 를 authorization 에 덮어쓴다."""
+        if not self.token_provider:
+            return headers
+        access = self.token_provider()
+        if access:
+            headers = dict(headers)
+            headers["authorization"] = f"Bearer {access}"
+        return headers
+
     def request(self, params=None, path=None):
         params = params or dict(self.tpl.get("query", {}))
         headers = self._sign(params, self.tpl.get("req_body", ""))
+        headers = self._inject_token(headers)
         url = f"https://{self.host}{path or self.path}"
         resp = self._client.request(self.method, url, headers=headers, params=params)
         # 사람 유사 랜덤 지연 (패턴 차단 회피)

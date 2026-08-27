@@ -17,6 +17,7 @@ import random
 import time
 from karrot_api import KarrotClient
 from parse import extract
+from token_source import access_provider
 
 STATE = "data"
 NEWLOG = "data/new_listings.jsonl"
@@ -66,10 +67,19 @@ def main():
     ap.add_argument("--regions", nargs="+", required=True)
     ap.add_argument("--interval", type=int, default=300, help="폴링 주기 초")
     ap.add_argument("--once", action="store_true", help="1회만")
+    ap.add_argument("--accounts", help="accounts.json 경로. 주면 최신 access 를 매 요청 주입"
+                                        "(온디바이스 수확 연동). 미지정 시 캡처 박제 헤더 사용")
+    ap.add_argument("--code", help="특정 계정 code 만 사용. 미지정 시 남은 수명 최장 계정")
     args = ap.parse_args()
 
     os.makedirs(STATE, exist_ok=True)
-    client = KarrotClient(args.path)
+    provider = None
+    if args.accounts:
+        provider = access_provider(args.accounts, args.code)
+        code, _, exp_in = provider.info()
+        print(f"[token] accounts={args.accounts} code={code or '(auto)'} "
+              f"남은수명={exp_in}s" + (" ⚠️만료" if exp_in <= 0 else ""))
+    client = KarrotClient(args.path, token_provider=provider)
     try:
         while True:
             ts = time.strftime("%H:%M:%S")
