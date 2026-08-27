@@ -246,9 +246,12 @@ class MainWindow(QMainWindow):
         fl.addLayout(r0)
         r1 = QtWidgets.QHBoxLayout()
         self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
-        self.alertBulkBtn = QtWidgets.QPushButton(f"명품 {len(LUXURY_BRANDS)}개 일괄등록")
+        self.alertBulkBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 일괄(현재계정)")
+        self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 전계정등록(전국)")
+        self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
-        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkBtn); r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
+        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkBtn); r1.addWidget(self.alertBulkAllBtn)
+        r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
         v.addWidget(form)
 
@@ -276,11 +279,14 @@ class MainWindow(QMainWindow):
         # ── 신규 매칭 (토큰 폴링, 앱/푸시 불필요) ──
         v.addWidget(QtWidgets.QLabel("── 신규 명품 매칭 (토큰 폴링으로 수신 · 앱/LDPlayer 상시ON 불필요) ──"))
         r3 = QtWidgets.QHBoxLayout()
-        self.alertPollBtn = QtWidgets.QPushButton("매칭 조회"); self.alertPollBtn.setObjectName("startBtn")
+        self.alertPollBtn = QtWidgets.QPushButton("매칭 조회(현재계정)")
+        self.alertPollAllBtn = QtWidgets.QPushButton("전계정 매칭(전국)"); self.alertPollAllBtn.setObjectName("startBtn")
         self.alertAutoPollBtn = QtWidgets.QPushButton("자동 폴링 시작")
+        self.alertCoverageBtn = QtWidgets.QPushButton("커버 동네 집계")
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
-        r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertAutoPollBtn)
+        r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
+        r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
         r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval); r3.addStretch(1)
         v.addLayout(r3)
 
@@ -305,11 +311,14 @@ class MainWindow(QMainWindow):
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
         self.alertPollBtn.clicked.connect(self.on_alert_poll)
         self.alertAutoPollBtn.clicked.connect(self.on_alert_autopoll)
+        self.alertBulkAllBtn.clicked.connect(self.on_alert_bulk_all)
+        self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
+        self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
         self._alert_worker = None
         self._match_links = {}
         self._match_seen = set()
         self._alert_poll_timer = QtCore.QTimer(self)
-        self._alert_poll_timer.timeout.connect(self.on_alert_poll)
+        self._alert_poll_timer.timeout.connect(self.on_alert_poll_all)  # 자동폴링=전국(전계정)
         return w
 
     def _alert_api(self):
@@ -426,8 +435,8 @@ class MainWindow(QMainWindow):
         else:
             self._alert_poll_timer.start(self.alertPollInterval.value() * 1000)
             self.alertAutoPollBtn.setText("자동 폴링 정지")
-            self.alertLog.append(f"[자동폴링] 시작 · {self.alertPollInterval.value()}초 주기")
-            self.on_alert_poll()
+            self.alertLog.append(f"[자동폴링] 시작 · {self.alertPollInterval.value()}초 주기 · 전계정(전국)")
+            self.on_alert_poll_all()
 
     def _match_populate(self, matches):
         if matches is None:
@@ -462,6 +471,39 @@ class MainWindow(QMainWindow):
             from PyQt6.QtGui import QDesktopServices
             from PyQt6.QtCore import QUrl
             QDesktopServices.openUrl(QUrl(url))
+
+    # ── 전국(전 계정) 멀티계정 ──
+    def _multi(self):
+        """전 계정 토큰 신선화(LDPlayer 수확) 후 MultiAccountAlerts 반환. 스레드 내 호출."""
+        from daangn_ext.keyword_alert_api import MultiAccountAlerts
+        try:
+            import ld_autoharvest
+            ld_autoharvest.harvest_all("./accounts.json", nudge=True)
+        except Exception:
+            pass
+        return MultiAccountAlerts("./accounts.json", "./data/config.json")
+
+    def on_alert_bulk_all(self):
+        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
+        def job(log):
+            self._multi().register_all(LUXURY_BRANDS, mn, mx, log=log)
+            return None
+        self._alert_run(job)
+
+    def on_alert_poll_all(self):
+        def job(log):
+            return self._multi().poll_all(log=log)
+        self._alert_run(job, self._match_populate)
+
+    def on_alert_coverage(self):
+        def job(log):
+            cov = self._multi().coverage(log=log)
+            total = sum(int(c[2] or 0) for c in cov)
+            log(f"커버 동네 {len(cov)}개 · 합산 {total}지역")
+            for code, name, cnt in cov:
+                log(f"  {code}: {name} ({cnt}지역)")
+            return None
+        self._alert_run(job)
 
     def _build_auto_area_tree(self, parent):
         """자동용 지역 트리 — 수동과 동일한 시도>구>동 3단계. 미선택 시 전국."""

@@ -199,3 +199,88 @@ class KeywordAlertAPI:
             self._client.close()
         except Exception:
             pass
+
+
+class MultiAccountAlerts:
+    """전 계정(accounts.json) 대상 키워드 알림 — 전국 모니터링.
+
+    각 계정은 자기 인증동네+반경(예 39지역)만 커버 → 여러 계정 = 여러 동네 = 전국.
+    유효 토큰(만료 안 된 access) 있는 계정만 참여. 만료분은 스킵(수확 필요).
+    """
+
+    def __init__(self, accounts_fp: str = "./accounts.json",
+                 config_path: str = "./data/config.json"):
+        self.accounts_fp = accounts_fp
+        self.config_path = config_path
+
+    def _accounts(self):
+        try:
+            return json.load(open(self.accounts_fp, encoding="utf-8"))
+        except Exception:
+            return []
+
+    def _valid(self):
+        """(code, access, proxy) 리스트 — access 살아있는 계정만."""
+        out = []
+        for a in self._accounts():
+            acc = a.get("access") or ""
+            if acc and token_remaining(acc) > 60:
+                out.append((str(a.get("code") or ""), acc, a.get("proxy")))
+        return out
+
+    def register_all(self, keywords, min_price=None, max_price=None,
+                     exclude_keywords=None, log=None):
+        log = log or (lambda m: None)
+        valid = self._valid()
+        log(f"유효 계정 {len(valid)}개 (만료계정 제외)")
+        total = {"added": 0, "skipped": 0, "failed": 0}
+        for code, access, proxy in valid:
+            log(f"── 계정 {code[:6]} ──")
+            api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
+            try:
+                res = api.register_many(keywords, min_price, max_price,
+                                        exclude_keywords, log=log)
+                for k in total:
+                    total[k] += len(res[k])
+            except Exception as e:
+                log(f"  계정 {code[:6]} 실패: {str(e)[:50]}")
+            finally:
+                api.close()
+        log(f"전체: 등록 {total['added']} · 스킵 {total['skipped']} · 실패 {total['failed']}")
+        return total
+
+    def poll_all(self, category_id: str = FLEA_CATEGORY, log=None):
+        """전 계정 매칭 폴링 → 합산(article_id 중복제거). 각 매물에 _account 태그."""
+        log = log or (lambda m: None)
+        seen, merged = set(), []
+        for code, access, proxy in self._valid():
+            api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
+            try:
+                for m in api.new_matches(category_id):
+                    key = m.get("article_id") or m.get("id")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    m["_account"] = code[:6]
+                    merged.append(m)
+            except Exception as e:
+                log(f"  {code[:6]} 폴 실패: {str(e)[:40]}")
+            finally:
+                api.close()
+        log(f"전계정 매칭 {len(merged)}건(중복제거)")
+        return merged
+
+    def coverage(self, log=None):
+        """전 계정 커버 동네 집계 → [(code, 동네명, 지역수)]."""
+        log = log or (lambda m: None)
+        out = []
+        for code, access, proxy in self._valid():
+            api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
+            try:
+                for s in api.subscriptions():
+                    out.append((code[:6], s.get("name"), s.get("ranged_regions_count")))
+            except Exception as e:
+                log(f"  {code[:6]} 실패: {str(e)[:40]}")
+            finally:
+                api.close()
+        return out
