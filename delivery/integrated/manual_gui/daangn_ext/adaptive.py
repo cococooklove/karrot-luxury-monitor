@@ -46,6 +46,24 @@ def suffixes_for(keyword: str) -> list:
     return [f"{kw}{s}" for s in SUFFIXES]
 
 
+import threading as _threading
+_APP_SRC = None
+_APP_SRC_LOCK = _threading.Lock()
+
+
+def _app_source_for(access_token):
+    """캐시된 AppSource 에 토큰만 메모리 갱신해 반환. config.json 재로드·파일쓰기 없음.
+    config.json(device 헤더) 없거나 필수헤더 누락이면 AppApiConfig 가 예외 → 호출측서 웹크롤 폴백."""
+    global _APP_SRC
+    with _APP_SRC_LOCK:
+        if _APP_SRC is None:
+            from .app_source import AppSource
+            _APP_SRC = AppSource()          # data/config.json 헤더 로드
+        tok = access_token if access_token.lower().startswith("bearer ") else f"Bearer {access_token}"
+        _APP_SRC.cfg.headers["authorization"] = tok
+        return _APP_SRC
+
+
 def collect_region(
     keyword: str,
     region_in: str,                         # "강남구-381"
@@ -59,7 +77,19 @@ def collect_region(
 ) -> tuple[list, dict]:
     """한 지역(구) 완전 수집. (articles, stats) 반환. 포화면 가격분할.
     proxies 풀 주면 시작 IP 만 풀에서 고르고, 빈응답이 나는 즉시 robust 가 다음 IP 로 넘긴다.
-    should_stop() True 면 즉시 중단."""
+    should_stop() True 면 즉시 중단.
+
+    ★ 토큰이 있으면 app-API(search-bff)로 수집한다. 웹크롤(daangn.com)은 명품 브랜드
+      키워드를 억제해 '샤넬' 0건이 나오지만, 앱API는 수천 건 + 페이징을 준다(app_api.py).
+      토큰 없거나 앱API 실패 시에만 웹크롤로 폴백."""
+    if access_token:
+        try:
+            src = _app_source_for(access_token)
+            return src.collect_region(
+                keyword, region_in, only_on_sale=only_on_sale,
+                proxies=proxies, should_stop=should_stop)
+        except Exception as _e:
+            pass  # 앱API 실패 → 아래 웹크롤 폴백(안전망)
     seen: dict = {}
     # missed = 재시도 소진으로 "확인 못 한" 가격구간. 0건과 반드시 구분해야 한다.
     stats = {"requests": 0, "splits": 0, "saturated": False, "missed": [],
