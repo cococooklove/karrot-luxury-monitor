@@ -1,0 +1,52 @@
+name: build-exe
+
+# 당근 명품 모니터 Windows 실행파일 빌드.
+# 수동 실행(Actions 탭 > Run workflow) 또는 app/** 변경 푸시 시.
+# 결과: Artifacts 에서 KarrotLuxuryMonitor.exe 다운로드.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "app/**"
+      - "collector/**"
+      - "tools/ld_harvest.py"
+      - ".github/workflows/build-exe.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install "httpx[http2]" pyinstaller
+
+      - name: exe 빌드
+        run: >
+          pyinstaller --onefile --windowed --name KarrotLuxuryMonitor
+          --add-data "collector;collector"
+          --add-data "tools;tools"
+          --add-data "app/config.json;."
+          --hidden-import h2
+          --hidden-import httpx
+          --hidden-import httpx._transports.default
+          --collect-submodules httpx
+          app/karrot_monitor.py
+
+      - name: config.json 동봉(exe 옆 편집용)
+        run: copy app\config.json dist\config.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KarrotLuxuryMonitor
+          path: |
+            dist/KarrotLuxuryMonitor.exe
+            dist/config.json
+          retention-days: 30

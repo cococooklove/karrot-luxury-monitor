@@ -1,0 +1,13 @@
+{
+  "_설명": "배포 전 regions 를 클라 타깃 동네로 교체. adb 경로는 LDPlayer 기본값. 클라는 수정 불필요.",
+  "adb": "C:\\LDPlayer\\LDPlayer9\\adb.exe",
+  "serials": [],
+  "harvest_interval": 1500,
+  "search_interval": 180,
+  "regions": [
+    {"name": "서초동", "region_id": "6128", "lat": 37.4837, "lon": 127.0324},
+    {"name": "역삼동", "region_id": "6035", "lat": 37.5006, "lon": 127.0366}
+  ],
+  "brands": [],
+  "headers": {}
+}
