@@ -240,6 +240,20 @@ class AutoMonitor(QThread):
                 self.log.emit("[토큰] 자동수확 연동 — 사이클마다 갱신")
             except Exception as e:
                 self.log.emit(f"[토큰] provider 초기화 실패: {e}")
+        # 계정 안정화 스케줄러(옵션): 사이클마다 계정 라운드로빈 + 계정별 고정프록시 +
+        # daily_cap/warmup. 활성 시 1계정-1IP 로 검색해 핑거프린트 이상·과다요청 방지.
+        sched = None
+        if cfg.get("stabilize"):
+            try:
+                from daangn_ext.account_scheduler import AccountScheduler
+                sched = AccountScheduler(
+                    accounts_fp=cfg.get("accounts_fp", "./accounts.json"),
+                    daily_cap=int(cfg.get("daily_cap", 300)),
+                    warmup_days=int(cfg.get("warmup_days", 3)),
+                    log=self.log.emit)
+                self.log.emit("[안정화] 계정 라운드로빈 + daily_cap/warmup ON")
+            except Exception as e:
+                self.log.emit(f"[안정화] 스케줄러 초기화 실패(기존방식 유지): {e}")
         rmin, rmax = _clamp_range(cfg.get("rest_min", 30), cfg.get("rest_max", 90),
                                   CYCLE_REST_MIN, CYCLE_REST_MAX, 30.0, 90.0)
         gmin, gmax = _clamp_range(cfg.get("gap_min", 0.4), cfg.get("gap_max", 1.2),
@@ -253,8 +267,29 @@ class AutoMonitor(QThread):
             cycle = 0
             while not self._stop:
                 cycle += 1
-                # 사이클 시작마다 최신 access 재조회(자동수확 연동 시). access 30분 만료 대응.
-                if token_provider:
+                # ── 계정 안정화: 사이클마다 계정 라운드로빈 + 그 계정 고정프록시(없으면 KR네이티브) ──
+                cur_code = None
+                sched_proxies = None      # sched 활성 시 이 사이클의 프록시(계정 바인딩). None=네이티브
+                if sched:
+                    # 전 계정 토큰 신선화(LDPlayer 수확) — provider 부작용 이용. 반환값은 무시.
+                    if token_provider:
+                        try:
+                            token_provider()
+                        except Exception as e:
+                            self.log.emit(f"[수확] 실패(계속): {str(e)[:60]}")
+                    pick = sched.pick()
+                    if not pick:
+                        self.log.emit("[안정화] 전 계정 캡/쿨다운 도달 — 휴식 후 재시도")
+                        self._rest(rmin, rmax)
+                        continue
+                    cur_code = pick["code"]
+                    token = pick["access"]
+                    sched_proxies = [pick["proxy"]] if pick["proxy"] else None
+                    self.log.emit(
+                        f"[계정] {cur_code[:6]} · 잔여 {pick['remaining']} · "
+                        f"프록시 {'고정1' if pick['proxy'] else 'KR네이티브'}  ({sched.status()})")
+                # 자동수확 연동(스케줄러 미사용 시): 최신 access 재조회. access 30분 만료 대응.
+                elif token_provider:
                     try:
                         nt = token_provider()
                         if nt and nt != token:
@@ -271,6 +306,8 @@ class AutoMonitor(QThread):
                         f"[프록시] {len(cur_proxies)}개 → {len(fresh)}개 (변경 반영)")
                     cur_proxies = fresh
                 self.log.emit(f"── 사이클 {cycle} ──")
+                # 안정화 활성 시 = 이 계정 고정프록시(또는 네이티브). 아니면 = 전체 풀.
+                lane_proxies = sched_proxies if sched else cur_proxies
                 for cond in conditions:
                     if self._stop:
                         break
@@ -280,7 +317,7 @@ class AutoMonitor(QThread):
                     done = 0
                     total_new = 0
                     missed_total = 0
-                    n_lanes = self._plan_lanes(cur_proxies)
+                    n_lanes = self._plan_lanes(lane_proxies or [])
 
                     def on_result(reg_d, arts, cstats, _cond=cond, _rule=rule,
                                   _lanes=n_lanes):
@@ -330,7 +367,7 @@ class AutoMonitor(QThread):
                         _, lsm = collect_lanes(
                             cond["keyword"],
                             [{"in": r} for r in regions],
-                            proxies=cur_proxies or None,
+                            proxies=lane_proxies or None,
                             lanes=n_lanes,
                             only_on_sale=True,
                             access_token=token,
@@ -340,6 +377,11 @@ class AutoMonitor(QThread):
                         )
                         if lsm.get("skipped"):
                             self.log.emit(f"[중단] 미처리 지역 {lsm['skipped']}개")
+                        # 안정화: 이 계정의 일일 사용량 기록(≈지역수). 차단신호면 격리.
+                        if sched and cur_code:
+                            sched.note(cur_code, len(regions))
+                            if missed_total:
+                                sched.note_block(cur_code)
                     except Exception as e:
                         self.log.emit(f"[수집 오류] {type(e).__name__}: {e}")
 

@@ -868,7 +868,9 @@ class MainWindow(QMainWindow):
         if not self.auto_conditions and not self.autoKeyword.text().strip():
             self.alert("자동: 키워드 또는 엑셀 조건이 필요합니다")
             return
-        token = self._refresh_tokens() if self.autoTokenRefresh.isChecked() else None
+        # 초기 토큰은 워커스레드의 token_provider 가 획득(LDPlayer 부팅+수확은 오래 걸려
+        # 메인스레드서 하면 GUI 프리징). 체크 시 provider 가 첫 사이클 시작서 확보.
+        token = None
         cfg = {
             "conditions": self.auto_conditions or None,     # 엑셀 다중조건 우선
             "keyword": self.autoKeyword.text().strip(),
@@ -892,6 +894,12 @@ class MainWindow(QMainWindow):
             "access_token": token,
             # 사이클마다 최신 access 재조회(자동수확 연동). 스레드세이프(GUI 미접근).
             "token_provider": self._harvest_token_quiet if self.autoTokenRefresh.isChecked() else None,
+            # 계정 안정화(밴회피): 사이클마다 계정 라운드로빈 + 계정별 고정프록시(없으면 KR네이티브)
+            # + daily_cap/warmup. 수확 갱신 켜졌을 때 함께 활성(다계정 전제).
+            "stabilize": self.autoTokenRefresh.isChecked(),
+            "accounts_fp": "./accounts.json",
+            "daily_cap": 300,
+            "warmup_days": 3,
             "out_json": "./OUT.json",
             "db_path": "./auto_seen.db",
         }
