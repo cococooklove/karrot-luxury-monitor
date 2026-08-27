@@ -232,8 +232,21 @@ class MainWindow(QMainWindow):
         v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
 
         v.addWidget(QtWidgets.QLabel(
-            "당근 키워드 알림을 계정(토큰)에 등록합니다. 등록된 키워드에 매물이 뜨면 "
-            "당근이 푸시로 알려주고(앱 온라인 필요), 계정 1개가 인증 동네 + 인접 수십개 지역을 커버합니다."))
+            "키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신. "
+            "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국."))
+
+        # ── 현황 대시보드 ──
+        dash = QtWidgets.QGroupBox("현황"); dl = QtWidgets.QVBoxLayout(dash)
+        self.dashAccounts = QtWidgets.QLabel("계정: - (집계 전)")
+        self.dashCoverage = QtWidgets.QLabel("커버리지: - ")
+        self.dashBar = QtWidgets.QProgressBar(); self.dashBar.setRange(0, 100); self.dashBar.setValue(0)
+        self.dashBar.setFormat("전국 커버 %p%")
+        self.dashCadence = QtWidgets.QLabel("폴링 주기: -")
+        self.dashGuide = QtWidgets.QLabel("증설 안내: [커버 동네 집계]를 눌러 현황을 계산하세요")
+        self.dashGuide.setWordWrap(True)
+        for wdg in (self.dashAccounts, self.dashCoverage, self.dashBar, self.dashCadence, self.dashGuide):
+            dl.addWidget(wdg)
+        v.addWidget(dash)
 
         # 등록 폼
         form = QtWidgets.QGroupBox("키워드 등록"); fl = QtWidgets.QVBoxLayout(form)
@@ -502,8 +515,34 @@ class MainWindow(QMainWindow):
             log(f"커버 동네 {len(cov)}개 · 합산 {total}지역")
             for code, name, cnt in cov:
                 log(f"  {code}: {name} ({cnt}지역)")
-            return None
-        self._alert_run(job)
+            return cov
+        self._alert_run(job, self._update_dashboard)
+
+    def _update_dashboard(self, cov):
+        if cov is None:
+            return
+        KOREA_DONG = 3500            # 전국 행정동 대략
+        AVG_RANGE = 39              # 계정당 커버 지역(역삼동 기준)
+        codes = {c[0] for c in cov}
+        n_acc = len(codes)
+        dongs = {(c[0], c[1]) for c in cov}         # 계정×동네
+        total_regions = sum(int(c[2] or 0) for c in cov)
+        # 겹침 감안 실효 커버(대략 70%)
+        eff = int(total_regions * 0.7)
+        pct = min(100, int(eff / KOREA_DONG * 100))
+        interval = self.alertPollInterval.value()
+        cycle = round(n_acc * 1.5)                  # 순차 폴 1순환(초)
+        need_full = max(0, round(KOREA_DONG / (AVG_RANGE * 0.7)) - n_acc)  # 전국까지 추가계정(대략)
+
+        self.dashAccounts.setText(f"계정: {n_acc}개 (유효토큰) · 동네 {len(dongs)}곳")
+        self.dashCoverage.setText(f"커버리지: 합산 {total_regions}지역 · 실효 ~{eff}지역 / 전국 {KOREA_DONG}동")
+        self.dashBar.setValue(pct)
+        self.dashCadence.setText(
+            f"폴링 주기: {interval}초 · 전계정 1순환 ~{cycle}초 (순차) · 매칭 감지지연 ≈ 주기")
+        self.dashGuide.setText(
+            f"증설 안내: 현재 {n_acc}계정 → 전국까지 약 +{need_full}계정 필요(잘 분산 시). "
+            f"각 계정을 서로 다른 동네에 배치(LDPlayer GPS)해야 커버가 넓어집니다. "
+            f"계정 늘어도 폴링은 병렬화하면 주기 유지(순차면 계정당 ~1.5초 가산).")
 
     def _build_auto_area_tree(self, parent):
         """자동용 지역 트리 — 수동과 동일한 시도>구>동 3단계. 미선택 시 전국."""

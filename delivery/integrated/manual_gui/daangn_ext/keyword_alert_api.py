@@ -249,25 +249,36 @@ class MultiAccountAlerts:
         log(f"전체: 등록 {total['added']} · 스킵 {total['skipped']} · 실패 {total['failed']}")
         return total
 
-    def poll_all(self, category_id: str = FLEA_CATEGORY, log=None):
-        """전 계정 매칭 폴링 → 합산(article_id 중복제거). 각 매물에 _account 태그."""
+    def poll_all(self, category_id: str = FLEA_CATEGORY, log=None, workers: int = 12):
+        """전 계정 매칭 폴링(병렬) → 합산(article_id 중복제거). 각 매물 _account 태그.
+        병렬이라 계정 100개여도 1순환 수초(주기 유지)."""
         log = log or (lambda m: None)
-        seen, merged = set(), []
-        for code, access, proxy in self._valid():
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(acct):
+            code, access, proxy = acct
             api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
             try:
-                for m in api.new_matches(category_id):
+                res = api.new_matches(category_id)
+                for m in res:
+                    m["_account"] = code[:6]
+                return res
+            except Exception as e:
+                log(f"  {code[:6]} 폴 실패: {str(e)[:40]}")
+                return []
+            finally:
+                api.close()
+
+        valid = self._valid()
+        seen, merged = set(), []
+        with ThreadPoolExecutor(max_workers=min(workers, max(1, len(valid)))) as ex:
+            for res in ex.map(one, valid):
+                for m in res:
                     key = m.get("article_id") or m.get("id")
                     if key in seen:
                         continue
-                    seen.add(key)
-                    m["_account"] = code[:6]
-                    merged.append(m)
-            except Exception as e:
-                log(f"  {code[:6]} 폴 실패: {str(e)[:40]}")
-            finally:
-                api.close()
-        log(f"전계정 매칭 {len(merged)}건(중복제거)")
+                    seen.add(key); merged.append(m)
+        log(f"전계정({len(valid)}) 매칭 {len(merged)}건(중복제거)")
         return merged
 
     def coverage(self, log=None):
