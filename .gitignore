@@ -28,6 +28,14 @@ data/new_listings.jsonl
 *.sqlite3
 *.xlsx
 
+# ── 라이브 토큰·세션·추출물 (절대 커밋 금지) ──
+out/
+data/accounts.json
+data/*.ab
+data/seen_*.json
+karrot_token.ds
+appdata_*/
+
 # ── 환경 ──
 .venv/
 venv/

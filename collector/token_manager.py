@@ -121,8 +121,10 @@ def _default_refresh(acc: Account) -> tuple[str, str | None]:
     """
     if not acc.refresh:
         raise RuntimeError(f"[{acc.code}] refresh 토큰 없음 — 최초 캡처 필요")
+    import uuid
     from curl_cffi import requests
     headers = {"content-type": "application/json", "accept": "application/json",
+               "x-request-id": str(uuid.uuid4()),      # 앱 refresh 요청에 매번 실림(디컴파일 확정)
                **_device_headers()}
     if acc.access:
         headers["authorization"] = f"Bearer {acc.access}"

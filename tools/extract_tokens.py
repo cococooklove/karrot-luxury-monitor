@@ -45,13 +45,15 @@ IMAGE_CHUNK = 64 * 1024 * 1024     # 64MB 씩
 IMAGE_OVERLAP = 4096               # 청크 경계에 걸친 토큰 놓치지 않게 겹침
 
 
-def _scan_image(fp: str, jwts: dict):
-    """큰 디스크 이미지를 청크로 읽어 JWT 추출(전체 로드 안 함)."""
+# 앱 UA (안드로이드 에뮬): "TowneersApp/26.34.0/263400 Android/..."
+UA_RE = re.compile(rb'TowneersApp/[0-9.]+/[0-9]+ [A-Za-z0-9/._ ()-]{4,80}')
+
+
+def _scan_image(fp: str, jwts: dict, headers: dict):
+    """큰 디스크 이미지를 청크로 읽어 JWT + 디바이스 헤더 추출(전체 로드 안 함)."""
     try:
-        size = os.path.getsize(fp)
         with open(fp, "rb") as f:
             tail = b""
-            read = 0
             while True:
                 chunk = f.read(IMAGE_CHUNK)
                 if not chunk:
@@ -65,8 +67,18 @@ def _scan_image(fp: str, jwts: dict):
                     if info:
                         info["file"] = fp
                         jwts[tok] = info
+                # 앱 UA 문자열(안드로이드) — WAF 통과에 필요한 지문
+                for um in UA_RE.findall(buf):
+                    headers.setdefault("x-user-agent", um.decode("ascii", "ignore"))
+                # device_identity / ad_id / session 키 주변 UUID
+                try:
+                    txt = buf.decode("latin-1", "ignore")
+                    for hm in HDR_RE.finditer(txt):
+                        k = hm.group(1).lower().replace("-", "_")
+                        headers.setdefault(k, hm.group(2))
+                except Exception:
+                    pass
                 tail = buf[-IMAGE_OVERLAP:]
-                read += len(chunk)
     except Exception:
         pass
 
@@ -185,7 +197,7 @@ def scan(root: str):
                     pass
             # 디스크 이미지(.vmdk 등)는 청크 스캔 — ext4 평문 토큰을 원시 바이트에서
             if fn.lower().endswith(IMAGE_EXT):
-                _scan_image(fp, jwts)
+                _scan_image(fp, jwts, headers)
                 files_scanned += 1
                 continue
             if fn.lower().endswith(SCAN_EXT_SKIP):
