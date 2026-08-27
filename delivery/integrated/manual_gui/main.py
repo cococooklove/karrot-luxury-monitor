@@ -15,6 +15,29 @@ from daangn.task import CrawlTask
 from daangn.ui_mainwindow import Ui_MainWindow
 
 from PyQt6 import QtWidgets, QtCore
+
+
+# 명품 브랜드(키워드 알림 일괄등록용) — parse_luxury.BRANDS 대표명
+LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다", "디올", "셀린느",
+                 "보테가베네타", "생로랑", "발렌시아가", "펜디", "버버리", "몽클레르",
+                 "고야드", "롤렉스", "까르띠에", "티파니", "불가리", "반클리프", "오메가"]
+
+
+class _AlertWorker(QtCore.QThread):
+    """알림 API 호출을 백그라운드로(GUI 프리징 방지). fn(log_emit) 실행 후 결과 emit."""
+    done = QtCore.pyqtSignal(object)
+    log = QtCore.pyqtSignal(str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self._fn(self.log.emit))
+        except Exception as e:
+            self.log.emit(f"[오류] {type(e).__name__}: {e}")
+            self.done.emit(None)
 from PyQt6.QtGui import (
     QCloseEvent,
     QFontDatabase,
@@ -180,6 +203,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._scroll(self._build_manual_tab()), "수동 검색")
         self.auto_monitor = None
         self.tabs.addTab(self._scroll(self._build_auto_tab()), "자동 모니터")
+        self.tabs.addTab(self._scroll(self._build_alert_tab()), "키워드 알림")
         self.setCentralWidget(self.tabs)
         self._refresh_proxy_labels()
         self.resize(1200, 840)                      # 하단 위젯 안 잘리게 넉넉히
@@ -201,6 +225,161 @@ class MainWindow(QMainWindow):
         sa.setWidgetResizable(True)
         sa.setWidget(inner)
         return sa
+
+    # ── 키워드 알림 탭 ─────────────────────────────────────────────
+    def _build_alert_tab(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
+
+        v.addWidget(QtWidgets.QLabel(
+            "당근 키워드 알림을 계정(토큰)에 등록합니다. 등록된 키워드에 매물이 뜨면 "
+            "당근이 푸시로 알려주고(앱 온라인 필요), 계정 1개가 인증 동네 + 인접 수십개 지역을 커버합니다."))
+
+        # 등록 폼
+        form = QtWidgets.QGroupBox("키워드 등록"); fl = QtWidgets.QVBoxLayout(form)
+        r0 = QtWidgets.QHBoxLayout()
+        self.alertKeyword = QtWidgets.QLineEdit(); self.alertKeyword.setPlaceholderText("키워드 (예: 샤넬)")
+        self.alertMin = QtWidgets.QLineEdit(); self.alertMin.setPlaceholderText("최소가(선택)"); self.alertMin.setFixedWidth(110)
+        self.alertMax = QtWidgets.QLineEdit(); self.alertMax.setPlaceholderText("최대가(선택)"); self.alertMax.setFixedWidth(110)
+        self.alertExclude = QtWidgets.QLineEdit(); self.alertExclude.setPlaceholderText("제외 키워드(쉼표)")
+        r0.addWidget(self.alertKeyword, 2); r0.addWidget(self.alertMin); r0.addWidget(self.alertMax); r0.addWidget(self.alertExclude, 2)
+        fl.addLayout(r0)
+        r1 = QtWidgets.QHBoxLayout()
+        self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
+        self.alertBulkBtn = QtWidgets.QPushButton(f"명품 {len(LUXURY_BRANDS)}개 일괄등록")
+        self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
+        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkBtn); r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
+        fl.addLayout(r1)
+        v.addWidget(form)
+
+        # 커버 동네 정보
+        self.alertSubLabel = QtWidgets.QLabel("동네 정보: (새로고침을 누르세요)")
+        v.addWidget(self.alertSubLabel)
+
+        # 등록 목록
+        self.alertTable = QtWidgets.QTableWidget(0, 4, w)
+        self.alertTable.setHorizontalHeaderLabels(["키워드", "가격범위", "제외", "id"])
+        self.alertTable.verticalHeader().setVisible(False)
+        self.alertTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.alertTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.alertTable.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.alertTable.setMinimumHeight(300)
+        v.addWidget(self.alertTable, 1)
+
+        r2 = QtWidgets.QHBoxLayout()
+        self.alertDelBtn = QtWidgets.QPushButton("선택 삭제")
+        self.alertDelAllBtn = QtWidgets.QPushButton("전체 삭제")
+        r2.addWidget(self.alertDelBtn); r2.addWidget(self.alertDelAllBtn); r2.addStretch(1)
+        v.addLayout(r2)
+
+        self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(120)
+        v.addWidget(self.alertLog)
+
+        self.alertAddBtn.clicked.connect(self.on_alert_add)
+        self.alertBulkBtn.clicked.connect(self.on_alert_bulk)
+        self.alertRefreshBtn.clicked.connect(self.on_alert_refresh)
+        self.alertDelBtn.clicked.connect(self.on_alert_delete)
+        self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
+        self._alert_worker = None
+        return w
+
+    def _alert_api(self):
+        """스레드 내에서 호출 — thread-safe 토큰 수확 후 KeywordAlertAPI 반환."""
+        from daangn_ext.keyword_alert_api import KeywordAlertAPI
+        token = self._harvest_token_quiet()
+        if not token:
+            raise RuntimeError("유효 토큰 없음 — LDPlayer/폰 수확 확인")
+        return KeywordAlertAPI(token)
+
+    def _alert_run(self, fn, on_done=None):
+        if self._alert_worker and self._alert_worker.isRunning():
+            self.alert("이전 작업 진행 중 — 잠시 후"); return
+        self.alertLog.append("── 작업 시작 ──")
+        self._alert_worker = _AlertWorker(fn)
+        self._alert_worker.log.connect(lambda m: self.alertLog.append(m))
+        if on_done:
+            self._alert_worker.done.connect(on_done)
+        self._alert_worker.start()
+
+    def _pi(self, s):
+        s = (s or "").strip().replace(",", "")
+        return int(s) if s.isdigit() else None
+
+    def on_alert_add(self):
+        kw = self.alertKeyword.text().strip()
+        if not kw:
+            self.alert("키워드를 입력하세요"); return
+        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
+        excl = [x for x in self.alertExclude.text().replace(" ", "").split(",") if x]
+        def job(log):
+            api = self._alert_api()
+            if api.is_banned(kw):
+                log(f"'{kw}' 는 차단 키워드 — 등록불가"); return None
+            api.register(kw, mn, mx, excl); log(f"'{kw}' 등록 ✓")
+            return api.list()
+        self._alert_run(job, self._alert_populate)
+
+    def on_alert_bulk(self):
+        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
+        def job(log):
+            api = self._alert_api()
+            res = api.register_many(LUXURY_BRANDS, mn, mx, log=log)
+            log(f"완료 — 등록 {len(res['added'])} · 스킵 {len(res['skipped'])} · 실패 {len(res['failed'])}")
+            return api.list()
+        self._alert_run(job, self._alert_populate)
+
+    def on_alert_refresh(self):
+        def job(log):
+            api = self._alert_api()
+            data = api.list(); log(f"등록 {len(data.get('user_keywords') or [])}건")
+            return data
+        self._alert_run(job, self._alert_populate)
+
+    def on_alert_delete(self):
+        row = self.alertTable.currentRow()
+        if row < 0:
+            self.alert("삭제할 행을 선택하세요"); return
+        item = self.alertTable.item(row, 3)
+        if not item:
+            return
+        uid = item.text()
+        def job(log):
+            api = self._alert_api()
+            ok = api.delete(uid); log(f"삭제 {'✓' if ok else '실패'} id={uid}")
+            return api.list()
+        self._alert_run(job, self._alert_populate)
+
+    def on_alert_delete_all(self):
+        if QtWidgets.QMessageBox.question(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?") \
+                != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        def job(log):
+            api = self._alert_api()
+            n = api.delete_all(log=log); log(f"총 {n}건 삭제")
+            return api.list()
+        self._alert_run(job, self._alert_populate)
+
+    def _alert_populate(self, data):
+        if not data:
+            return
+        kws = data.get("user_keywords") or []
+        self.alertTable.setRowCount(0)
+        for k in kws:
+            r = self.alertTable.rowCount(); self.alertTable.insertRow(r)
+            price = ""
+            if k.get("min_price") or k.get("max_price"):
+                price = f"{k.get('min_price') or ''}~{k.get('max_price') or ''}"
+            vals = [k.get("keyword", ""), price,
+                    ",".join(k.get("exclude_keywords") or []), str(k.get("id", ""))]
+            for c, val in enumerate(vals):
+                self.alertTable.setItem(r, c, QtWidgets.QTableWidgetItem(val))
+        subs = data.get("subscription_infos") or []
+        if subs:
+            txt = " · ".join(f"{s.get('name')}({s.get('ranged_regions_count')}지역"
+                             + (",알림ON" if s.get('enable_notification') else ",알림OFF") + ")"
+                             for s in subs)
+            self.alertSubLabel.setText(f"커버 동네: {txt}")
 
     def _build_auto_area_tree(self, parent):
         """자동용 지역 트리 — 수동과 동일한 시도>구>동 3단계. 미선택 시 전국."""
