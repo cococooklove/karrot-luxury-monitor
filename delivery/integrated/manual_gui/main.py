@@ -273,7 +273,29 @@ class MainWindow(QMainWindow):
         r2.addWidget(self.alertDelBtn); r2.addWidget(self.alertDelAllBtn); r2.addStretch(1)
         v.addLayout(r2)
 
-        self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(120)
+        # ── 신규 매칭 (토큰 폴링, 앱/푸시 불필요) ──
+        v.addWidget(QtWidgets.QLabel("── 신규 명품 매칭 (토큰 폴링으로 수신 · 앱/LDPlayer 상시ON 불필요) ──"))
+        r3 = QtWidgets.QHBoxLayout()
+        self.alertPollBtn = QtWidgets.QPushButton("매칭 조회"); self.alertPollBtn.setObjectName("startBtn")
+        self.alertAutoPollBtn = QtWidgets.QPushButton("자동 폴링 시작")
+        self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
+        self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
+        r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertAutoPollBtn)
+        r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval); r3.addStretch(1)
+        v.addLayout(r3)
+
+        self.matchTable = QtWidgets.QTableWidget(0, 5, w)
+        self.matchTable.setHorizontalHeaderLabels(["시각", "키워드", "제목", "가격", "지역"])
+        self.matchTable.verticalHeader().setVisible(False)
+        self.matchTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.matchTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.matchTable.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.matchTable.setMinimumHeight(260)
+        self.matchTable.itemDoubleClicked.connect(self.on_match_open)
+        v.addWidget(self.matchTable, 1)
+
+        self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
         v.addWidget(self.alertLog)
 
         self.alertAddBtn.clicked.connect(self.on_alert_add)
@@ -281,7 +303,13 @@ class MainWindow(QMainWindow):
         self.alertRefreshBtn.clicked.connect(self.on_alert_refresh)
         self.alertDelBtn.clicked.connect(self.on_alert_delete)
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
+        self.alertPollBtn.clicked.connect(self.on_alert_poll)
+        self.alertAutoPollBtn.clicked.connect(self.on_alert_autopoll)
         self._alert_worker = None
+        self._match_links = {}
+        self._match_seen = set()
+        self._alert_poll_timer = QtCore.QTimer(self)
+        self._alert_poll_timer.timeout.connect(self.on_alert_poll)
         return w
 
     def _alert_api(self):
@@ -380,6 +408,60 @@ class MainWindow(QMainWindow):
                              + (",알림ON" if s.get('enable_notification') else ",알림OFF") + ")"
                              for s in subs)
             self.alertSubLabel.setText(f"커버 동네: {txt}")
+
+    # ── 신규 매칭 폴링 ──
+    def on_alert_poll(self):
+        def job(log):
+            api = self._alert_api()
+            matches = api.new_matches()
+            log(f"매칭 조회: {len(matches)}건")
+            return matches
+        self._alert_run(job, self._match_populate)
+
+    def on_alert_autopoll(self):
+        if self._alert_poll_timer.isActive():
+            self._alert_poll_timer.stop()
+            self.alertAutoPollBtn.setText("자동 폴링 시작")
+            self.alertLog.append("[자동폴링] 정지")
+        else:
+            self._alert_poll_timer.start(self.alertPollInterval.value() * 1000)
+            self.alertAutoPollBtn.setText("자동 폴링 정지")
+            self.alertLog.append(f"[자동폴링] 시작 · {self.alertPollInterval.value()}초 주기")
+            self.on_alert_poll()
+
+    def _match_populate(self, matches):
+        if matches is None:
+            return
+        import time as _t
+        new = 0
+        for m in matches:
+            key = str(m.get("id") or m.get("article_id") or m.get("title"))
+            if key in self._match_seen:
+                continue
+            self._match_seen.add(key); new += 1
+            r = self.matchTable.rowCount(); self.matchTable.insertRow(r)
+            try:
+                ts = _t.strftime("%m/%d %H:%M", _t.localtime(int(m.get("time") or 0)))
+            except Exception:
+                ts = ""
+            vals = [ts, m.get("keyword") or "", (m.get("title") or "")[:60],
+                    str(m.get("price") or ""), m.get("region") or ""]
+            for c, val in enumerate(vals):
+                cell = QtWidgets.QTableWidgetItem(val)
+                if c == 0:
+                    cell.setData(QtCore.Qt.ItemDataRole.UserRole, m.get("url") or "")
+                self.matchTable.setItem(r, c, cell)
+            self.matchTable.sortItems(0, QtCore.Qt.SortOrder.DescendingOrder)
+        if new:
+            self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
+
+    def on_match_open(self, item):
+        cell0 = self.matchTable.item(item.row(), 0)
+        url = cell0.data(QtCore.Qt.ItemDataRole.UserRole) if cell0 else ""
+        if url:
+            from PyQt6.QtGui import QDesktopServices
+            from PyQt6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(url))
 
     def _build_auto_area_tree(self, parent):
         """자동용 지역 트리 — 수동과 동일한 시도>구>동 3단계. 미선택 시 전국."""

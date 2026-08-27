@@ -21,10 +21,22 @@ import httpx
 
 WEBAPP = "webapp.kr.karrotmarket.com"
 SEARCH_BFF = "search-bff.kr.karrotmarket.com"
+INBOX_BFF = "inbox-bff.kr.karrotmarket.com"           # 알림함 telefunc RPC
+TELEFUNC_FILE = "/src/services/notification/notification.telefunc.ts"
+INBOX_ORIGIN = "https://inbox.kr.karrotwebview.com"
+INBOX_UA = "TowneersApp/26.34.0/263400 Android/13/33"
 UK_PATH = "/api/v24/keyword/user_keywords.json"
 UK_DEL = "/api/v24/keyword/user_keywords/{id}.json"
 INFO_PATH = "/api/v1/fleamarket/keyword/notification/info"
 DEFAULT_UA = "Karrot/26.34.0 (com.towneers.www; build:263400; Android 33)"
+FLEA_CATEGORY = "2"                                    # 중고거래 카테고리(명품 매물)
+
+
+def _debigint(v):
+    """telefunc 직렬화 '!BigInt:123' → '123'."""
+    if isinstance(v, str) and v.startswith("!BigInt:"):
+        return v[len("!BigInt:"):]
+    return v
 
 
 def _headers(access_token: str, config_path: str = "./data/config.json") -> dict:
@@ -124,6 +136,63 @@ class KeywordAlertAPI:
             if self.delete(k.get("id")):
                 n += 1; log(f"  삭제 ✓ {k.get('keyword')}")
         return n
+
+    # ── 알림함 telefunc (매칭 폴링) ──
+    def _telefunc(self, name: str, args: list):
+        h = dict(self.headers)
+        h["content-type"] = "text/plain"
+        h["x-user-agent"] = INBOX_UA
+        h["origin"] = INBOX_ORIGIN
+        h["referer"] = INBOX_ORIGIN + "/"
+        body = json.dumps({"file": TELEFUNC_FILE, "name": name, "args": args},
+                          ensure_ascii=False)
+        r = self._client.post(f"https://{INBOX_BFF}/_telefunc", headers=h,
+                              content=body.encode())
+        r.raise_for_status()
+        return (r.json() or {}).get("ret")
+
+    def new_matches(self, category_id: str = FLEA_CATEGORY) -> list[dict]:
+        """키워드 알림 신규 매칭(명품 매물) 폴링 → 파싱된 매물 리스트.
+        토큰만으로 됨(앱/푸시 불필요). 각 item: keyword/title/price/region/article_id/url/image/time."""
+        ret = self._telefunc("invokeListNewMatchesNotifications",
+                             [{"categoryId": str(category_id)}]) or {}
+        out = []
+        for it in ret.get("notificationInboxItems") or []:
+            kv = ((((it.get("style") or {}).get("style")) or {}).get("value")) or {}
+            aid = kv.get("articleId")
+            out.append({
+                "keyword": kv.get("matchedKeyword"),
+                "title": it.get("title"),
+                "price": kv.get("priceWithUnit"),
+                "region": kv.get("regionName"),
+                "article_id": aid,
+                "url": f"https://www.daangn.com/kr/buy-sell/-{aid}/" if aid else
+                       (it.get("landingDeeplinkUrl") or ""),
+                "image": it.get("thumbnailImageUrl"),
+                "time": _debigint((it.get("createTime") or {}).get("seconds")),
+                "id": _debigint(it.get("id")),
+                "instant_buy": kv.get("isInstantBuyAvailable"),
+                "source": "keyword",
+            })
+        # 스폰서(neighborhood) 매물도 매칭이면 포함
+        for ad in ret.get("neighborhoodAdvertisements") or []:
+            aid = _debigint(ad.get("articleId"))
+            out.append({
+                "keyword": ad.get("matchedKeyword"), "title": ad.get("title"),
+                "price": ad.get("priceWithUnit"), "region": ad.get("regionName"),
+                "article_id": aid,
+                "url": f"https://www.daangn.com/kr/buy-sell/-{aid}/" if aid else
+                       (ad.get("landingDeeplinkUrl") or ""),
+                "image": ad.get("thumbnailImageUrl"),
+                "time": _debigint((ad.get("createTime") or {}).get("seconds")),
+                "id": _debigint(ad.get("id")), "source": "ad",
+            })
+        return out
+
+    def new_matches_count(self, category_id: str = FLEA_CATEGORY) -> int:
+        ret = self._telefunc("invokeGetNewMatchesNotificationSettingsData",
+                             [{"categoryId": str(category_id)}]) or {}
+        return int(ret.get("count") or 0)
 
     def close(self):
         try:
