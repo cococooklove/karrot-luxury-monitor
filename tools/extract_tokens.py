@@ -39,6 +39,36 @@ HDR_RE = re.compile(
 SCAN_EXT_SKIP = (".so", ".dex", ".png", ".jpg", ".webp", ".ttf", ".tflite",
                  ".mp4", ".zip", ".apk", ".jar", ".001", ".vdi")
 MAX_FILE = 20 * 1024 * 1024        # 20MB 넘는 파일은 스킵(이미지 blob 등)
+# 디스크 이미지: 크더라도 청크 스캔(ext4 평문 JWT 를 원시 바이트에서 찾음)
+IMAGE_EXT = (".vmdk", ".img", ".raw", ".qcow2", ".ext4", ".bin")
+IMAGE_CHUNK = 64 * 1024 * 1024     # 64MB 씩
+IMAGE_OVERLAP = 4096               # 청크 경계에 걸친 토큰 놓치지 않게 겹침
+
+
+def _scan_image(fp: str, jwts: dict):
+    """큰 디스크 이미지를 청크로 읽어 JWT 추출(전체 로드 안 함)."""
+    try:
+        size = os.path.getsize(fp)
+        with open(fp, "rb") as f:
+            tail = b""
+            read = 0
+            while True:
+                chunk = f.read(IMAGE_CHUNK)
+                if not chunk:
+                    break
+                buf = tail + chunk
+                for m in JWT_RE.findall(buf):
+                    tok = m.decode("ascii", "ignore")
+                    if tok in jwts:
+                        continue
+                    info = classify(tok)
+                    if info:
+                        info["file"] = fp
+                        jwts[tok] = info
+                tail = buf[-IMAGE_OVERLAP:]
+                read += len(chunk)
+    except Exception:
+        pass
 
 
 # ── karrot_token.ds proto 파서 ──
@@ -153,6 +183,11 @@ def scan(root: str):
                                 jwts[t] = info
                 except Exception:
                     pass
+            # 디스크 이미지(.vmdk 등)는 청크 스캔 — ext4 평문 토큰을 원시 바이트에서
+            if fn.lower().endswith(IMAGE_EXT):
+                _scan_image(fp, jwts)
+                files_scanned += 1
+                continue
             if fn.lower().endswith(SCAN_EXT_SKIP):
                 continue
             try:
