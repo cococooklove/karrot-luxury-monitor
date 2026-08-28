@@ -2967,9 +2967,147 @@ def _run_app():
         raise SystemExit(1)              # 예외 탈출=크래시 → 워치독 재시작 신호
 
 
+def _run_headless():
+    """서버(화면 없음) 무인 런타임 — GUI 없이 등록·폴링·수확·알림. PyQt 불필요.
+    설정: data/alert_settings.json(core_only/night), notify.json(텔레그램/시트).
+    옵션 인자: --once(1회만), --no-harvest(수확 스킵), --interval=N(주기초)."""
+    import sys as _sys, json as _json, os as _os, time as _time
+    _chdir_app_dir()
+    from daangn_ext.keyword_alert_api import MultiAccountAlerts, token_remaining
+
+    def log(m):
+        print(f"[{_time.strftime('%H:%M:%S')}] {m}", flush=True)
+
+    argv = _sys.argv
+    once = "--once" in argv
+    do_harvest = "--no-harvest" not in argv
+    interval = 120
+    for a in argv:
+        if a.startswith("--interval="):
+            try: interval = max(30, int(a.split("=", 1)[1]))
+            except Exception: pass
+
+    def _settings():
+        try:
+            with open("./data/alert_settings.json", encoding="utf-8") as f:
+                return _json.load(f)
+        except Exception:
+            return {}
+
+    def _notify_cfg():
+        try:
+            with open("./notify.json", encoding="utf-8") as f:
+                return _json.load(f)
+        except Exception:
+            return {}
+
+    SEEN_FP = "./data/match_seen.json"
+    def _load_seen():
+        try:
+            with open(SEEN_FP, encoding="utf-8") as f:
+                return set(_json.load(f))
+        except Exception:
+            return set()
+    def _save_seen(seen):
+        try:
+            _os.makedirs(_os.path.dirname(SEEN_FP), exist_ok=True)
+            tmp = SEEN_FP + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(list(seen)[-5000:], f)
+            _os.replace(tmp, SEEN_FP)
+        except Exception:
+            pass
+
+    def _night_factor(nights_on):
+        if not nights_on:
+            return 1
+        h = _time.localtime().tm_hour
+        if 0 <= h < 7: return 3
+        if 22 <= h < 24 or 7 <= h < 9: return 2
+        return 1
+
+    def _notify(items, nt):
+        if not items:
+            return
+        tok, chat = nt.get("tg_token"), nt.get("tg_chat")
+        if tok and chat:
+            try:
+                from daangn.notify import TelegramSender
+                tg = TelegramSender(tok, chat, log=log)
+                for m in items:
+                    tg.enqueue(f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
+                               f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
+                               f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
+                tg.flush(); log(f"[텔레그램] {len(items)}건 전송")
+            except Exception as e:
+                log(f"[텔레그램] 실패: {str(e)[:60]}")
+        if nt.get("sheet_url"):
+            try:
+                from daangn.notify import SheetWriter
+                sw = SheetWriter(nt.get("sheet_url"), nt.get("sheet_cred") or "./credentials.json", log=log)
+                for m in items:
+                    ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(int(m.get("time") or 0))) if m.get("time") else ""
+                    sw.enqueue_row([ts, m.get("keyword") or "", m.get("title") or "", m.get("price") or "",
+                                    m.get("region") or "", m.get("_account") or "", m.get("url") or ""])
+                wrote, _ = sw.flush()
+                if wrote: log(f"[구글시트] {wrote}행 기록")
+            except Exception as e:
+                log(f"[구글시트] 실패: {str(e)[:60]}")
+
+    log("=== 헤드리스 무인 모니터 시작 ===")
+    seen = _load_seen()
+    last_harvest = 0.0
+    m = MultiAccountAlerts("./accounts.json", "./data/config.json")
+    while True:
+        st = _settings()
+        core_only = bool(st.get("core_only"))
+        nights = bool(st.get("night"))
+        now = _time.time()
+        # 자동수확(20분 주기)
+        if do_harvest and now - last_harvest > 1200:
+            try:
+                import ld_autoharvest
+                u, i, t, h = ld_autoharvest.harvest_all("./accounts.json", nudge=True, log=log)
+                log(f"[수확] 갱신 {u} 신규 {i} 총 {t} (수확 {h})")
+            except Exception as e:
+                log(f"[수확] 실패: {str(e)[:60]}")
+            last_harvest = now
+        # 유효 토큰 현황
+        try:
+            valid = len(m._valid(core_only))
+        except Exception:
+            valid = 0
+        # 폴링
+        try:
+            matches = m.poll_all(core_only=core_only, log=log)
+        except Exception as e:
+            log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
+        fresh = []
+        for x in matches:
+            k = str(x.get("id") or x.get("article_id") or x.get("title"))
+            if k in seen: continue
+            seen.add(k); fresh.append(x)
+        if fresh:
+            log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
+            _notify(fresh, _notify_cfg())
+            _save_seen(seen)
+        else:
+            log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
+        if once:
+            log("--once 완료"); break
+        eff = interval * _night_factor(nights)
+        log(f"다음 폴링 {eff}초 후")
+        try:
+            _time.sleep(eff)
+        except KeyboardInterrupt:
+            log("중단됨"); break
+
+
 if __name__ == "__main__":
     import sys as _sys
-    if "--watchdog" in _sys.argv:
+    if "--headless" in _sys.argv:
+        _run_headless()
+    elif "--watchdog" in _sys.argv:
         _run_watchdog()
     else:
         _run_app()
