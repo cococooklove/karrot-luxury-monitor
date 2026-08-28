@@ -33,6 +33,21 @@ DEFAULT_UA = "Karrot/26.34.0 (com.towneers.www; build:263400; Android 33)"
 FLEA_CATEGORY = "2"                                    # 중고거래 카테고리(명품 매물)
 
 
+def _atomic_json(path, obj):
+    """원자적 JSON 저장(temp+rename) — 동시 읽기 중 부분쓰기 방지. 성공 bool."""
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
 def _debigint(v):
     """telefunc 직렬화 '!BigInt:123' → '123'."""
     if isinstance(v, str) and v.startswith("!BigInt:"):
@@ -51,7 +66,8 @@ def _headers(access_token: str, config_path: str = "./data/config.json") -> dict
     h = {"accept": "application/json", "content-type": "application/json",
          "x-user-agent": DEFAULT_UA, "authorization": f"Bearer {access_token}"}
     try:
-        cfg = json.load(open(config_path, encoding="utf-8")).get("headers", {})
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.load(f).get("headers", {})
         for k in ("x-user-agent", "user-agent", "x-device-identity", "x-ad-id",
                   "x-country-code", "x-karrot-session-id", "accept-language"):
             if k in cfg:
@@ -223,7 +239,8 @@ class MultiAccountAlerts:
 
     def _accounts(self):
         try:
-            return json.load(open(self.accounts_fp, encoding="utf-8"))
+            with open(self.accounts_fp, encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
             return []
 
@@ -238,24 +255,21 @@ class MultiAccountAlerts:
 
     def _region_cache(self):
         try:
-            return json.load(open(self._REGION_CACHE_FP, encoding="utf-8"))
+            with open(self._REGION_CACHE_FP, encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
             return {}
 
     def _save_region_cache(self, cache):
-        try:
-            os.makedirs(os.path.dirname(self._REGION_CACHE_FP), exist_ok=True)
-            json.dump(cache, open(self._REGION_CACHE_FP, "w", encoding="utf-8"),
-                      ensure_ascii=False)
-        except Exception:
-            pass
+        _atomic_json(self._REGION_CACHE_FP, cache)
 
     _CORE_FP = "./data/core_regions.json"
 
     def core_keywords(self):
         """핵심지역 키워드 — 파일(사용자 편집) 우선, 없으면 기본값."""
         try:
-            v = json.load(open(self._CORE_FP, encoding="utf-8"))
+            with open(self._CORE_FP, encoding="utf-8") as f:
+                v = json.load(f)
             if isinstance(v, list) and v:
                 return [str(x).strip() for x in v if str(x).strip()]
         except Exception:
@@ -263,13 +277,7 @@ class MultiAccountAlerts:
         return list(self.CORE_REGION_KEYWORDS)
 
     def save_core_keywords(self, keywords):
-        try:
-            os.makedirs(os.path.dirname(self._CORE_FP), exist_ok=True)
-            json.dump(list(keywords), open(self._CORE_FP, "w", encoding="utf-8"),
-                      ensure_ascii=False)
-            return True
-        except Exception:
-            return False
+        return _atomic_json(self._CORE_FP, list(keywords))
 
     def _is_core(self, region_name):
         r = region_name or ""
@@ -374,16 +382,13 @@ class MultiAccountAlerts:
 
     def _state(self):
         try:
-            return json.load(open(self._STATE_FP, encoding="utf-8"))
+            with open(self._STATE_FP, encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
             return {}
 
     def _save_state(self, state):
-        try:
-            os.makedirs(os.path.dirname(self._STATE_FP), exist_ok=True)
-            json.dump(state, open(self._STATE_FP, "w", encoding="utf-8"), ensure_ascii=False)
-        except Exception:
-            pass
+        _atomic_json(self._STATE_FP, state)
 
     def reset_state(self):
         """계정 폴링 상태(실패/점검플래그) 초기화 — 오탐(토큰만료로 인한 실패 등) 해소용."""

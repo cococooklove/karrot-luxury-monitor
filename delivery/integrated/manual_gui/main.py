@@ -532,7 +532,8 @@ class MainWindow(QMainWindow):
     def _load_alert_settings(self):
         import json as _json
         try:
-            return _json.load(open(self._ALERT_SETTINGS_FILE, encoding="utf-8"))
+            with open(self._ALERT_SETTINGS_FILE, encoding="utf-8") as _f:
+                return _json.load(_f)
         except Exception:
             return {}
 
@@ -541,7 +542,8 @@ class MainWindow(QMainWindow):
         try:
             cur = self._load_alert_settings(); cur.update(patch)
             _os.makedirs(_os.path.dirname(self._ALERT_SETTINGS_FILE), exist_ok=True)
-            _json.dump(cur, open(self._ALERT_SETTINGS_FILE, "w", encoding="utf-8"))
+            with open(self._ALERT_SETTINGS_FILE, "w", encoding="utf-8") as _f:
+                _json.dump(cur, _f)
         except Exception:
             pass
 
@@ -560,7 +562,9 @@ class MainWindow(QMainWindow):
         soonest = None
         try:
             from daangn_ext.keyword_alert_api import token_remaining
-            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+            with open("./accounts.json", encoding="utf-8") as _f:
+                _accs = _json.load(_f)
+            for a in _accs:
                 acc = a.get("access") or ""
                 if not acc:
                     expired += 1; continue
@@ -739,7 +743,9 @@ class MainWindow(QMainWindow):
         n_total = n_valid = 0
         try:
             from daangn_ext.keyword_alert_api import token_remaining
-            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+            with open("./accounts.json", encoding="utf-8") as _f:
+                _accs = _json.load(_f)
+            for a in _accs:
                 n_total += 1
                 if a.get("access") and token_remaining(a["access"]) > 60:
                     n_valid += 1
@@ -927,7 +933,8 @@ class MainWindow(QMainWindow):
     def _load_match_seen(self):
         import json as _json, os as _os
         try:
-            return set(_json.load(open(self._MATCH_SEEN_FILE, encoding="utf-8")))
+            with open(self._MATCH_SEEN_FILE, encoding="utf-8") as _f:
+                return set(_json.load(_f))
         except Exception:
             return set()
 
@@ -937,7 +944,8 @@ class MainWindow(QMainWindow):
             _os.makedirs(_os.path.dirname(self._MATCH_SEEN_FILE), exist_ok=True)
             # 최근 5000개만 유지(무한증가 방지)
             keep = list(self._match_seen)[-5000:]
-            _json.dump(keep, open(self._MATCH_SEEN_FILE, "w", encoding="utf-8"))
+            with open(self._MATCH_SEEN_FILE, "w", encoding="utf-8") as _f:
+                _json.dump(keep, _f)
         except Exception:
             pass
 
@@ -1081,7 +1089,8 @@ class MainWindow(QMainWindow):
         self.auto_area_leaves = []
         CK = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate
         try:
-            data = _json.load(open("./OUT.json", encoding="utf-8"))
+            with open("./OUT.json", encoding="utf-8") as _f:
+                data = _json.load(_f)
         except Exception:
             return tree
         # 수동 _init_tree 와 동일: 블록(구) 단위 순회 → 같은 동 코드 보장
@@ -2219,7 +2228,9 @@ class MainWindow(QMainWindow):
         try:
             from daangn_ext.token_manager import token_exp
             best = None
-            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+            with open("./accounts.json", encoding="utf-8") as _f:
+                _accs = _json.load(_f)
+            for a in _accs:
                 acc = a.get("access") or ""
                 if acc and (best is None or token_exp(acc) > token_exp(best)):
                     best = acc
@@ -2244,7 +2255,9 @@ class MainWindow(QMainWindow):
         try:
             from daangn_ext.token_manager import token_exp
             best = None
-            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+            with open("./accounts.json", encoding="utf-8") as _f:
+                _accs = _json.load(_f)
+            for a in _accs:
                 acc = a.get("access") or ""
                 if acc and (best is None or token_exp(acc) > token_exp(best)):
                     best = acc
