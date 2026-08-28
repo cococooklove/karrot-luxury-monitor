@@ -460,6 +460,9 @@ class MainWindow(QMainWindow):
             "전국=모든 유효계정 사용 / 핵심지역=명품 밀집동네(강남·분당·해운대 등) 계정만 "
             "→ 적은 계정으로 거래량 대부분 커버. 등록·폴링·집계 전부 이 모드 따름.")
         self.alertAutoStartChk = QtWidgets.QCheckBox("실행 시 자동 폴링")
+        self.alertBootChk = QtWidgets.QCheckBox("PC 부팅 시 자동실행")
+        self.alertBootChk.setToolTip(
+            "Windows 시작 시 이 프로그램 자동실행 → '실행 시 자동 폴링'과 함께면 재부팅해도 무인 감시 지속. (Windows 전용)")
         self.alertNightChk = QtWidgets.QCheckBox("야간 감속")
         self.alertNightChk.setToolTip(
             "밴회피: 자동폴링 주기를 시간대별 자동조정 — 새벽 0~7시 ×3, 늦밤/이른아침 ×2, 주간 정상. "
@@ -476,7 +479,8 @@ class MainWindow(QMainWindow):
         r3b = QtWidgets.QHBoxLayout()
         r3b.addWidget(QtWidgets.QLabel("주기")); r3b.addWidget(self.alertPollInterval)
         r3b.addSpacing(12); r3b.addWidget(QtWidgets.QLabel("커버")); r3b.addWidget(self.alertCoverMode)
-        r3b.addSpacing(12); r3b.addWidget(self.alertAutoStartChk); r3b.addWidget(self.alertNightChk)
+        r3b.addSpacing(12); r3b.addWidget(self.alertAutoStartChk)
+        r3b.addWidget(self.alertBootChk); r3b.addWidget(self.alertNightChk)
         r3b.addStretch(1)
         v.addLayout(r3b)
 
@@ -544,6 +548,12 @@ class MainWindow(QMainWindow):
             pass
         self.alertNightChk.toggled.connect(
             lambda on: self._save_alert_settings({"night": bool(on)}))
+        # PC 부팅 자동실행 — 실제 레지스트리 등록상태로 초기화
+        try:
+            self.alertBootChk.setChecked(self._boot_autostart_enabled())
+        except Exception:
+            pass
+        self.alertBootChk.toggled.connect(self._set_boot_autostart)
         if self.alertAutoStartChk.isChecked():
             QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
@@ -568,6 +578,53 @@ class MainWindow(QMainWindow):
                 _json.dump(cur, _f)
         except Exception:
             pass
+
+    _BOOT_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _BOOT_NAME = "KarrotLuxeMonitor"
+
+    def _boot_command(self):
+        """부팅 시 실행할 커맨드 — frozen exe면 exe, 개발이면 pythonw + main.py."""
+        import sys as _sys
+        if getattr(_sys, "frozen", False):
+            return f'"{_sys.executable}"'
+        script = os.path.abspath(__file__)
+        exe = _sys.executable
+        pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        launcher = pyw if os.path.exists(pyw) else exe
+        return f'"{launcher}" "{script}"'
+
+    def _boot_autostart_enabled(self):
+        import sys as _sys
+        if _sys.platform != "win32":
+            return False
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._BOOT_KEY) as k:
+                winreg.QueryValueEx(k, self._BOOT_NAME)
+            return True
+        except Exception:
+            return False
+
+    def _set_boot_autostart(self, enable):
+        import sys as _sys
+        if _sys.platform != "win32":
+            self.alertLog.append("[부팅 자동실행] Windows 전용 — Mac/Linux 미지원")
+            return
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._BOOT_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                if enable:
+                    winreg.SetValueEx(k, self._BOOT_NAME, 0, winreg.REG_SZ,
+                                      self._boot_command())
+                else:
+                    try:
+                        winreg.DeleteValue(k, self._BOOT_NAME)
+                    except FileNotFoundError:
+                        pass
+            self.alertLog.append(f"[부팅 자동실행] {'등록' if enable else '해제'}됨")
+        except Exception as e:
+            self.alertLog.append(f"[부팅 자동실행] 실패: {str(e)[:60]}")
 
     def _autostart_poll(self):
         """실행 시 자동폴링 — 타이머 꺼져 있을 때만 시작(중복 방지)."""
@@ -2814,7 +2871,21 @@ def _setup_logging():
     print(f"[로그] {logf.name}")
 
 
+def _chdir_app_dir():
+    """앱 폴더로 작업디렉터리 고정 — 상대경로(accounts.json/OUT.json/data/) 견고.
+    Windows 부팅 자동실행(cwd=system32)·바탕화면 실행 등 어디서 켜도 데이터 정상."""
+    import sys as _sys
+    try:
+        base = os.path.dirname(_sys.executable) if getattr(_sys, "frozen", False) \
+            else os.path.dirname(os.path.abspath(__file__))
+        if base:
+            os.chdir(base)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    _chdir_app_dir()
     _setup_logging()
     try:
         app = QApplication([])
