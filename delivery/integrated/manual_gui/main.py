@@ -944,18 +944,35 @@ class MainWindow(QMainWindow):
             return matches
         self._alert_run(job, self._match_populate)
 
+    def _set_sleep_block(self, block):
+        """자동폴링 중 PC 절전 차단(Windows). 절전 걸리면 감시 멈추는 함정 방지.
+        block=True 상시 각성 유지, False 해제. Mac/Linux no-op."""
+        import sys as _sys
+        if _sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            flags = (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) if block else ES_CONTINUOUS
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        except Exception:
+            pass
+
     def on_alert_autopoll(self):
         if self._alert_poll_timer.isActive():
             self._alert_poll_timer.stop()
+            self._set_sleep_block(False)
             self.alertAutoPollBtn.setText("자동 폴링 시작")
             self.alertLog.append("[자동폴링] 정지")
         else:
             iv = self.alertPollInterval.value() * self._night_factor()
             self._alert_poll_timer.start(iv * 1000)
+            self._set_sleep_block(True)
             self.alertAutoPollBtn.setText("자동 폴링 정지")
             nf = self._night_factor()
             night = f" · 야간감속 ×{nf}" if nf > 1 else ""
-            self.alertLog.append(f"[자동폴링] 시작 · {iv}초 주기 · 전계정(전국){night}")
+            self.alertLog.append(f"[자동폴링] 시작 · {iv}초 주기 · 전계정(전국){night} · 절전차단")
             self.on_alert_poll_all()
 
     def _match_populate(self, matches):
