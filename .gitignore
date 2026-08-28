@@ -35,6 +35,15 @@ data/*.ab
 data/seen_*.json
 karrot_token.ds
 appdata_*/
+deploy_win/
+deploy_pkg/
+dist_exe/
+# manual_gui 런타임 비밀(어느 경로든)
+**/accounts.json
+**/data/config.json
+**/karrot_monitor.log
+delivery/integrated/manual_gui/data/
+delivery/integrated/manual_gui/accounts.json
 
 # ── 환경 ──
 .venv/

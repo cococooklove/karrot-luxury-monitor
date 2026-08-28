@@ -14,13 +14,43 @@ from daangn.model import Product
 from daangn.task import CrawlTask
 from daangn.ui_mainwindow import Ui_MainWindow
 
-from PyQt6 import QtWidgets, QtCore
+from PyQt6 import QtWidgets, QtCore, QtGui
 
 
 # 명품 브랜드(키워드 알림 일괄등록용) — parse_luxury.BRANDS 대표명
 LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다", "디올", "셀린느",
                  "보테가베네타", "생로랑", "발렌시아가", "펜디", "버버리", "몽클레르",
                  "고야드", "롤렉스", "까르띠에", "티파니", "불가리", "반클리프", "오메가"]
+
+
+class _HarvestThread(QtCore.QThread):
+    """백그라운드 자동 수확 — 앱 실행 중 주기적으로 LDPlayer/폰서 토큰 갱신.
+    accounts.json 을 항상 신선하게 유지 → 수동 수확 불필요. access 30분 만료 전 갱신."""
+    tick = QtCore.pyqtSignal(str)
+
+    def __init__(self, interval=1200, accounts="./accounts.json"):
+        super().__init__()
+        self.interval = interval
+        self.accounts = accounts
+        self._stop = False
+
+    def run(self):
+        import time as _t
+        while not self._stop:
+            try:
+                import ld_autoharvest
+                u, i, t, h = ld_autoharvest.harvest_all(self.accounts, nudge=True)
+                self.tick.emit(f"[자동수확] {h}계정 갱신 · 총 {t}계정" if h
+                               else "[자동수확] 대상 없음(LDPlayer/폰 확인)")
+            except Exception as e:
+                self.tick.emit(f"[자동수확] 실패: {str(e)[:60]}")
+            for _ in range(max(1, self.interval)):
+                if self._stop:
+                    return
+                _t.sleep(1)
+
+    def stop(self):
+        self._stop = True
 
 
 class _AlertWorker(QtCore.QThread):
@@ -196,6 +226,21 @@ class MainWindow(QMainWindow):
         self._setup_tabs()
         self.sb.showMessage("프로그램이 시작되었습니다.")
 
+        # 백그라운드 자동 수확 — 토큰 항상 신선 유지(수동 불필요). 20분 주기.
+        self._harvest_thread = _HarvestThread(interval=1200, accounts="./accounts.json")
+        self._harvest_thread.tick.connect(self._on_harvest_tick)
+        self._harvest_thread.start()
+
+    def _on_harvest_tick(self, msg):
+        if hasattr(self, "alertLog"):
+            self.alertLog.append(msg)
+        self.sb.showMessage(msg, 4000)
+        # 계정수 대시보드 즉시 갱신
+        try:
+            self._init_dashboard()
+        except Exception:
+            pass
+
     def _setup_tabs(self):
         """기존 수동 UI 를 탭으로 감싸고 자동 탭 추가. 스크롤로 어떤 창크기든 다 보이게."""
         self.takeCentralWidget()                    # 기존 중앙위젯 버림(위젯은 재사용)
@@ -335,7 +380,28 @@ class MainWindow(QMainWindow):
         self._match_seen = set()
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self.on_alert_poll_all)  # 자동폴링=전국(전계정)
+        self._init_dashboard()
         return w
+
+    def _init_dashboard(self):
+        """탭 열릴 때 계정수 즉시 표시(토큰 불필요, accounts.json만). 커버리지는 버튼."""
+        import json as _json
+        n_total = n_valid = 0
+        try:
+            from daangn_ext.keyword_alert_api import token_remaining
+            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+                n_total += 1
+                if a.get("access") and token_remaining(a["access"]) > 60:
+                    n_valid += 1
+        except Exception:
+            pass
+        self.dashAccounts.setText(
+            f"계정: 총 {n_total}개 · 유효토큰 {n_valid}개"
+            + ("  (수확 필요 — 유효토큰 0)" if n_valid == 0 else ""))
+        self.dashCadence.setText(f"폴링 주기: {self.alertPollInterval.value()}초 (자동폴링 시)")
+        self.dashGuide.setText(
+            "커버리지·전국% 는 [커버 동네 집계]를 눌러 계산하세요. "
+            "1계정≈39지역 · 전국(~3500동)엔 서로 다른 동네 ~90~250계정 필요.")
 
     def _alert_api(self):
         """스레드 내에서 호출 — thread-safe 토큰 수확 후 KeywordAlertAPI 반환."""
@@ -489,14 +555,16 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(url))
 
     # ── 전국(전 계정) 멀티계정 ──
-    def _multi(self):
-        """전 계정 토큰 신선화(LDPlayer 수확) 후 MultiAccountAlerts 반환. 스레드 내 호출."""
+    def _multi(self, harvest=False):
+        """MultiAccountAlerts 반환. harvest=True 면 LDPlayer 수확 먼저(느림·프로덕션용).
+        기본은 accounts.json 기존 토큰 사용(빠름 — coverage/poll 즉시)."""
         from daangn_ext.keyword_alert_api import MultiAccountAlerts
-        try:
-            import ld_autoharvest
-            ld_autoharvest.harvest_all("./accounts.json", nudge=True)
-        except Exception:
-            pass
+        if harvest:
+            try:
+                import ld_autoharvest
+                ld_autoharvest.harvest_all("./accounts.json", nudge=True)
+            except Exception:
+                pass
         return MultiAccountAlerts("./accounts.json", "./data/config.json")
 
     def on_alert_bulk_all(self):
@@ -1585,14 +1653,16 @@ class MainWindow(QMainWindow):
         self.ui.saveToExcelBtn.setEnabled(True)
 
     def alert(self, text: str):
-        message_box = QtWidgets.QMessageBox()
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setWindowIcon(app_icon())
         message_box.setWindowTitle("알림")
         message_box.setText(text)
         message_box.setIcon(QtWidgets.QMessageBox.Icon.Information)
         message_box.exec()
 
     def ask(self, text: str):
-        reply = QtWidgets.QMessageBox()
+        reply = QtWidgets.QMessageBox(self)
+        reply.setWindowIcon(app_icon())
         reply.setWindowTitle("알림")
         reply.setText(text)
         reply.setStandardButtons(
@@ -2184,7 +2254,14 @@ class MainWindow(QMainWindow):
         self.sb.showMessage(msg)
 
 
-FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+FONT_DIR = os.path.join(ASSET_DIR, "fonts")
+APP_ICON_PATH = os.path.join(ASSET_DIR, "icon.png")
+
+
+def app_icon() -> QtGui.QIcon:
+    """명품 앱 아이콘. 없으면 빈 QIcon(기본 로켓 대신 Qt 기본)."""
+    return QtGui.QIcon(APP_ICON_PATH) if os.path.isfile(APP_ICON_PATH) else QtGui.QIcon()
 
 
 def load_bundled_fonts() -> list[str]:
@@ -2249,6 +2326,7 @@ if __name__ == "__main__":
     _setup_logging()
     try:
         app = QApplication([])
+        app.setWindowIcon(app_icon())   # Dock/작업표시줄/팝업 전부 명품 아이콘
         load_bundled_fonts()
         window = MainWindow()
         window.show()
