@@ -83,6 +83,29 @@ class _ThumbThread(QtCore.QThread):
             pass
 
 
+class _NotifyThread(QtCore.QThread):
+    """텔레그램 발송 백그라운드 — 매칭 다수여도 GUI 안 멈춤."""
+    log = QtCore.pyqtSignal(str)
+
+    def __init__(self, tok, chat, items):
+        super().__init__()
+        self.tok, self.chat, self.items = tok, chat, items
+
+    def run(self):
+        try:
+            from daangn.notify import TelegramSender
+            tg = TelegramSender(self.tok, self.chat, log=lambda m: self.log.emit(m))
+            for m in self.items:
+                line = (f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
+                        f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
+                        f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
+                tg.enqueue(line)
+            tg.flush()
+            self.log.emit(f"[텔레그램] {len(self.items)}건 전송")
+        except Exception as e:
+            self.log.emit(f"[텔레그램] 실패: {str(e)[:50]}")
+
+
 class _AlertWorker(QtCore.QThread):
     """알림 API 호출을 백그라운드로(GUI 프리징 방지). fn(log_emit) 실행 후 결과 emit."""
     done = QtCore.pyqtSignal(object)
@@ -515,7 +538,10 @@ class MainWindow(QMainWindow):
                   f" · 직전신규 {self._last_new})")
         else:
             pl = "⚪ 자동폴링 OFF"
-        self.dashHealth.setText("   ".join([tok, hv, pl]))
+        # 텔레그램 배선 여부(무인 알림 도달 확인)
+        nt = getattr(self, "_notify", {}) or {}
+        tg = "🟢 텔레그램 연결" if (nt.get("tg_token") and nt.get("tg_chat")) else "⚪ 텔레그램 미설정"
+        self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
         bg = "#FDECEC" if not tok_ok else "#F2F4F6"
         self.dashHealth.setStyleSheet(
             "font-size:13px; font-weight:600; padding:6px 8px; border-radius:6px;"
@@ -747,23 +773,19 @@ class MainWindow(QMainWindow):
             pass
 
     def _notify_matches(self, items):
-        """신규 매칭 → 텔레그램 푸시(notify.json 설정 시). GUI 안 봐도 알림."""
+        """신규 매칭 → 텔레그램 푸시(notify.json 설정 시). 백그라운드 발송(GUI 안 멈춤)."""
         tok = (getattr(self, "_notify", {}) or {}).get("tg_token")
         chat = (getattr(self, "_notify", {}) or {}).get("tg_chat")
         if not (tok and chat and items):
             return
-        try:
-            from daangn.notify import TelegramSender
-            tg = TelegramSender(tok, chat, log=self.alertLog.append)
-            for m in items:
-                line = (f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
-                        f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
-                        f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
-                tg.enqueue(line)
-            tg.flush()
-            self.alertLog.append(f"[텔레그램] {len(items)}건 전송")
-        except Exception as e:
-            self.alertLog.append(f"[텔레그램] 실패: {str(e)[:50]}")
+        if not hasattr(self, "_notify_threads"):
+            self._notify_threads = []
+        th = _NotifyThread(tok, chat, list(items))
+        th.log.connect(self.alertLog.append)
+        th.finished.connect(lambda t=th: self._notify_threads.remove(t)
+                            if t in self._notify_threads else None)
+        self._notify_threads.append(th)
+        th.start()
 
     def _set_thumb(self, item, data):
         """다운로드된 썸네일 바이트 → 아이콘(메인스레드서 안전하게 setIcon)."""
