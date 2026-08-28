@@ -2916,8 +2916,9 @@ def _chdir_app_dir():
             else os.path.dirname(os.path.abspath(__file__))
         if base:
             os.chdir(base)
-    except Exception:
-        pass
+    except Exception as e:
+        # chdir 실패 = 상대경로(data/·notify.json 등) 전부 깨짐 → 조용히 넘기면 무인서 오작동. 반드시 표면화.
+        print(f"[치명] 작업디렉터리 이동 실패 → 상대경로 오작동 가능: {e}", file=_sys.stderr, flush=True)
 
 
 def _child_cmd():
@@ -3005,15 +3006,21 @@ def _run_headless():
     def _load_seen():
         try:
             with open(SEEN_FP, encoding="utf-8") as f:
-                return set(_json.load(f))
+                data = _json.load(f)
+            # 순서 보존 dedup(FIFO 유지)
+            out, s = [], set()
+            for k in data:
+                if k not in s:
+                    s.add(k); out.append(k)
+            return out
         except Exception:
-            return set()
-    def _save_seen(seen):
+            return []
+    def _save_seen(order):
         try:
             _os.makedirs(_os.path.dirname(SEEN_FP), exist_ok=True)
             tmp = SEEN_FP + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                _json.dump(list(seen)[-5000:], f)
+                _json.dump(order[-5000:], f)
             _os.replace(tmp, SEEN_FP)
         except Exception:
             pass
@@ -3055,7 +3062,9 @@ def _run_headless():
                 log(f"[구글시트] 실패: {str(e)[:60]}")
 
     log("=== 헤드리스 무인 모니터 시작 ===")
-    seen = _load_seen()
+    seen_order = _load_seen()          # FIFO 순서 리스트
+    seen = set(seen_order)             # 빠른 조회
+    SEEN_CAP = 20000                   # 메모리 상한(무한증가 방지, 오래된 것 FIFO 축출)
     last_harvest = 0.0
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
@@ -3094,14 +3103,20 @@ def _run_headless():
         except Exception as e:
             log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
         fresh = []
-        for x in matches:
-            k = str(x.get("id") or x.get("article_id") or x.get("title"))
+        for idx, x in enumerate(matches):
+            base = x.get("id") or x.get("article_id") or x.get("title")
+            k = str(base) if base else f"_noid_{now:.0f}_{idx}"   # 키 없으면 고유화(오탐 dedup 방지)
             if k in seen: continue
-            seen.add(k); fresh.append(x)
+            seen.add(k); seen_order.append(k); fresh.append(x)
+        # 메모리 상한: 초과분 FIFO 축출(오래된 것부터)
+        if len(seen_order) > SEEN_CAP:
+            drop = seen_order[:-SEEN_CAP]
+            seen.difference_update(drop)
+            del seen_order[:-SEEN_CAP]
         if fresh:
             log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
             _notify(fresh, _notify_cfg())
-            _save_seen(seen)
+            _save_seen(seen_order)
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
         if once:
