@@ -157,64 +157,73 @@ from PIL import Image as PILImage
 from openpyxl import load_workbook
 
 
+# ── 명품 프리미엄 테마 (다크 + 골드) ──
+# base #0E0C0A · surface #1A1613 · input #221C16 · border #2E2720
+# gold #C6A968 (bright #D4B978 / deep #A88C52) · ivory #EDE6D8 · muted #A99D89
 APP_QSS = """
-* { font-family: 'Pretendard', '.AppleSystemUIFont', 'Apple SD Gothic Neo', 'Malgun Gothic', Helvetica; font-size: 13px; color: #333D4B; }
-QMainWindow, QWidget { background: #F9FAFB; }
-QToolTip { background:#191F28; color:#fff; border:none; padding:6px 8px; border-radius:8px; }
+* { font-family: 'Pretendard', '.AppleSystemUIFont', 'Apple SD Gothic Neo', 'Malgun Gothic', Helvetica; font-size: 13px; color: #C9BFAD; }
+QMainWindow, QWidget { background: #100D0A; }
+QToolTip { background:#221C16; color:#EDE6D8; border:1px solid #4A3F2E; padding:7px 10px; border-radius:8px; }
 
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar { qproperty-drawBase: 0; }
-QTabBar::tab { background: transparent; color: #8B95A1; padding: 10px 18px; margin-right: 2px; border: none; font-size: 15px; font-weight: 700; }
-QTabBar::tab:selected { color: #FF7E36; }
-QTabBar::tab:hover:!selected { color: #4E5968; }
+QTabBar::tab { background: transparent; color: #8A7F6C; padding: 11px 20px; margin-right: 4px; border: none; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 700; }
+QTabBar::tab:selected { color: #D4B978; border-bottom: 2px solid #C6A968; }
+QTabBar::tab:hover:!selected { color: #B8AC94; }
 
-QLabel { color: #4E5968; }
+QLabel { color: #A99D89; background: transparent; }
 
-QLineEdit, QSpinBox, QComboBox { background: #F2F4F6; border: 1.5px solid transparent; border-radius: 12px; padding: 8px 13px; color: #191F28; font-size: 14px; min-height: 24px; selection-background-color: #FFD9C2; }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { background: #FFFFFF; border: 1.5px solid #FF7E36; }
-QLineEdit::placeholder { color: #B0B8C1; }
+QLineEdit, QSpinBox, QComboBox { background: #221C16; border: 1.5px solid #2E2720; border-radius: 11px; padding: 8px 13px; color: #EDE6D8; font-size: 14px; min-height: 24px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; }
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus { background: #2A231B; border: 1.5px solid #C6A968; }
+QLineEdit::placeholder { color: #6E6656; }
+QComboBox QAbstractItemView { background: #221C16; color: #EDE6D8; border: 1px solid #4A3F2E; border-radius: 10px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; outline: none; padding: 4px; }
+QComboBox::drop-down { border: none; width: 22px; }
 QSpinBox::up-button, QSpinBox::down-button { width: 16px; border: none; background: transparent; }
 
-QPushButton { background: #F2F4F6; color: #4E5968; border: none; border-radius: 12px; padding: 9px 14px; font-weight: 700; font-size: 13px; min-height: 22px; }
-QPushButton:hover { background: #E8EBED; }
-QPushButton:pressed { background: #DDE1E5; }
-QPushButton:disabled { color: #B0B8C1; }
-QPushButton#startBtn, QPushButton#autoStartBtn { background: #FF7E36; color: #FFFFFF; padding: 10px 22px; font-size: 14px; }
-QPushButton#startBtn:hover, QPushButton#autoStartBtn:hover { background: #F26F26; }
-QPushButton#startBtn:pressed, QPushButton#autoStartBtn:pressed { background: #E0631F; }
+QPushButton { background: #221C16; color: #C9BFAD; border: 1px solid #37301F; border-radius: 11px; padding: 9px 15px; font-weight: 700; font-size: 13px; min-height: 22px; }
+QPushButton:hover { background: #2C2519; border-color: #C6A968; color: #EDE6D8; }
+QPushButton:pressed { background: #1C1710; }
+QPushButton:disabled { color: #5C5445; border-color: #241E17; background: #17130E; }
+QPushButton#startBtn, QPushButton#autoStartBtn { border: none; color: #1A1409; padding: 10px 24px; font-size: 14px; font-weight: 800;
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #D9BE82, stop:1 #C0A05F); }
+QPushButton#startBtn:hover, QPushButton#autoStartBtn:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E6CB8E, stop:1 #CBAB68); }
+QPushButton#startBtn:pressed, QPushButton#autoStartBtn:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #C0A05F, stop:1 #A88C52); }
 
-QCheckBox { color: #4E5968; spacing: 8px; font-size: 14px; min-height: 24px; }
-QCheckBox::indicator { width: 20px; height: 20px; border: 2px solid #D1D6DB; border-radius: 6px; background: #FFFFFF; }
-QCheckBox::indicator:checked { background: #FF7E36; border-color: #FF7E36; }
-QCheckBox::indicator:hover { border-color: #FF7E36; }
+QCheckBox { color: #A99D89; spacing: 8px; font-size: 14px; min-height: 24px; background: transparent; }
+QCheckBox::indicator { width: 19px; height: 19px; border: 1.5px solid #4A3F2E; border-radius: 6px; background: #221C16; }
+QCheckBox::indicator:checked { background: #C6A968; border-color: #C6A968; image: none; }
+QCheckBox::indicator:hover { border-color: #C6A968; }
 
-QGroupBox { background: #FFFFFF; border: none; border-radius: 18px; margin-top: 16px; padding: 20px 18px 14px 18px; font-size: 15px; font-weight: 800; color: #191F28; }
-QGroupBox::title { subcontrol-origin: margin; left: 8px; top: 2px; padding: 0 4px; }
+QGroupBox { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1D1812, stop:1 #17130E); border: 1px solid #2E2720; border-radius: 16px; margin-top: 18px; padding: 22px 18px 16px 18px; font-size: 15px; font-weight: 800; color: #E7C77E; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; top: 2px; padding: 0 6px; letter-spacing: 1px; }
 
-QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #FFFFFF; border: 1px solid #F2F4F6; border-radius: 14px; padding: 4px; font-size: 13px; }
+QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #14100C; border: 1px solid #2A231B; border-radius: 13px; padding: 4px; font-size: 13px; color: #C9BFAD; }
 QTreeWidget::item, QListWidget::item { padding: 6px 4px; border-radius: 8px; }
-QTreeWidget::item:selected, QListWidget::item:selected { background: #FFF0E6; color: #E8590C; }
-QTreeWidget::item:hover, QListWidget::item:hover { background: #F9FAFB; }
+QTreeWidget::item:selected, QListWidget::item:selected { background: #2E2417; color: #E7C77E; }
+QTreeWidget::item:hover, QListWidget::item:hover { background: #1C1710; }
 
-QTableWidget { gridline-color: #F2F4F6; }
-QTableWidget::item { padding: 9px 6px; }
-QTableWidget::item:selected { background: #FFF0E6; color: #191F28; }
-QHeaderView::section { background: #FFFFFF; color: #8B95A1; padding: 11px 8px; border: none; border-bottom: 1.5px solid #F2F4F6; font-weight: 700; font-size: 12px; }
-QTableCornerButton::section { background: #FFFFFF; border: none; }
+QTableWidget { gridline-color: #241E17; }
+QTableWidget::item { padding: 9px 6px; color: #D6CDBB; }
+QTableWidget::item:selected { background: #2E2417; color: #F5EFE2; }
+QHeaderView::section { background: #14100C; color: #9C8F6E; padding: 11px 8px; border: none; border-bottom: 1.5px solid #C6A968; font-weight: 700; font-size: 11px; letter-spacing: 1px; }
+QTableCornerButton::section { background: #14100C; border: none; }
 
-QProgressBar { background: #F2F4F6; border: none; border-radius: 4px; max-height: 6px; }
-QProgressBar::chunk { background: #FF7E36; border-radius: 4px; }
+QProgressBar { background: #241E17; border: 1px solid #2E2720; border-radius: 7px; min-height: 22px; max-height: 22px; color: #EDE6D8; font-weight: 800; font-size: 11px; letter-spacing: 1px; text-align: center; }
+QProgressBar::chunk { border-radius: 6px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #A88C52, stop:1 #E6CB8E); }
 
 QScrollArea { border: none; background: transparent; }
 QSplitter::handle { background: transparent; }
-QStatusBar { background: transparent; color: #8B95A1; }
+QStatusBar { background: #0C0A08; color: #8A7F6C; border-top: 1px solid #241E17; }
 QStatusBar::item { border: none; }
 
+QDialog { background: #14100C; }
+
 QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; }
-QScrollBar::handle:vertical { background: #D1D6DB; border-radius: 5px; min-height: 40px; }
-QScrollBar::handle:vertical:hover { background: #B0B8C1; }
+QScrollBar::handle:vertical { background: #3A3225; border-radius: 5px; min-height: 40px; }
+QScrollBar::handle:vertical:hover { background: #5A4E37; }
 QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px 4px; }
-QScrollBar::handle:horizontal { background: #D1D6DB; border-radius: 5px; min-width: 40px; }
+QScrollBar::handle:horizontal { background: #3A3225; border-radius: 5px; min-width: 40px; }
+QScrollBar::handle:horizontal:hover { background: #5A4E37; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """
@@ -338,8 +347,8 @@ class MainWindow(QMainWindow):
         from PyQt6.QtGui import QColor
         for gb in self.findChildren(QtWidgets.QGroupBox):
             eff = QGraphicsDropShadowEffect(gb)
-            eff.setBlurRadius(28); eff.setOffset(0, 6)
-            eff.setColor(QColor(17, 24, 40, 28))
+            eff.setBlurRadius(34); eff.setOffset(0, 8)
+            eff.setColor(QColor(0, 0, 0, 150))
             gb.setGraphicsEffect(eff)
 
     def _scroll(self, inner):
@@ -362,13 +371,13 @@ class MainWindow(QMainWindow):
         self.dashHealth = QtWidgets.QLabel("상태 확인 중…")
         self.dashHealth.setWordWrap(True)
         self.dashHealth.setStyleSheet(
-            "font-size:13px; font-weight:600; padding:6px 8px; border-radius:6px;"
-            "background:#F2F4F6; color:#333D4B;")
+            "font-size:13px; font-weight:600; padding:8px 10px; border-radius:8px;"
+            "background:#221C16; color:#D6CDBB; border:1px solid #2E2720;")
         self.dashAccounts = QtWidgets.QLabel("계정: - (집계 전)")
         self.dashCoverage = QtWidgets.QLabel("커버리지: - ")
         self.dashBar = QtWidgets.QProgressBar(); self.dashBar.setRange(0, 100); self.dashBar.setValue(0)
         self.dashBar.setFormat("전국 커버 %p%")
-        self.dashBar.setFixedHeight(24)            # 높이 붕괴 방지(라벨 사이 끼임 깨짐 수정)
+        self.dashBar.setFixedHeight(22)            # 높이 붕괴 방지(라벨 사이 끼임 깨짐 수정)
         self.dashBar.setTextVisible(True)
         dl.setSpacing(8)
         self.dashCadence = QtWidgets.QLabel("폴링 주기: -")
@@ -608,10 +617,10 @@ class MainWindow(QMainWindow):
         if nt.get("sheet_url"):
             tg += " · 🟢 시트"
         self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
-        bg = "#FDECEC" if not tok_ok else "#F2F4F6"
+        bg = "#3A211C" if not tok_ok else "#221C16"
         self.dashHealth.setStyleSheet(
-            "font-size:13px; font-weight:600; padding:6px 8px; border-radius:6px;"
-            f"background:{bg}; color:#333D4B;")
+            "font-size:13px; font-weight:600; padding:8px 10px; border-radius:8px;"
+            f"background:{bg}; color:#D6CDBB; border:1px solid #2E2720;")
 
     def on_alert_fleet(self):
         """계정 팜 현황 다이얼로그 — 계정별 상태 색상코딩, 열려있는 동안 5초 자동갱신."""
@@ -621,7 +630,7 @@ class MainWindow(QMainWindow):
         dlg.resize(760, 560)
         lay = QtWidgets.QVBoxLayout(dlg)
         summ = QtWidgets.QLabel("")
-        summ.setStyleSheet("font-weight:600; padding:4px;")
+        summ.setStyleSheet("font-weight:700; padding:6px 4px; color:#E7C77E;")
         lay.addWidget(summ)
         cols = ["계정", "동네", "만료(분)", "핵심", "실패", "상태"]
         tbl = QtWidgets.QTableWidget(0, len(cols), dlg)
@@ -652,11 +661,11 @@ class MainWindow(QMainWindow):
                 for c, val in enumerate(vals):
                     it = QtWidgets.QTableWidgetItem(val)
                     if r["banned"]:
-                        it.setBackground(QBrush(QColor("#FDECEC")))
+                        it.setBackground(QBrush(QColor("#3A211C")))
                     elif not r["alive"]:
-                        it.setForeground(QBrush(QColor("#C0C0C0")))
+                        it.setForeground(QBrush(QColor("#6E6656")))
                     elif r["core"]:
-                        it.setForeground(QBrush(QColor("#1D6FE0")))
+                        it.setForeground(QBrush(QColor("#E7C77E")))
                     tbl.setItem(i, c, it)
 
         btnRow = QtWidgets.QHBoxLayout()
@@ -1268,7 +1277,7 @@ class MainWindow(QMainWindow):
 
         # 상태 + 진행바
         self.autoStatus = QtWidgets.QLabel("대기 중", w)
-        self.autoStatus.setStyleSheet("color:#8B95A1;")
+        self.autoStatus.setStyleSheet("color:#9C8F6E;")
         self.autoProgress = QtWidgets.QProgressBar(w)
         self.autoProgress.setRange(0, 0); self.autoProgress.setVisible(False)
         self.autoProgress.setMaximumHeight(6); self.autoProgress.setTextVisible(False)
@@ -1287,7 +1296,7 @@ class MainWindow(QMainWindow):
         self.autoTable.itemSelectionChanged.connect(self.on_auto_row_selected)
         self.autoTable.setMinimumHeight(340)
         self._auto_rows = []
-        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#191F28; font-size:15px;")
+        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#E7C77E; font-size:15px; letter-spacing:1px;")
         lay.addWidget(rl0)
         lay.addWidget(self.autoTable, 1)
 
@@ -1376,7 +1385,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QtWidgets.QLabel("신규/가격변동 매물을 텔레그램·구글시트로 알림. 설정은 notify.json 에 저장됩니다.", dlg),
                     0, Qt.AlignmentFlag.AlignLeft)
         result = QtWidgets.QLabel("", dlg); result.setWordWrap(True)
-        result.setStyleSheet("color:#8B95A1;")
+        result.setStyleSheet("color:#9C8F6E;")
         v.addWidget(result)
 
         bb = QtWidgets.QHBoxLayout()
@@ -1397,7 +1406,7 @@ class MainWindow(QMainWindow):
                 result.setText("⚠️ 텔레그램(토큰+방) 또는 구글시트 주소를 먼저 입력하세요.")
                 return
             test.setEnabled(False); test.setText("보내는 중…")
-            result.setStyleSheet("color:#8B95A1;")
+            result.setStyleSheet("color:#9C8F6E;")
             result.setText("전송 시도 중…")
             # 부모는 MainWindow — 다이얼로그가 먼저 닫혀도 실행 중 스레드가 삭제되지 않게
             self._notify_test = NotifyTestThread(self, cur)
@@ -1420,7 +1429,7 @@ class MainWindow(QMainWindow):
                     lines.append(("✅ 구글시트: " if res["sheet_ok"] else "❌ 구글시트: ")
                                  + res["sheet_msg"])
                 bad = (cur["tg_token"] and not res["tg_ok"]) or res["sheet_ok"] is False
-                result.setStyleSheet("color:#E5484D;" if bad else "color:#128A6B;")
+                result.setStyleSheet("color:#D98A7A;" if bad else "color:#A9C6A0;")
                 result.setText("\n".join(lines) or "테스트할 항목 없음")
                 test.setEnabled(True); test.setText("테스트 발송")
             self._notify_test.result.connect(done)
@@ -1833,7 +1842,7 @@ class MainWindow(QMainWindow):
         """상태바 우측 상시 표시 — 쓸 수 있는 IP 수 + 현재 요청간격(자동감속 반영).
         차단 대응은 전부 자동이라, 사용자에게 필요한 건 설정이 아니라 **지금 상태**다."""
         self.healthLabel = QtWidgets.QLabel("")
-        self.healthLabel.setStyleSheet("color:#4E5968; font-size:12px;")
+        self.healthLabel.setStyleSheet("color:#9C8F6E; font-size:12px;")
         self.healthBtn = QtWidgets.QPushButton("진단")
         self.healthBtn.setFixedHeight(24)
         self.healthBtn.setToolTip(
@@ -1889,7 +1898,7 @@ class MainWindow(QMainWindow):
         dlg.resize(720, 520)
         v = QtWidgets.QVBoxLayout(dlg)
         head = QtWidgets.QLabel(f"판정: {res['verdict']}")
-        head.setStyleSheet("font-weight:800; font-size:15px; color:#191F28;")
+        head.setStyleSheet("font-weight:800; font-size:15px; color:#E7C77E; letter-spacing:1px;")
         act = QtWidgets.QLabel(f"대응: {res['action']}")
         act.setWordWrap(True)
         v.addWidget(head); v.addWidget(act)
@@ -1959,7 +1968,7 @@ class MainWindow(QMainWindow):
         cl.addWidget(fc)
 
         hdr = QtWidgets.QHBoxLayout()
-        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#191F28; font-size:15px;")
+        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#E7C77E; font-size:15px; letter-spacing:1px;")
         hdr.addWidget(rl0); hdr.addStretch(1)
         cl.addLayout(hdr)
         self.ui.itemListView.setMinimumHeight(360)
