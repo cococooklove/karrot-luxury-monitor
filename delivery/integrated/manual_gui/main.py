@@ -351,8 +351,8 @@ class MainWindow(QMainWindow):
         r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval); r3.addStretch(1)
         v.addLayout(r3)
 
-        self.matchTable = QtWidgets.QTableWidget(0, 5, w)
-        self.matchTable.setHorizontalHeaderLabels(["시각", "키워드", "제목", "가격", "지역"])
+        self.matchTable = QtWidgets.QTableWidget(0, 6, w)
+        self.matchTable.setHorizontalHeaderLabels(["시각", "키워드", "제목", "가격", "지역", "계정"])
         self.matchTable.verticalHeader().setVisible(False)
         self.matchTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.matchTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -377,7 +377,7 @@ class MainWindow(QMainWindow):
         self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
         self._alert_worker = None
         self._match_links = {}
-        self._match_seen = set()
+        self._match_seen = self._load_match_seen()
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self.on_alert_poll_all)  # 자동폴링=전국(전계정)
         self._init_dashboard()
@@ -538,7 +538,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 ts = ""
             vals = [ts, m.get("keyword") or "", (m.get("title") or "")[:60],
-                    str(m.get("price") or ""), m.get("region") or ""]
+                    str(m.get("price") or ""), m.get("region") or "", m.get("_account") or ""]
             for c, val in enumerate(vals):
                 cell = QtWidgets.QTableWidgetItem(val)
                 if c == 0:
@@ -548,6 +548,26 @@ class MainWindow(QMainWindow):
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
             self._notify_matches(new_items)
+            self._save_match_seen()
+
+    _MATCH_SEEN_FILE = "./data/match_seen.json"
+
+    def _load_match_seen(self):
+        import json as _json, os as _os
+        try:
+            return set(_json.load(open(self._MATCH_SEEN_FILE, encoding="utf-8")))
+        except Exception:
+            return set()
+
+    def _save_match_seen(self):
+        import json as _json, os as _os
+        try:
+            _os.makedirs(_os.path.dirname(self._MATCH_SEEN_FILE), exist_ok=True)
+            # 최근 5000개만 유지(무한증가 방지)
+            keep = list(self._match_seen)[-5000:]
+            _json.dump(keep, open(self._MATCH_SEEN_FILE, "w", encoding="utf-8"))
+        except Exception:
+            pass
 
     def _notify_matches(self, items):
         """신규 매칭 → 텔레그램 푸시(notify.json 설정 시). GUI 안 봐도 알림."""
