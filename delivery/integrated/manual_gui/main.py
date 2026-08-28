@@ -407,12 +407,19 @@ class MainWindow(QMainWindow):
         self.alertCoverageBtn = QtWidgets.QPushButton("커버 동네 집계")
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
+        self.alertCoverMode = QtWidgets.QComboBox()
+        self.alertCoverMode.addItem("전국 풀커버", False)
+        self.alertCoverMode.addItem("핵심지역 집중", True)
+        self.alertCoverMode.setToolTip(
+            "전국=모든 유효계정 사용 / 핵심지역=명품 밀집동네(강남·분당·해운대 등) 계정만 "
+            "→ 적은 계정으로 거래량 대부분 커버. 등록·폴링·집계 전부 이 모드 따름.")
         self.alertAutoStartChk = QtWidgets.QCheckBox("실행 시 자동 폴링")
         self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
         self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
         r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
         r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
         r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval)
+        r3.addWidget(QtWidgets.QLabel("커버")); r3.addWidget(self.alertCoverMode)
         r3.addWidget(self.alertAutoStartChk); r3.addWidget(self.alertTgTestBtn); r3.addStretch(1)
         v.addLayout(r3)
 
@@ -465,6 +472,14 @@ class MainWindow(QMainWindow):
             pass
         self.alertAutoStartChk.toggled.connect(
             lambda on: self._save_alert_settings({"autostart": bool(on)}))
+        # 커버 모드 복원 + 저장
+        try:
+            if self._load_alert_settings().get("core_only"):
+                self.alertCoverMode.setCurrentIndex(1)
+        except Exception:
+            pass
+        self.alertCoverMode.currentIndexChanged.connect(
+            lambda _i: self._save_alert_settings({"core_only": bool(self._core_only())}))
         if self.alertAutoStartChk.isChecked():
             QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
@@ -820,21 +835,31 @@ class MainWindow(QMainWindow):
                 pass
         return MultiAccountAlerts("./accounts.json", "./data/config.json")
 
+    def _core_only(self):
+        """커버 모드 = 핵심지역 집중이면 True. (콤보 currentData)"""
+        try:
+            return bool(self.alertCoverMode.currentData())
+        except Exception:
+            return False
+
     def on_alert_bulk_all(self):
         mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
+        co = self._core_only()
         def job(log):
-            self._multi().register_all(LUXURY_BRANDS, mn, mx, log=log)
+            self._multi().register_all(LUXURY_BRANDS, mn, mx, log=log, core_only=co)
             return None
         self._alert_run(job)
 
     def on_alert_poll_all(self):
+        co = self._core_only()
         def job(log):
-            return self._multi().poll_all(log=log)
+            return self._multi().poll_all(log=log, core_only=co)
         self._alert_run(job, self._match_populate)
 
     def on_alert_coverage(self):
+        co = self._core_only()
         def job(log):
-            cov = self._multi().coverage(log=log)
+            cov = self._multi().coverage(log=log, core_only=co)
             total = sum(int(c[2] or 0) for c in cov)
             log(f"커버 동네 {len(cov)}개 · 합산 {total}지역")
             for code, name, cnt in cov:

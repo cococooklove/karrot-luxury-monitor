@@ -227,19 +227,66 @@ class MultiAccountAlerts:
         except Exception:
             return []
 
-    def _valid(self):
-        """(code, access, proxy) 리스트 — access 살아있는 계정만."""
-        out = []
+    # 명품 밀집 핵심지역(인증동네명에 포함되면 core). 20-30계정으로 거래량 대부분 커버.
+    CORE_REGION_KEYWORDS = [
+        "강남", "서초", "송파", "청담", "압구정", "논현", "역삼", "삼성", "대치", "반포",
+        "잠원", "잠실", "한남", "성수", "용산", "여의도", "목동",
+        "분당", "판교", "정자", "수지", "광교", "영통",
+        "해운대", "수영", "센텀", "수성", "봉무", "유성",
+    ]
+    _REGION_CACHE_FP = "./data/account_regions.json"
+
+    def _region_cache(self):
+        try:
+            return json.load(open(self._REGION_CACHE_FP, encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_region_cache(self, cache):
+        try:
+            os.makedirs(os.path.dirname(self._REGION_CACHE_FP), exist_ok=True)
+            json.dump(cache, open(self._REGION_CACHE_FP, "w", encoding="utf-8"),
+                      ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _is_core(self, region_name):
+        r = region_name or ""
+        return any(k in r for k in self.CORE_REGION_KEYWORDS)
+
+    def _valid(self, core_only=False):
+        """(code, access, proxy) 리스트 — access 살아있는 계정만.
+        core_only=True 면 인증동네가 명품 밀집 핵심지역인 계정만(지역명 캐시, 최초 1회 조회)."""
+        alive = []
         for a in self._accounts():
             acc = a.get("access") or ""
             if acc and token_remaining(acc) > 60:
-                out.append((str(a.get("code") or ""), acc, a.get("proxy")))
+                alive.append((str(a.get("code") or ""), acc, a.get("proxy")))
+        if not core_only:
+            return alive
+        cache = self._region_cache()
+        dirty = False
+        out = []
+        for code, access, proxy in alive:
+            name = cache.get(code)
+            if name is None:                    # 최초 조회 → 캐시
+                try:
+                    api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
+                    subs = api.subscriptions(); api.close()
+                    name = (subs[0].get("name") if subs else "") or ""
+                except Exception:
+                    name = ""
+                cache[code] = name; dirty = True
+            if self._is_core(name):
+                out.append((code, access, proxy))
+        if dirty:
+            self._save_region_cache(cache)
         return out
 
     def register_all(self, keywords, min_price=None, max_price=None,
-                     exclude_keywords=None, log=None):
+                     exclude_keywords=None, log=None, core_only=False):
         log = log or (lambda m: None)
-        valid = self._valid()
+        valid = self._valid(core_only)
         log(f"유효 계정 {len(valid)}개 (만료계정 제외)")
         total = {"added": 0, "skipped": 0, "failed": 0}
         for code, access, proxy in valid:
@@ -257,7 +304,8 @@ class MultiAccountAlerts:
         log(f"전체: 등록 {total['added']} · 스킵 {total['skipped']} · 실패 {total['failed']}")
         return total
 
-    def poll_all(self, category_id: str = FLEA_CATEGORY, log=None, workers: int = 12):
+    def poll_all(self, category_id: str = FLEA_CATEGORY, log=None, workers: int = 12,
+                 core_only=False):
         """전 계정 매칭 폴링(병렬) → 합산(article_id 중복제거). 각 매물 _account 태그.
         병렬이라 계정 100개여도 1순환 수초(주기 유지)."""
         log = log or (lambda m: None)
@@ -277,7 +325,7 @@ class MultiAccountAlerts:
             finally:
                 api.close()
 
-        valid = self._valid()
+        valid = self._valid(core_only)
         seen, merged = set(), []
         with ThreadPoolExecutor(max_workers=min(workers, max(1, len(valid)))) as ex:
             for res in ex.map(one, valid):
@@ -289,11 +337,11 @@ class MultiAccountAlerts:
         log(f"전계정({len(valid)}) 매칭 {len(merged)}건(중복제거)")
         return merged
 
-    def coverage(self, log=None):
+    def coverage(self, log=None, core_only=False):
         """전 계정 커버 동네 집계 → [(code, 동네명, 지역수)]."""
         log = log or (lambda m: None)
         out = []
-        for code, access, proxy in self._valid():
+        for code, access, proxy in self._valid(core_only):
             api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
             try:
                 for s in api.subscriptions():
