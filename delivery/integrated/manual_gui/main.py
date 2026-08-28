@@ -463,6 +463,9 @@ class MainWindow(QMainWindow):
         self.alertBootChk = QtWidgets.QCheckBox("PC 부팅 시 자동실행")
         self.alertBootChk.setToolTip(
             "Windows 시작 시 이 프로그램 자동실행 → '실행 시 자동 폴링'과 함께면 재부팅해도 무인 감시 지속. (Windows 전용)")
+        self.alertCrashChk = QtWidgets.QCheckBox("크래시 자동복구")
+        self.alertCrashChk.setToolTip(
+            "앱이 예기치 못하게 죽으면 감시자가 자동 재시작. '부팅 자동실행'과 함께 켜면 부팅부터 감시자 모드로 실행돼 완전 무인. (Windows 전용)")
         self.alertNightChk = QtWidgets.QCheckBox("야간 감속")
         self.alertNightChk.setToolTip(
             "밴회피: 자동폴링 주기를 시간대별 자동조정 — 새벽 0~7시 ×3, 늦밤/이른아침 ×2, 주간 정상. "
@@ -480,7 +483,8 @@ class MainWindow(QMainWindow):
         r3b.addWidget(QtWidgets.QLabel("주기")); r3b.addWidget(self.alertPollInterval)
         r3b.addSpacing(12); r3b.addWidget(QtWidgets.QLabel("커버")); r3b.addWidget(self.alertCoverMode)
         r3b.addSpacing(12); r3b.addWidget(self.alertAutoStartChk)
-        r3b.addWidget(self.alertBootChk); r3b.addWidget(self.alertNightChk)
+        r3b.addWidget(self.alertBootChk); r3b.addWidget(self.alertCrashChk)
+        r3b.addWidget(self.alertNightChk)
         r3b.addStretch(1)
         v.addLayout(r3b)
 
@@ -554,6 +558,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.alertBootChk.toggled.connect(self._set_boot_autostart)
+        # 크래시 자동복구 — 설정 복원 + 저장 + (부팅 등록돼 있으면 커맨드 갱신)
+        try:
+            self.alertCrashChk.setChecked(bool(self._load_alert_settings().get("crash_recover")))
+        except Exception:
+            pass
+        self.alertCrashChk.toggled.connect(self._on_crash_toggle)
         if self.alertAutoStartChk.isChecked():
             QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
@@ -583,15 +593,24 @@ class MainWindow(QMainWindow):
     _BOOT_NAME = "KarrotLuxeMonitor"
 
     def _boot_command(self):
-        """부팅 시 실행할 커맨드 — frozen exe면 exe, 개발이면 pythonw + main.py."""
+        """부팅 시 실행할 커맨드 — frozen exe면 exe, 개발이면 pythonw + main.py.
+        크래시 자동복구 켜져 있으면 --watchdog(감시자 모드)로 실행."""
         import sys as _sys
+        wd = " --watchdog" if self._load_alert_settings().get("crash_recover") else ""
         if getattr(_sys, "frozen", False):
-            return f'"{_sys.executable}"'
+            return f'"{_sys.executable}"{wd}'
         script = os.path.abspath(__file__)
         exe = _sys.executable
         pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
         launcher = pyw if os.path.exists(pyw) else exe
-        return f'"{launcher}" "{script}"'
+        return f'"{launcher}" "{script}"{wd}'
+
+    def _on_crash_toggle(self, on):
+        self._save_alert_settings({"crash_recover": bool(on)})
+        # 부팅 자동실행이 이미 켜져 있으면 커맨드(--watchdog 포함)를 즉시 갱신
+        if self.alertBootChk.isChecked():
+            self._set_boot_autostart(True)
+        self.alertLog.append(f"[크래시 자동복구] {'켜짐 — 부팅 시 감시자 모드' if on else '꺼짐'}")
 
     def _boot_autostart_enabled(self):
         import sys as _sys
@@ -2901,7 +2920,36 @@ def _chdir_app_dir():
         pass
 
 
-if __name__ == "__main__":
+def _child_cmd():
+    """자식(실제 앱) 실행 커맨드 — frozen exe면 exe --child, 개발이면 python main.py --child."""
+    import sys as _sys
+    if getattr(_sys, "frozen", False):
+        return [_sys.executable, "--child"]
+    return [_sys.executable, os.path.abspath(__file__), "--child"]
+
+
+def _run_watchdog():
+    """크래시 자동복구 감시자 — 앱을 자식으로 실행, 비정상 종료 시 재시작.
+    정상 종료(코드 0=유저가 창 닫음)면 감시 종료. 재시작 백오프 5·10·…·60초."""
+    import subprocess as _sp, time as _t, sys as _sys
+    _chdir_app_dir()
+    print(f"[워치독] 감시 시작 — 크래시 시 자동 재시작")
+    fails = 0
+    while True:
+        try:
+            p = _sp.Popen(_child_cmd())
+            code = p.wait()
+        except Exception as e:
+            print(f"[워치독] 실행 실패: {e}"); code = 1
+        if code == 0:
+            print("[워치독] 앱 정상 종료 — 감시 종료"); break
+        fails += 1
+        wait = min(60, 5 * fails)
+        print(f"[워치독] 앱 비정상 종료(코드 {code}) — {wait}초 후 재시작 (누적 {fails}회)")
+        _t.sleep(wait)
+
+
+def _run_app():
     _chdir_app_dir()
     _setup_logging()
     try:
@@ -2910,8 +2958,18 @@ if __name__ == "__main__":
         load_bundled_fonts()
         window = MainWindow()
         window.show()
-        app.exec()
+        raise SystemExit(app.exec())     # 종료코드 전달(워치독이 정상/크래시 구분)
+    except SystemExit:
+        raise
     except Exception:
         import traceback
-        traceback.print_exc()   # _Tee 로 로그파일에도 기록됨
-        raise
+        traceback.print_exc()            # _Tee 로 로그파일에도 기록됨
+        raise SystemExit(1)              # 예외 탈출=크래시 → 워치독 재시작 신호
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if "--watchdog" in _sys.argv:
+        _run_watchdog()
+    else:
+        _run_app()
