@@ -385,6 +385,11 @@ class MultiAccountAlerts:
         except Exception:
             pass
 
+    def reset_state(self):
+        """계정 폴링 상태(실패/점검플래그) 초기화 — 오탐(토큰만료로 인한 실패 등) 해소용."""
+        self._save_state({})
+        return True
+
     def fleet_status(self):
         """팜 운영용 계정별 상태(무-네트워크: accounts.json + 지역/상태 캐시).
         [{code, region, exp_min, alive, core, fail, banned, last_err}]."""

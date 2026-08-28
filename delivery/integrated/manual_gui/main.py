@@ -612,7 +612,7 @@ class MainWindow(QMainWindow):
             core = sum(1 for r in rows if r["core"] and r["alive"])
             banned = sum(1 for r in rows if r["banned"])
             summ.setText(f"총 {len(rows)}계정 · 유효 {alive} · 핵심(유효) {core}"
-                         + (f" · ⚠️밴격리 {banned}" if banned else ""))
+                         + (f" · ⚠️점검필요 {banned}" if banned else ""))
             tbl.setRowCount(0)
             for r in rows:
                 i = tbl.rowCount(); tbl.insertRow(i)
@@ -620,7 +620,7 @@ class MainWindow(QMainWindow):
                 exp_txt = "만료" if exp < 0 or (not r["alive"]) else f"{exp}"
                 vals = [r["code"], r["region"], exp_txt,
                         "★" if r["core"] else "", str(r["fail"]),
-                        "밴격리" if r["banned"] else ("정상" if r["alive"] else "만료")]
+                        "점검필요" if r["banned"] else ("정상" if r["alive"] else "만료")]
                 for c, val in enumerate(vals):
                     it = QtWidgets.QTableWidgetItem(val)
                     if r["banned"]:
@@ -633,11 +633,22 @@ class MainWindow(QMainWindow):
 
         btnRow = QtWidgets.QHBoxLayout()
         editBtn = QtWidgets.QPushButton("핵심지역 편집")
+        resetBtn = QtWidgets.QPushButton("상태 초기화")
+        resetBtn.setToolTip("실패/점검필요 플래그 초기화 — 토큰만료로 인한 오탐 해소")
         refreshBtn = QtWidgets.QPushButton("새로고침")
-        btnRow.addWidget(editBtn); btnRow.addWidget(refreshBtn); btnRow.addStretch(1)
+        btnRow.addWidget(editBtn); btnRow.addWidget(resetBtn)
+        btnRow.addWidget(refreshBtn); btnRow.addStretch(1)
         lay.addLayout(btnRow)
         editBtn.clicked.connect(lambda: self._edit_core_regions(refresh))
         refreshBtn.clicked.connect(lambda: refresh())
+
+        def do_reset():
+            try:
+                self._multi().reset_state(); self.alertLog.append("[팜] 계정 상태 초기화")
+            except Exception:
+                pass
+            refresh()
+        resetBtn.clicked.connect(do_reset)
 
         refresh()
         t = QtCore.QTimer(dlg); t.timeout.connect(refresh); t.start(5000)
