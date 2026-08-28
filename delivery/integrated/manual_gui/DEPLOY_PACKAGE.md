@@ -34,13 +34,27 @@ GUI '자동' 탭서 직접 입력하거나 conditions.xlsx 로 다중조건:
 - 지역: 전국(동단위) 또는 선택 동네
 - 명품 브랜드 사전은 `daangn_ext`/`parse_luxury` 에 내장 — 키워드만 지정하면 필터됨
 
-## 클라 사용 (제로 설정)
-1. LDPlayer 켜기 (.ldbk 복원된 계정들, 로그인 상태)
-2. `KarrotMonitor.exe` 더블클릭
-3. '자동' 탭 → '자동 모니터 시작'
+## 클라 사용 (제로 설정 — 프로그램만 실행)
+1. `KarrotMonitor.exe` 더블클릭
+2. '자동' 탭 → '자동 모니터 시작'
+   - **LDPlayer 자동 부팅** (ldconsole 로 인스턴스 기동 — 클라가 LDPlayer 안 켜도 됨)
    - '토큰 갱신' 기본 체크됨 → LDPlayer서 access 자동수확(WAF 우회)
    - 신규 명품 매물 → 결과 테이블 + 텔레그램 알림
-4. 끝. 계속 켜두면 무인.
+3. 끝. 계속 켜두면 무인.
+
+> 운영자 1회 사전준비(클라 PC): LDPlayer 설치 + .ldbk 로 인스턴스 복원(계정 로그인).
+> 이후 클라는 exe 만 실행 — LDPlayer 를 직접 열 필요 없음(exe 가 부팅).
+
+## 키워드 알림 탭 (무인 운영 핵심)
+토큰만으로 명품 신규매물 실시간 수신 — 앱/LDPlayer 상시 켜둘 필요 없음.
+
+- **실시간 헬스줄**: 토큰(유효N·임박만료) / 자동수확(다음) / 자동폴링(주기·마지막·신규) / 텔레그램·시트 — 한 눈에.
+- **커버 모드**: `전국 풀커버`(모든 계정) ↔ `핵심지역 집중`(명품 밀집동네 계정만, 20~30계정으로 거래량 대부분). 등록·폴링·집계 전부 반영.
+- **자동 폴링 + 실행 시 자동 시작**: 앱 켜면 무인 감시. `야간 감속`(새벽 주기 자동 완화, 밴회피).
+- **매칭 테이블**: 썸네일(매물 사진) · 더블클릭 매물열기 · 계정 컬럼. 재시작해도 중복알림 안 감(seen 영속).
+- **계정 현황 패널**: 계정별 동네·토큰만료·핵심여부·폴링실패·점검필요. `핵심지역 편집`·`상태 초기화`.
+- **알림**: 텔레그램(실시간) + 구글시트(검색가능 히스토리) 병행. `텔레그램 테스트` 버튼으로 사전 검증.
+- **토큰 자동수확**: 20분 주기 백그라운드. 만료임박만 nudge(효율). 루팅=su / 디버그앱=run-as. 100계정 병렬.
 
 ## 동작 원리 (요약)
 - 토큰: LDPlayer 정품앱이 스스로 갱신 → exe 가 su 로 karrot_token.ds 수확 → accounts.json.
@@ -52,4 +66,4 @@ GUI '자동' 탭서 직접 입력하거나 conditions.xlsx 로 다중조건:
 ## 빌드 (네가, GitHub Actions)
 Actions 탭 > build-exe > Run workflow → 완료 후 Artifacts 에서 KarrotMonitor 다운로드.
 로컬 Windows 빌드: `manual_gui/` 에서
-`pip install -e . pyinstaller && pyinstaller --onefile --windowed --name KarrotMonitor --collect-all curl_cffi --collect-all PyQt6 --collect-submodules daangn --collect-submodules daangn_ext --hidden-import ld_autoharvest main.py`
+`pip install -e . pyinstaller && pyinstaller --onefile --windowed --name KarrotMonitor --icon assets/icon.ico --add-data "assets:assets" --collect-all curl_cffi --collect-all PyQt6 --collect-submodules daangn --collect-submodules daangn_ext --hidden-import ld_autoharvest main.py`
