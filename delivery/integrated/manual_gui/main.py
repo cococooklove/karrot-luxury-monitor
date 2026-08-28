@@ -232,6 +232,8 @@ class MainWindow(QMainWindow):
         self._harvest_thread.start()
 
     def _on_harvest_tick(self, msg):
+        import time as _t
+        self._last_harvest_ts = _t.time()
         if hasattr(self, "alertLog"):
             self.alertLog.append(msg)
         self.sb.showMessage(msg, 4000)
@@ -282,6 +284,11 @@ class MainWindow(QMainWindow):
 
         # ── 현황 대시보드 ──
         dash = QtWidgets.QGroupBox("현황"); dl = QtWidgets.QVBoxLayout(dash)
+        self.dashHealth = QtWidgets.QLabel("상태 확인 중…")
+        self.dashHealth.setWordWrap(True)
+        self.dashHealth.setStyleSheet(
+            "font-size:13px; font-weight:600; padding:6px 8px; border-radius:6px;"
+            "background:#F2F4F6; color:#333D4B;")
         self.dashAccounts = QtWidgets.QLabel("계정: - (집계 전)")
         self.dashCoverage = QtWidgets.QLabel("커버리지: - ")
         self.dashBar = QtWidgets.QProgressBar(); self.dashBar.setRange(0, 100); self.dashBar.setValue(0)
@@ -292,7 +299,8 @@ class MainWindow(QMainWindow):
         self.dashCadence = QtWidgets.QLabel("폴링 주기: -")
         self.dashGuide = QtWidgets.QLabel("증설 안내: [커버 동네 집계]를 눌러 현황을 계산하세요")
         self.dashGuide.setWordWrap(True)
-        for wdg in (self.dashAccounts, self.dashCoverage, self.dashBar, self.dashCadence, self.dashGuide):
+        for wdg in (self.dashHealth, self.dashAccounts, self.dashCoverage, self.dashBar,
+                    self.dashCadence, self.dashGuide):
             dl.addWidget(wdg)
         v.addWidget(dash)
 
@@ -347,10 +355,12 @@ class MainWindow(QMainWindow):
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
         self.alertAutoStartChk = QtWidgets.QCheckBox("실행 시 자동 폴링")
+        self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
+        self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
         r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
         r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
         r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval)
-        r3.addWidget(self.alertAutoStartChk); r3.addStretch(1)
+        r3.addWidget(self.alertAutoStartChk); r3.addWidget(self.alertTgTestBtn); r3.addStretch(1)
         v.addLayout(r3)
 
         self.matchTable = QtWidgets.QTableWidget(0, 6, w)
@@ -377,11 +387,20 @@ class MainWindow(QMainWindow):
         self.alertBulkAllBtn.clicked.connect(self.on_alert_bulk_all)
         self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
         self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
+        self.alertTgTestBtn.clicked.connect(self.on_alert_tg_test)
         self._alert_worker = None
         self._match_links = {}
         self._match_seen = self._load_match_seen()
+        self._last_harvest_ts = 0
+        self._last_poll_ts = 0
+        self._last_new = 0
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self.on_alert_poll_all)  # 자동폴링=전국(전계정)
+        # 실시간 헬스줄(토큰/수확/폴링) — 무인 신뢰 위해 5초마다 갱신
+        self._alert_health_timer = QtCore.QTimer(self)
+        self._alert_health_timer.timeout.connect(self._refresh_alert_health)
+        self._alert_health_timer.start(5000)
+        QtCore.QTimer.singleShot(500, self._refresh_alert_health)
         # 실행 시 자동 폴링(무인): 설정 복원 + 저장 배선 + 지연 시작(토큰 수확 대기)
         try:
             self.alertAutoStartChk.setChecked(bool(self._load_alert_settings().get("autostart")))
@@ -417,6 +436,76 @@ class MainWindow(QMainWindow):
         if not self._alert_poll_timer.isActive():
             self.alertLog.append("[자동폴링] 실행 시 자동 시작")
             self.on_alert_autopoll()
+
+    def _refresh_alert_health(self):
+        """토큰/자동수확/자동폴링 실시간 헬스 한 줄. 무인 운영 신뢰의 핵심 지표."""
+        import json as _json, time as _t
+        now = _t.time()
+        # 토큰 상태
+        alive = expired = 0
+        soonest = None
+        try:
+            from daangn_ext.keyword_alert_api import token_remaining
+            for a in _json.load(open("./accounts.json", encoding="utf-8")):
+                acc = a.get("access") or ""
+                if not acc:
+                    expired += 1; continue
+                rem = token_remaining(acc)
+                if rem > 60:
+                    alive += 1
+                    soonest = rem if soonest is None else min(soonest, rem)
+                else:
+                    expired += 1
+        except Exception:
+            pass
+        tok_ok = alive > 0
+        soon = f", 임박 {soonest // 60}분" if soonest is not None else ""
+        tok = f"{'🟢' if tok_ok else '🔴'} 토큰 {alive}개 유효{soon}" + (f" · 만료 {expired}" if expired else "")
+        # 자동수확
+        try:
+            hv_on = self._harvest_thread.isRunning()
+            iv = getattr(self._harvest_thread, "interval", 1200)
+        except Exception:
+            hv_on, iv = False, 1200
+        if hv_on and self._last_harvest_ts:
+            nxt = max(0, int(iv - (now - self._last_harvest_ts)))
+            hv = f"🟢 자동수확 ON(다음 {nxt // 60}분 {nxt % 60}초)"
+        elif hv_on:
+            hv = "🟡 자동수확 ON(첫 수확 대기)"
+        else:
+            hv = "🔴 자동수확 OFF"
+        # 자동폴링
+        if self._alert_poll_timer.isActive():
+            last = _t.strftime("%H:%M:%S", _t.localtime(self._last_poll_ts)) if self._last_poll_ts else "-"
+            pl = (f"🟢 자동폴링 ON({self.alertPollInterval.value()}초 · 마지막 {last}"
+                  f" · 직전신규 {self._last_new})")
+        else:
+            pl = "⚪ 자동폴링 OFF"
+        self.dashHealth.setText("   ".join([tok, hv, pl]))
+        bg = "#FDECEC" if not tok_ok else "#F2F4F6"
+        self.dashHealth.setStyleSheet(
+            "font-size:13px; font-weight:600; padding:6px 8px; border-radius:6px;"
+            f"background:{bg}; color:#333D4B;")
+
+    def on_alert_tg_test(self):
+        """텔레그램 테스트 발송 — 무인 신뢰 전에 알림 파이프 확인."""
+        import time as _t
+        tok = (getattr(self, "_notify", {}) or {}).get("tg_token")
+        chat = (getattr(self, "_notify", {}) or {}).get("tg_chat")
+        if not (tok and chat):
+            self.alertLog.append("[텔레그램] 미설정 — 상단 '알림 설정'서 봇토큰/chat_id 입력")
+            self.sb.showMessage("텔레그램 미설정", 4000)
+            return
+        try:
+            from daangn.notify import TelegramSender
+            tg = TelegramSender(tok, chat, log=self.alertLog.append)
+            tg.enqueue(f"✅ 당근 명품 모니터 테스트 · {_t.strftime('%m/%d %H:%M:%S')}\n"
+                       f"이 메시지가 보이면 알림 정상 작동.")
+            tg.flush()
+            self.alertLog.append("[텔레그램] 테스트 전송 완료 — 폰 확인")
+            self.sb.showMessage("텔레그램 테스트 전송됨", 4000)
+        except Exception as e:
+            self.alertLog.append(f"[텔레그램] 테스트 실패: {str(e)[:60]}")
 
     def _init_dashboard(self):
         """탭 열릴 때 계정수 즉시 표시(토큰 불필요, accounts.json만). 커버리지는 버튼."""
@@ -556,9 +645,11 @@ class MainWindow(QMainWindow):
             self.on_alert_poll_all()
 
     def _match_populate(self, matches):
-        if matches is None:
-            return
         import time as _t
+        self._last_poll_ts = _t.time()
+        if matches is None:
+            self._last_new = 0
+            return
         new = 0
         new_items = []
         for m in matches:
@@ -580,10 +671,15 @@ class MainWindow(QMainWindow):
                     cell.setData(QtCore.Qt.ItemDataRole.UserRole, m.get("url") or "")
                 self.matchTable.setItem(r, c, cell)
             self.matchTable.sortItems(0, QtCore.Qt.SortOrder.DescendingOrder)
+        self._last_new = new
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
             self._notify_matches(new_items)
             self._save_match_seen()
+        try:
+            self._refresh_alert_health()
+        except Exception:
+            pass
 
     _MATCH_SEEN_FILE = "./data/match_seen.json"
 
