@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import time
+import re
 from typing import Callable
 
 import httpx
@@ -37,6 +38,13 @@ def _debigint(v):
     if isinstance(v, str) and v.startswith("!BigInt:"):
         return v[len("!BigInt:"):]
     return v
+
+
+def _detag(x):
+    """검색 하이라이트 <b>..</b> 등 태그 제거."""
+    if not isinstance(x, str):
+        return x
+    return re.sub(r"<[^>]+>", "", x).strip()
 
 
 def _headers(access_token: str, config_path: str = "./data/config.json") -> dict:
@@ -162,7 +170,7 @@ class KeywordAlertAPI:
             aid = kv.get("articleId")
             out.append({
                 "keyword": kv.get("matchedKeyword"),
-                "title": it.get("title"),
+                "title": _detag(it.get("title")),
                 "price": kv.get("priceWithUnit"),
                 "region": kv.get("regionName"),
                 "article_id": aid,
@@ -178,7 +186,7 @@ class KeywordAlertAPI:
         for ad in ret.get("neighborhoodAdvertisements") or []:
             aid = _debigint(ad.get("articleId"))
             out.append({
-                "keyword": ad.get("matchedKeyword"), "title": ad.get("title"),
+                "keyword": ad.get("matchedKeyword"), "title": _detag(ad.get("title")),
                 "price": ad.get("priceWithUnit"), "region": ad.get("regionName"),
                 "article_id": aid,
                 "url": f"https://www.daangn.com/kr/buy-sell/-{aid}/" if aid else
