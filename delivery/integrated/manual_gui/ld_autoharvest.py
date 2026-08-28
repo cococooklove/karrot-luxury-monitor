@@ -228,14 +228,16 @@ def _read_ds_b64(adb_bin, serial):
 
 
 
-def harvest_one(adb_bin, serial, nudge=True):
-    if nudge:
-        try:
-            _adb(adb_bin, serial, "shell", "monkey", "-p", PKG,
-                 "-c", "android.intent.category.LAUNCHER", "1", timeout=20)
-            time.sleep(6)
-        except Exception:
-            pass
+def _access_remaining(access):
+    """access JWT 남은 초. 파싱 실패 -1."""
+    try:
+        p = access.split(".")[1]; p += "=" * (-len(p) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(p)).get("exp", 0) - time.time())
+    except Exception:
+        return -1
+
+
+def _read_parse(adb_bin, serial):
     b64, _mode = _read_ds_b64(adb_bin, serial)
     if not b64:
         return None
@@ -249,6 +251,26 @@ def harvest_one(adb_bin, serial, nudge=True):
         return None
     code = _jwt_sub(refresh) or _jwt_sub(access) or serial
     return {"code": str(code), "refresh": refresh, "access": access}
+
+
+def harvest_one(adb_bin, serial, nudge=True, min_remaining=600):
+    """토큰 수확. 먼저 읽어(무-nudge) 아직 min_remaining 초 넘게 살아있으면 그대로 반환.
+    만료임박/없음일 때만 nudge(앱 강제실행)해 앱이 갱신하도록 유도 → 재읽기.
+    → 100계정 팜서 불필요한 앱실행 최소화(배터리·부하·방해 감소)."""
+    cur = _read_parse(adb_bin, serial)
+    if cur and _access_remaining(cur.get("access", "")) > min_remaining:
+        return cur                       # 아직 신선 → nudge 불필요
+    if nudge:
+        try:
+            _adb(adb_bin, serial, "shell", "monkey", "-p", PKG,
+                 "-c", "android.intent.category.LAUNCHER", "1", timeout=20)
+            time.sleep(6)
+        except Exception:
+            pass
+        fresh = _read_parse(adb_bin, serial)
+        if fresh:
+            return fresh
+    return cur
 
 
 def merge_accounts(accounts_fp, rows):
