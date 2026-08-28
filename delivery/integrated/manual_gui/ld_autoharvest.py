@@ -197,6 +197,37 @@ def _find_token_path(adb_bin, serial):
     return f"{APP_DATA}/files/datastore/karrot_token.ds"
 
 
+def _su_ok(adb_bin, serial):
+    """루트(su) 사용가능?"""
+    try:
+        out = _adb(adb_bin, serial, "shell", "su", "-c", "id")
+        return "uid=0" in out
+    except Exception:
+        return False
+
+
+def _read_ds_b64(adb_bin, serial):
+    """karrot_token.ds 를 base64 로 반환. 루트면 su, 아니면 run-as(디버그앱).
+    반환 (b64str, mode) 또는 (None, None)."""
+    rel = "files/datastore/karrot_token.ds"
+    absp = f"{APP_DATA}/{rel}"
+    # 1) su (LDPlayer 등 루팅)
+    if _su_ok(adb_bin, serial):
+        try:
+            return _adb(adb_bin, serial, "exec-out", "su", "-c", f"base64 {absp}").strip(), "su"
+        except Exception:
+            pass
+    # 2) run-as (디버그 재패키징 앱 — 폰 개발용, 비루팅)
+    try:
+        b = _adb(adb_bin, serial, "exec-out", "run-as", PKG, "base64", rel).strip()
+        if b:
+            return b, "run-as"
+    except Exception:
+        pass
+    return None, None
+
+
+
 def harvest_one(adb_bin, serial, nudge=True):
     if nudge:
         try:
@@ -205,10 +236,13 @@ def harvest_one(adb_bin, serial, nudge=True):
             time.sleep(6)
         except Exception:
             pass
-    path = _find_token_path(adb_bin, serial)
-    if any(c not in _SAFE for c in path):
+    b64, _mode = _read_ds_b64(adb_bin, serial)
+    if not b64:
         return None
-    raw = base64.b64decode(_adb(adb_bin, serial, "exec-out", "su", "-c", f"base64 {path}").strip())
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return None
     d = parse_token_ds(raw)
     refresh, access = d.get("refresh", ""), d.get("access", "")
     if not (refresh or access):
