@@ -53,6 +53,36 @@ class _HarvestThread(QtCore.QThread):
         self._stop = True
 
 
+class _ThumbThread(QtCore.QThread):
+    """매칭 썸네일 비동기 다운로드 — GUI 프리징 없이 사진 로드.
+    jobs: [(QTableWidgetItem, url)]. 다운로드 후 (item, bytes) emit → 메인서 setIcon."""
+    loaded = QtCore.pyqtSignal(object, bytes)
+
+    def __init__(self, jobs):
+        super().__init__()
+        self.jobs = jobs
+
+    def run(self):
+        try:
+            import httpx
+            c = httpx.Client(timeout=8, follow_redirects=True)
+        except Exception:
+            return
+        for item, url in self.jobs:
+            if not url:
+                continue
+            try:
+                r = c.get(url)
+                if r.status_code == 200 and r.content:
+                    self.loaded.emit(item, r.content)
+            except Exception:
+                pass
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
 class _AlertWorker(QtCore.QThread):
     """알림 API 호출을 백그라운드로(GUI 프리징 방지). fn(log_emit) 실행 후 결과 emit."""
     done = QtCore.pyqtSignal(object)
@@ -363,16 +393,20 @@ class MainWindow(QMainWindow):
         r3.addWidget(self.alertAutoStartChk); r3.addWidget(self.alertTgTestBtn); r3.addStretch(1)
         v.addLayout(r3)
 
-        self.matchTable = QtWidgets.QTableWidget(0, 6, w)
-        self.matchTable.setHorizontalHeaderLabels(["시각", "키워드", "제목", "가격", "지역", "계정"])
+        self.matchTable = QtWidgets.QTableWidget(0, 7, w)
+        self.matchTable.setHorizontalHeaderLabels(["사진", "시각", "키워드", "제목", "가격", "지역", "계정"])
         self.matchTable.verticalHeader().setVisible(False)
         self.matchTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.matchTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.matchTable.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.matchTable.setColumnWidth(0, 64)
+        self.matchTable.setIconSize(QtCore.QSize(56, 56))
+        self.matchTable.verticalHeader().setDefaultSectionSize(60)
         self.matchTable.setMinimumHeight(260)
         self.matchTable.itemDoubleClicked.connect(self.on_match_open)
         v.addWidget(self.matchTable, 1)
+        self._thumb_threads = []
 
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
         v.addWidget(self.alertLog)
@@ -652,6 +686,7 @@ class MainWindow(QMainWindow):
             return
         new = 0
         new_items = []
+        thumb_jobs = []
         for m in matches:
             key = str(m.get("id") or m.get("article_id") or m.get("title"))
             if key in self._match_seen:
@@ -663,14 +698,25 @@ class MainWindow(QMainWindow):
                 ts = _t.strftime("%m/%d %H:%M", _t.localtime(int(m.get("time") or 0)))
             except Exception:
                 ts = ""
+            # 0=사진(아이콘), URL 은 사진셀 UserRole 에 저장(더블클릭 매물열기)
+            photo = QtWidgets.QTableWidgetItem()
+            photo.setData(QtCore.Qt.ItemDataRole.UserRole, m.get("url") or "")
+            self.matchTable.setItem(r, 0, photo)
+            if m.get("image"):
+                thumb_jobs.append((photo, m.get("image")))
             vals = [ts, m.get("keyword") or "", (m.get("title") or "")[:60],
                     str(m.get("price") or ""), m.get("region") or "", m.get("_account") or ""]
-            for c, val in enumerate(vals):
+            for c, val in enumerate(vals, start=1):
                 cell = QtWidgets.QTableWidgetItem(val)
-                if c == 0:
-                    cell.setData(QtCore.Qt.ItemDataRole.UserRole, m.get("url") or "")
                 self.matchTable.setItem(r, c, cell)
-            self.matchTable.sortItems(0, QtCore.Qt.SortOrder.DescendingOrder)
+            self.matchTable.sortItems(1, QtCore.Qt.SortOrder.DescendingOrder)
+        if thumb_jobs:
+            th = _ThumbThread(thumb_jobs)
+            th.loaded.connect(self._set_thumb)
+            th.finished.connect(lambda t=th: self._thumb_threads.remove(t)
+                                if t in self._thumb_threads else None)
+            self._thumb_threads.append(th)
+            th.start()
         self._last_new = new
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
@@ -719,8 +765,20 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.alertLog.append(f"[텔레그램] 실패: {str(e)[:50]}")
 
+    def _set_thumb(self, item, data):
+        """다운로드된 썸네일 바이트 → 아이콘(메인스레드서 안전하게 setIcon)."""
+        try:
+            from PyQt6.QtGui import QPixmap, QIcon
+            pm = QPixmap()
+            if pm.loadFromData(data):
+                item.setIcon(QIcon(pm.scaled(
+                    56, 56, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                    QtCore.Qt.TransformationMode.SmoothTransformation)))
+        except Exception:
+            pass
+
     def on_match_open(self, item):
-        cell0 = self.matchTable.item(item.row(), 0)
+        cell0 = self.matchTable.item(item.row(), 0)   # URL 은 사진셀(col0) UserRole
         url = cell0.data(QtCore.Qt.ItemDataRole.UserRole) if cell0 else ""
         if url:
             from PyQt6.QtGui import QDesktopServices
