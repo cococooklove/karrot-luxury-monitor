@@ -525,11 +525,13 @@ class MainWindow(QMainWindow):
             return
         import time as _t
         new = 0
+        new_items = []
         for m in matches:
             key = str(m.get("id") or m.get("article_id") or m.get("title"))
             if key in self._match_seen:
                 continue
             self._match_seen.add(key); new += 1
+            new_items.append(m)
             r = self.matchTable.rowCount(); self.matchTable.insertRow(r)
             try:
                 ts = _t.strftime("%m/%d %H:%M", _t.localtime(int(m.get("time") or 0)))
@@ -545,6 +547,26 @@ class MainWindow(QMainWindow):
             self.matchTable.sortItems(0, QtCore.Qt.SortOrder.DescendingOrder)
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
+            self._notify_matches(new_items)
+
+    def _notify_matches(self, items):
+        """신규 매칭 → 텔레그램 푸시(notify.json 설정 시). GUI 안 봐도 알림."""
+        tok = (getattr(self, "_notify", {}) or {}).get("tg_token")
+        chat = (getattr(self, "_notify", {}) or {}).get("tg_chat")
+        if not (tok and chat and items):
+            return
+        try:
+            from daangn.notify import TelegramSender
+            tg = TelegramSender(tok, chat, log=self.alertLog.append)
+            for m in items:
+                line = (f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
+                        f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
+                        f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
+                tg.enqueue(line)
+            tg.flush()
+            self.alertLog.append(f"[텔레그램] {len(items)}건 전송")
+        except Exception as e:
+            self.alertLog.append(f"[텔레그램] 실패: {str(e)[:50]}")
 
     def on_match_open(self, item):
         cell0 = self.matchTable.item(item.row(), 0)
