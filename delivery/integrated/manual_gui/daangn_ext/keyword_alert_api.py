@@ -311,6 +311,8 @@ class MultiAccountAlerts:
         log = log or (lambda m: None)
         from concurrent.futures import ThreadPoolExecutor
 
+        state = self._state()
+
         def one(acct):
             code, access, proxy = acct
             api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
@@ -318,9 +320,17 @@ class MultiAccountAlerts:
                 res = api.new_matches(category_id)
                 for m in res:
                     m["_account"] = code[:6]
+                st = state.setdefault(code, {})
+                st["fail"] = 0; st["last_ok"] = int(time.time())
+                st["last_err"] = ""; st["banned"] = False
                 return res
             except Exception as e:
-                log(f"  {code[:6]} 폴 실패: {str(e)[:40]}")
+                st = state.setdefault(code, {})
+                st["fail"] = int(st.get("fail", 0)) + 1
+                st["last_err"] = str(e)[:80]
+                if st["fail"] >= 5:                    # 연속 5회 실패 → 밴/불량 계정 격리표시
+                    st["banned"] = True
+                log(f"  {code[:6]} 폴 실패({st['fail']}회): {str(e)[:40]}")
                 return []
             finally:
                 api.close()
@@ -334,8 +344,51 @@ class MultiAccountAlerts:
                     if key in seen:
                         continue
                     seen.add(key); merged.append(m)
+        self._save_state(state)
         log(f"전계정({len(valid)}) 매칭 {len(merged)}건(중복제거)")
         return merged
+
+    # ── 계정 상태(폴링 성공/실패·밴 격리) 영속 ──
+    _STATE_FP = "./data/account_state.json"
+
+    def _state(self):
+        try:
+            return json.load(open(self._STATE_FP, encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_state(self, state):
+        try:
+            os.makedirs(os.path.dirname(self._STATE_FP), exist_ok=True)
+            json.dump(state, open(self._STATE_FP, "w", encoding="utf-8"), ensure_ascii=False)
+        except Exception:
+            pass
+
+    def fleet_status(self):
+        """팜 운영용 계정별 상태(무-네트워크: accounts.json + 지역/상태 캐시).
+        [{code, region, exp_min, alive, core, fail, banned, last_err}]."""
+        rcache = self._region_cache()
+        state = self._state()
+        out = []
+        for a in self._accounts():
+            code = str(a.get("code") or "")
+            acc = a.get("access") or ""
+            rem = token_remaining(acc) if acc else -1
+            region = rcache.get(code, "")
+            st = state.get(code, {})
+            out.append({
+                "code": code[:6],
+                "region": region or "?",
+                "exp_min": rem // 60 if rem > 0 else (0 if acc else -1),
+                "alive": rem > 60,
+                "core": self._is_core(region),
+                "fail": int(st.get("fail", 0)),
+                "banned": bool(st.get("banned")),
+                "last_err": st.get("last_err", ""),
+            })
+        # 만료·불량 먼저 보이게 정렬(살아있고 문제없는 계정 뒤로)
+        out.sort(key=lambda r: (r["alive"], not r["banned"], r["exp_min"]))
+        return out
 
     def coverage(self, log=None, core_only=False):
         """전 계정 커버 동네 집계 → [(code, 동네명, 지역수)]."""

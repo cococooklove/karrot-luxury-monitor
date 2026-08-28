@@ -405,6 +405,8 @@ class MainWindow(QMainWindow):
         self.alertPollAllBtn = QtWidgets.QPushButton("전계정 매칭(전국)"); self.alertPollAllBtn.setObjectName("startBtn")
         self.alertAutoPollBtn = QtWidgets.QPushButton("자동 폴링 시작")
         self.alertCoverageBtn = QtWidgets.QPushButton("커버 동네 집계")
+        self.alertFleetBtn = QtWidgets.QPushButton("계정 현황")
+        self.alertFleetBtn.setToolTip("계정별 동네·토큰만료·핵심여부·폴링실패·밴격리 — 팜 운영 한 눈에")
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
         self.alertCoverMode = QtWidgets.QComboBox()
@@ -418,6 +420,7 @@ class MainWindow(QMainWindow):
         self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
         r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
         r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
+        r3.addWidget(self.alertFleetBtn)
         r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval)
         r3.addWidget(QtWidgets.QLabel("커버")); r3.addWidget(self.alertCoverMode)
         r3.addWidget(self.alertAutoStartChk); r3.addWidget(self.alertTgTestBtn); r3.addStretch(1)
@@ -451,6 +454,7 @@ class MainWindow(QMainWindow):
         self.alertBulkAllBtn.clicked.connect(self.on_alert_bulk_all)
         self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
         self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
+        self.alertFleetBtn.clicked.connect(self.on_alert_fleet)
         self.alertTgTestBtn.clicked.connect(self.on_alert_tg_test)
         self._alert_worker = None
         self._match_links = {}
@@ -561,6 +565,57 @@ class MainWindow(QMainWindow):
         self.dashHealth.setStyleSheet(
             "font-size:13px; font-weight:600; padding:6px 8px; border-radius:6px;"
             f"background:{bg}; color:#333D4B;")
+
+    def on_alert_fleet(self):
+        """계정 팜 현황 다이얼로그 — 계정별 상태 색상코딩, 열려있는 동안 5초 자동갱신."""
+        from PyQt6.QtGui import QColor, QBrush
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("계정 팜 현황")
+        dlg.resize(760, 560)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        summ = QtWidgets.QLabel("")
+        summ.setStyleSheet("font-weight:600; padding:4px;")
+        lay.addWidget(summ)
+        cols = ["계정", "동네", "만료(분)", "핵심", "실패", "상태"]
+        tbl = QtWidgets.QTableWidget(0, len(cols), dlg)
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(tbl, 1)
+
+        def refresh():
+            try:
+                rows = self._multi().fleet_status()
+            except Exception as e:
+                summ.setText(f"조회 실패: {str(e)[:60]}"); return
+            alive = sum(1 for r in rows if r["alive"])
+            core = sum(1 for r in rows if r["core"] and r["alive"])
+            banned = sum(1 for r in rows if r["banned"])
+            summ.setText(f"총 {len(rows)}계정 · 유효 {alive} · 핵심(유효) {core}"
+                         + (f" · ⚠️밴격리 {banned}" if banned else ""))
+            tbl.setRowCount(0)
+            for r in rows:
+                i = tbl.rowCount(); tbl.insertRow(i)
+                exp = r["exp_min"]
+                exp_txt = "만료" if exp < 0 or (not r["alive"]) else f"{exp}"
+                vals = [r["code"], r["region"], exp_txt,
+                        "★" if r["core"] else "", str(r["fail"]),
+                        "밴격리" if r["banned"] else ("정상" if r["alive"] else "만료")]
+                for c, val in enumerate(vals):
+                    it = QtWidgets.QTableWidgetItem(val)
+                    if r["banned"]:
+                        it.setBackground(QBrush(QColor("#FDECEC")))
+                    elif not r["alive"]:
+                        it.setForeground(QBrush(QColor("#C0C0C0")))
+                    elif r["core"]:
+                        it.setForeground(QBrush(QColor("#1D6FE0")))
+                    tbl.setItem(i, c, it)
+
+        refresh()
+        t = QtCore.QTimer(dlg); t.timeout.connect(refresh); t.start(5000)
+        dlg.finished.connect(lambda _=0: t.stop())
+        dlg.show()
 
     def on_alert_tg_test(self):
         """텔레그램 테스트 발송 — 무인 신뢰 전에 알림 파이프 확인."""

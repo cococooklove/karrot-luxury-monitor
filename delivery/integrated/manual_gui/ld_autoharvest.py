@@ -307,15 +307,24 @@ def harvest_all(accounts_fp="./accounts.json", adb_bin=None, serials=None,
     if not use:
         log("[수확] LDPlayer 인스턴스 없음 — 설치/.ldbk 복원 확인")
         return (0, 0, 0, 0)
+    # 병렬 수확 — 100계정 팜서 순차(수분) → 병렬(수초). adb 는 인스턴스별 독립이라 안전.
+    from concurrent.futures import ThreadPoolExecutor
     rows = []
-    for s in use:
+
+    def _one(s):
         try:
             r = harvest_one(adb_bin, s, nudge=nudge)
             if r:
-                rows.append(r)
                 log(f"[수확] {s} · {r['code']}")
+            return r
         except Exception as e:
             log(f"[수확] {s} 실패: {str(e)[:80]}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(use)))) as ex:
+        for r in ex.map(_one, use):
+            if r:
+                rows.append(r)
     if not rows:
         return (0, 0, 0, 0)
     u, i, t = merge_accounts(accounts_fp, rows)
