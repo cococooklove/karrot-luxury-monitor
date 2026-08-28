@@ -250,9 +250,30 @@ class MultiAccountAlerts:
         except Exception:
             pass
 
+    _CORE_FP = "./data/core_regions.json"
+
+    def core_keywords(self):
+        """핵심지역 키워드 — 파일(사용자 편집) 우선, 없으면 기본값."""
+        try:
+            v = json.load(open(self._CORE_FP, encoding="utf-8"))
+            if isinstance(v, list) and v:
+                return [str(x).strip() for x in v if str(x).strip()]
+        except Exception:
+            pass
+        return list(self.CORE_REGION_KEYWORDS)
+
+    def save_core_keywords(self, keywords):
+        try:
+            os.makedirs(os.path.dirname(self._CORE_FP), exist_ok=True)
+            json.dump(list(keywords), open(self._CORE_FP, "w", encoding="utf-8"),
+                      ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
     def _is_core(self, region_name):
         r = region_name or ""
-        return any(k in r for k in self.CORE_REGION_KEYWORDS)
+        return any(k in r for k in self.core_keywords())
 
     def _valid(self, core_only=False):
         """(code, access, proxy) 리스트 — access 살아있는 계정만.

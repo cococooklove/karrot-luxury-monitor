@@ -612,10 +612,52 @@ class MainWindow(QMainWindow):
                         it.setForeground(QBrush(QColor("#1D6FE0")))
                     tbl.setItem(i, c, it)
 
+        btnRow = QtWidgets.QHBoxLayout()
+        editBtn = QtWidgets.QPushButton("핵심지역 편집")
+        refreshBtn = QtWidgets.QPushButton("새로고침")
+        btnRow.addWidget(editBtn); btnRow.addWidget(refreshBtn); btnRow.addStretch(1)
+        lay.addLayout(btnRow)
+        editBtn.clicked.connect(lambda: self._edit_core_regions(refresh))
+        refreshBtn.clicked.connect(lambda: refresh())
+
         refresh()
         t = QtCore.QTimer(dlg); t.timeout.connect(refresh); t.start(5000)
         dlg.finished.connect(lambda _=0: t.stop())
         dlg.show()
+
+    def _edit_core_regions(self, on_saved=None):
+        """핵심지역 키워드 편집 다이얼로그 — 동네명 부분일치. 저장 시 core 판정 즉시 반영."""
+        m = self._multi()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("핵심지역 편집")
+        dlg.resize(440, 460)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.addWidget(QtWidgets.QLabel(
+            "명품 밀집 지역 키워드(한 줄에 하나). 계정 인증동네명에 포함되면 '핵심'.\n"
+            "예: 강남, 청담, 분당, 해운대"))
+        edit = QtWidgets.QPlainTextEdit(dlg)
+        edit.setPlainText("\n".join(m.core_keywords()))
+        lay.addWidget(edit, 1)
+        row = QtWidgets.QHBoxLayout()
+        saveBtn = QtWidgets.QPushButton("저장"); saveBtn.setObjectName("startBtn")
+        resetBtn = QtWidgets.QPushButton("기본값 복원")
+        cancelBtn = QtWidgets.QPushButton("취소")
+        row.addWidget(saveBtn); row.addWidget(resetBtn); row.addStretch(1); row.addWidget(cancelBtn)
+        lay.addLayout(row)
+
+        def do_save():
+            kws = [ln.strip() for ln in edit.toPlainText().splitlines() if ln.strip()]
+            if m.save_core_keywords(kws):
+                self.alertLog.append(f"[핵심지역] {len(kws)}개 저장")
+                if on_saved:
+                    on_saved()
+                dlg.accept()
+        def do_reset():
+            edit.setPlainText("\n".join(m.CORE_REGION_KEYWORDS))
+        saveBtn.clicked.connect(do_save)
+        resetBtn.clicked.connect(do_reset)
+        cancelBtn.clicked.connect(dlg.reject)
+        dlg.exec()
 
     def on_alert_tg_test(self):
         """텔레그램 테스트 발송 — 무인 신뢰 전에 알림 파이프 확인."""
