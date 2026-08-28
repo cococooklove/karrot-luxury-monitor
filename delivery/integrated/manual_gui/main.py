@@ -1018,11 +1018,15 @@ class MainWindow(QMainWindow):
         return 1
 
     def _auto_poll_tick(self):
-        """자동폴링 타이머 틱 — 시간대별 주기 재조정(밴회피) 후 폴링."""
+        """자동폴링 타이머 틱 — 시간대별 주기 재조정(밴회피) 후 폴링.
+        이전 폴링이 아직 진행 중이면 조용히 스킵(무인: 모달 팝업 금지)."""
         base = self.alertPollInterval.value()
         iv_ms = base * self._night_factor() * 1000
         if self._alert_poll_timer.interval() != iv_ms:
             self._alert_poll_timer.setInterval(iv_ms)
+        if self._alert_worker and self._alert_worker.isRunning():
+            self.alertLog.append("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
+            return
         self.on_alert_poll_all()
 
     def on_alert_poll_all(self):
