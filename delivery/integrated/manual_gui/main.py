@@ -416,15 +416,25 @@ class MainWindow(QMainWindow):
             "전국=모든 유효계정 사용 / 핵심지역=명품 밀집동네(강남·분당·해운대 등) 계정만 "
             "→ 적은 계정으로 거래량 대부분 커버. 등록·폴링·집계 전부 이 모드 따름.")
         self.alertAutoStartChk = QtWidgets.QCheckBox("실행 시 자동 폴링")
+        self.alertNightChk = QtWidgets.QCheckBox("야간 감속")
+        self.alertNightChk.setToolTip(
+            "밴회피: 자동폴링 주기를 시간대별 자동조정 — 새벽 0~7시 ×3, 늦밤/이른아침 ×2, 주간 정상. "
+            "24시간 무인운영 시 야간 과다요청 억제.")
         self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
         self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
+        # 액션행
         r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
         r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
-        r3.addWidget(self.alertFleetBtn)
-        r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval)
-        r3.addWidget(QtWidgets.QLabel("커버")); r3.addWidget(self.alertCoverMode)
-        r3.addWidget(self.alertAutoStartChk); r3.addWidget(self.alertTgTestBtn); r3.addStretch(1)
+        r3.addWidget(self.alertFleetBtn); r3.addWidget(self.alertTgTestBtn)
+        r3.addStretch(1)
         v.addLayout(r3)
+        # 옵션행(주기·커버모드·자동시작·야간감속)
+        r3b = QtWidgets.QHBoxLayout()
+        r3b.addWidget(QtWidgets.QLabel("주기")); r3b.addWidget(self.alertPollInterval)
+        r3b.addSpacing(12); r3b.addWidget(QtWidgets.QLabel("커버")); r3b.addWidget(self.alertCoverMode)
+        r3b.addSpacing(12); r3b.addWidget(self.alertAutoStartChk); r3b.addWidget(self.alertNightChk)
+        r3b.addStretch(1)
+        v.addLayout(r3b)
 
         self.matchTable = QtWidgets.QTableWidget(0, 7, w)
         self.matchTable.setHorizontalHeaderLabels(["사진", "시각", "키워드", "제목", "가격", "지역", "계정"])
@@ -463,7 +473,7 @@ class MainWindow(QMainWindow):
         self._last_poll_ts = 0
         self._last_new = 0
         self._alert_poll_timer = QtCore.QTimer(self)
-        self._alert_poll_timer.timeout.connect(self.on_alert_poll_all)  # 자동폴링=전국(전계정)
+        self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
         # 실시간 헬스줄(토큰/수확/폴링) — 무인 신뢰 위해 5초마다 갱신
         self._alert_health_timer = QtCore.QTimer(self)
         self._alert_health_timer.timeout.connect(self._refresh_alert_health)
@@ -484,6 +494,12 @@ class MainWindow(QMainWindow):
             pass
         self.alertCoverMode.currentIndexChanged.connect(
             lambda _i: self._save_alert_settings({"core_only": bool(self._core_only())}))
+        try:
+            self.alertNightChk.setChecked(bool(self._load_alert_settings().get("night")))
+        except Exception:
+            pass
+        self.alertNightChk.toggled.connect(
+            lambda on: self._save_alert_settings({"night": bool(on)}))
         if self.alertAutoStartChk.isChecked():
             QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
@@ -553,7 +569,10 @@ class MainWindow(QMainWindow):
         # 자동폴링
         if self._alert_poll_timer.isActive():
             last = _t.strftime("%H:%M:%S", _t.localtime(self._last_poll_ts)) if self._last_poll_ts else "-"
-            pl = (f"🟢 자동폴링 ON({self.alertPollInterval.value()}초 · 마지막 {last}"
+            nf = self._night_factor()
+            eff = self.alertPollInterval.value() * nf
+            night = f"·야간×{nf}" if nf > 1 else ""
+            pl = (f"🟢 자동폴링 ON({eff}초{night} · 마지막 {last}"
                   f" · 직전신규 {self._last_new})")
         else:
             pl = "⚪ 자동폴링 OFF"
@@ -811,9 +830,12 @@ class MainWindow(QMainWindow):
             self.alertAutoPollBtn.setText("자동 폴링 시작")
             self.alertLog.append("[자동폴링] 정지")
         else:
-            self._alert_poll_timer.start(self.alertPollInterval.value() * 1000)
+            iv = self.alertPollInterval.value() * self._night_factor()
+            self._alert_poll_timer.start(iv * 1000)
             self.alertAutoPollBtn.setText("자동 폴링 정지")
-            self.alertLog.append(f"[자동폴링] 시작 · {self.alertPollInterval.value()}초 주기 · 전계정(전국)")
+            nf = self._night_factor()
+            night = f" · 야간감속 ×{nf}" if nf > 1 else ""
+            self.alertLog.append(f"[자동폴링] 시작 · {iv}초 주기 · 전계정(전국){night}")
             self.on_alert_poll_all()
 
     def _match_populate(self, matches):
@@ -946,6 +968,26 @@ class MainWindow(QMainWindow):
             self._multi().register_all(LUXURY_BRANDS, mn, mx, log=log, core_only=co)
             return None
         self._alert_run(job)
+
+    def _night_factor(self):
+        """야간 감속 배수 — 새벽0~7시 ×3, 늦밤22~24·이른7~9시 ×2, 그외 ×1."""
+        if not self.alertNightChk.isChecked():
+            return 1
+        import time as _t
+        h = _t.localtime().tm_hour
+        if 0 <= h < 7:
+            return 3
+        if 22 <= h < 24 or 7 <= h < 9:
+            return 2
+        return 1
+
+    def _auto_poll_tick(self):
+        """자동폴링 타이머 틱 — 시간대별 주기 재조정(밴회피) 후 폴링."""
+        base = self.alertPollInterval.value()
+        iv_ms = base * self._night_factor() * 1000
+        if self._alert_poll_timer.interval() != iv_ms:
+            self._alert_poll_timer.setInterval(iv_ms)
+        self.on_alert_poll_all()
 
     def on_alert_poll_all(self):
         co = self._core_only()
