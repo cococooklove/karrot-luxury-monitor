@@ -3058,6 +3058,17 @@ def _run_headless():
     seen = _load_seen()
     last_harvest = 0.0
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
+    # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
+    if "--register" in argv:
+        st = _settings(); co = bool(st.get("core_only"))
+        log(f"[등록] 명품 {len(LUXURY_BRANDS)}브랜드 전계정 등록 (커버 {'핵심' if co else '전국'})")
+        try:
+            r = m.register_all(LUXURY_BRANDS, core_only=co, log=log)
+            log(f"[등록] 완료: {r}")
+        except Exception as e:
+            log(f"[등록] 실패: {str(e)[:80]}")
+        if once:
+            log("--register --once 완료"); return
     while True:
         st = _settings()
         core_only = bool(st.get("core_only"))
