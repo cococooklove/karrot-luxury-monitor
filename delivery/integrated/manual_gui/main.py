@@ -165,9 +165,11 @@ APP_QSS = """
 QMainWindow, QWidget { background: #100D0A; }
 QToolTip { background:#221C16; color:#EDE6D8; border:1px solid #4A3F2E; padding:7px 10px; border-radius:8px; }
 
+#brandBar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #17130E, stop:1 #100D0A); border-bottom: 1px solid #3A3225; }
+
 QTabWidget::pane { border: none; background: transparent; }
-QTabBar { qproperty-drawBase: 0; }
-QTabBar::tab { background: transparent; color: #8A7F6C; padding: 11px 20px; margin-right: 4px; border: none; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 700; }
+QTabBar { qproperty-drawBase: 0; left: 18px; }
+QTabBar::tab { background: transparent; color: #8A7F6C; padding: 11px 20px; margin-right: 4px; margin-top: 8px; border: none; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 700; }
 QTabBar::tab:selected { color: #D4B978; border-bottom: 2px solid #C6A968; }
 QTabBar::tab:hover:!selected { color: #B8AC94; }
 
@@ -335,7 +337,18 @@ class MainWindow(QMainWindow):
         self.auto_monitor = None
         self.tabs.addTab(self._scroll(self._build_auto_tab()), "자동 모니터")
         self.tabs.addTab(self._scroll(self._build_alert_tab()), "키워드 알림")
-        self.setCentralWidget(self.tabs)
+        # 명품 브랜드 헤더(골드 워드마크) + 탭
+        central = QtWidgets.QWidget()
+        cl = QtWidgets.QVBoxLayout(central); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+        header = QtWidgets.QWidget(); header.setObjectName("brandBar")
+        hl = QtWidgets.QHBoxLayout(header); hl.setContentsMargins(26, 15, 26, 13); hl.setSpacing(14)
+        brand = QtWidgets.QLabel("❖  L U X E")
+        brand.setStyleSheet("color:#E7C77E; font-size:21px; font-weight:800; letter-spacing:5px;")
+        sub = QtWidgets.QLabel("명품 실시간 모니터")
+        sub.setStyleSheet("color:#8A7F6C; font-size:12px; letter-spacing:3px; padding-top:6px;")
+        hl.addWidget(brand); hl.addWidget(sub); hl.addStretch(1)
+        cl.addWidget(header); cl.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
         self._refresh_proxy_labels()
         self.resize(1200, 840)                      # 하단 위젯 안 잘리게 넉넉히
         self.setStyleSheet(APP_QSS)                  # 전역 스타일
