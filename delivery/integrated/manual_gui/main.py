@@ -84,26 +84,48 @@ class _ThumbThread(QtCore.QThread):
 
 
 class _NotifyThread(QtCore.QThread):
-    """텔레그램 발송 백그라운드 — 매칭 다수여도 GUI 안 멈춤."""
+    """매칭 알림 백그라운드 — 텔레그램(실시간) + 구글시트(검색가능 히스토리). GUI 안 멈춤."""
     log = QtCore.pyqtSignal(str)
 
-    def __init__(self, tok, chat, items):
+    def __init__(self, notify, items):
         super().__init__()
-        self.tok, self.chat, self.items = tok, chat, items
+        self.notify = notify or {}
+        self.items = items
 
     def run(self):
-        try:
-            from daangn.notify import TelegramSender
-            tg = TelegramSender(self.tok, self.chat, log=lambda m: self.log.emit(m))
-            for m in self.items:
-                line = (f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
-                        f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
-                        f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
-                tg.enqueue(line)
-            tg.flush()
-            self.log.emit(f"[텔레그램] {len(self.items)}건 전송")
-        except Exception as e:
-            self.log.emit(f"[텔레그램] 실패: {str(e)[:50]}")
+        import time as _t
+        emit = lambda m: self.log.emit(m)
+        tok, chat = self.notify.get("tg_token"), self.notify.get("tg_chat")
+        if tok and chat:
+            try:
+                from daangn.notify import TelegramSender
+                tg = TelegramSender(tok, chat, log=emit)
+                for m in self.items:
+                    line = (f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
+                            f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
+                            f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
+                    tg.enqueue(line)
+                tg.flush()
+                emit(f"[텔레그램] {len(self.items)}건 전송")
+            except Exception as e:
+                emit(f"[텔레그램] 실패: {str(e)[:50]}")
+        # 구글시트 히스토리(선택)
+        if self.notify.get("sheet_url"):
+            try:
+                from daangn.notify import SheetWriter
+                sw = SheetWriter(self.notify.get("sheet_url"),
+                                 self.notify.get("sheet_cred") or "./credentials.json", log=emit)
+                for m in self.items:
+                    ts = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(int(m.get("time") or 0))) \
+                        if m.get("time") else ""
+                    sw.enqueue_row([ts, m.get("keyword") or "", m.get("title") or "",
+                                    m.get("price") or "", m.get("region") or "",
+                                    m.get("_account") or "", m.get("url") or ""])
+                wrote, failed = sw.flush()
+                if wrote:
+                    emit(f"[구글시트] {wrote}행 기록")
+            except Exception as e:
+                emit(f"[구글시트] 실패: {str(e)[:50]}")
 
 
 class _AlertWorker(QtCore.QThread):
@@ -579,6 +601,8 @@ class MainWindow(QMainWindow):
         # 텔레그램 배선 여부(무인 알림 도달 확인)
         nt = getattr(self, "_notify", {}) or {}
         tg = "🟢 텔레그램 연결" if (nt.get("tg_token") and nt.get("tg_chat")) else "⚪ 텔레그램 미설정"
+        if nt.get("sheet_url"):
+            tg += " · 🟢 시트"
         self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
         bg = "#FDECEC" if not tok_ok else "#F2F4F6"
         self.dashHealth.setStyleSheet(
@@ -918,14 +942,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _notify_matches(self, items):
-        """신규 매칭 → 텔레그램 푸시(notify.json 설정 시). 백그라운드 발송(GUI 안 멈춤)."""
-        tok = (getattr(self, "_notify", {}) or {}).get("tg_token")
-        chat = (getattr(self, "_notify", {}) or {}).get("tg_chat")
-        if not (tok and chat and items):
+        """신규 매칭 → 텔레그램(실시간) + 구글시트(히스토리). 백그라운드 발송(GUI 안 멈춤)."""
+        nt = getattr(self, "_notify", {}) or {}
+        has_tg = nt.get("tg_token") and nt.get("tg_chat")
+        has_sheet = bool(nt.get("sheet_url"))
+        if not (items and (has_tg or has_sheet)):
             return
         if not hasattr(self, "_notify_threads"):
             self._notify_threads = []
-        th = _NotifyThread(tok, chat, list(items))
+        th = _NotifyThread(nt, list(items))
         th.log.connect(self.alertLog.append)
         th.finished.connect(lambda t=th: self._notify_threads.remove(t)
                             if t in self._notify_threads else None)
