@@ -346,9 +346,11 @@ class MainWindow(QMainWindow):
         self.alertCoverageBtn = QtWidgets.QPushButton("커버 동네 집계")
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
+        self.alertAutoStartChk = QtWidgets.QCheckBox("실행 시 자동 폴링")
         r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
         r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
-        r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval); r3.addStretch(1)
+        r3.addWidget(QtWidgets.QLabel("주기")); r3.addWidget(self.alertPollInterval)
+        r3.addWidget(self.alertAutoStartChk); r3.addStretch(1)
         v.addLayout(r3)
 
         self.matchTable = QtWidgets.QTableWidget(0, 6, w)
@@ -380,8 +382,41 @@ class MainWindow(QMainWindow):
         self._match_seen = self._load_match_seen()
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self.on_alert_poll_all)  # 자동폴링=전국(전계정)
+        # 실행 시 자동 폴링(무인): 설정 복원 + 저장 배선 + 지연 시작(토큰 수확 대기)
+        try:
+            self.alertAutoStartChk.setChecked(bool(self._load_alert_settings().get("autostart")))
+        except Exception:
+            pass
+        self.alertAutoStartChk.toggled.connect(
+            lambda on: self._save_alert_settings({"autostart": bool(on)}))
+        if self.alertAutoStartChk.isChecked():
+            QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
         return w
+
+    _ALERT_SETTINGS_FILE = "./data/alert_settings.json"
+
+    def _load_alert_settings(self):
+        import json as _json
+        try:
+            return _json.load(open(self._ALERT_SETTINGS_FILE, encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_alert_settings(self, patch):
+        import json as _json, os as _os
+        try:
+            cur = self._load_alert_settings(); cur.update(patch)
+            _os.makedirs(_os.path.dirname(self._ALERT_SETTINGS_FILE), exist_ok=True)
+            _json.dump(cur, open(self._ALERT_SETTINGS_FILE, "w", encoding="utf-8"))
+        except Exception:
+            pass
+
+    def _autostart_poll(self):
+        """실행 시 자동폴링 — 타이머 꺼져 있을 때만 시작(중복 방지)."""
+        if not self._alert_poll_timer.isActive():
+            self.alertLog.append("[자동폴링] 실행 시 자동 시작")
+            self.on_alert_autopoll()
 
     def _init_dashboard(self):
         """탭 열릴 때 계정수 즉시 표시(토큰 불필요, accounts.json만). 커버리지는 버튼."""
