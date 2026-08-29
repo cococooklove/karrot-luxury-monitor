@@ -3350,11 +3350,15 @@ def _run_headless():
     seen = set(seen_order)             # 빠른 조회
     SEEN_CAP = 20000                   # 메모리 상한(무한증가 방지, 오래된 것 FIFO 축출)
     last_harvest = 0.0
-    from daangn_ext import article_watch
-    watch_store = article_watch.WatchStore("./data/watch.db")
-    watch_tracker = article_watch.WatchTracker(watch_store)
-    watch_budget = article_watch.AccountBudget("./accounts.json")
+    watch_store = watch_tracker = watch_budget = None
     last_watch_sweep = 0.0
+    try:
+        from daangn_ext import article_watch
+        watch_store = article_watch.WatchStore("./data/watch.db")
+        watch_tracker = article_watch.WatchTracker(watch_store)
+        watch_budget = article_watch.AccountBudget("./accounts.json")
+    except Exception as e:
+        log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
     if "--register" in argv:
@@ -3405,12 +3409,17 @@ def _run_headless():
         if fresh:
             log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
             _notify(fresh, _notify_cfg())
-            watch_tracker.add_from_matches(fresh)
+            try:
+                added = watch_tracker.add_from_matches(fresh) if watch_tracker else 0
+                if added:
+                    log(f"[가격추적] {added}건 추적 시작")
+            except Exception as e:
+                log(f"[가격추적] 등록 실패: {str(e)[:80]}")
             _save_seen(seen_order)
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
         # 워치리스트 스윕 — 폴링과 같은 스레드에서 10분 간격으로만
-        if headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
+        if watch_tracker and headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
             last_watch_sweep = now
             try:
                 watch_tracker.enforce_cap()
