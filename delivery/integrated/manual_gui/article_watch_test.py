@@ -378,6 +378,41 @@ ck("MAX_FAIL 후 evicted", store3.get("21")["tier"] == aw.TIER_EVICTED,
    store3.get("21")["tier"])
 ck("연속 실패는 dead 아님", store3.get("21")["tier"] != aw.TIER_DEAD)
 ck("fail 카운터", store3.get("21")["fail"] == aw.MAX_FAIL)
+ck("실패는 last_check 를 건드리지 않음",
+   store3.get("21")["last_check"] == store3.get("21")["first_seen"],
+   (store3.get("21")["last_check"], store3.get("21")["first_seen"]))
+
+# 조회 실패가 기준선 표식(last_check == first_seen)을 깨면 안 된다. 깨지면 첫
+# 성공 조회가 씨앗("285만원" / 끌올 0)과 비교돼 수정 1이 없앤 오탐이 되돌아온다.
+tr3.add_from_matches([{"article_id": "24", "title": "보테가", "region": "강남",
+                       "url": "u24", "price": "285만원",
+                       "time": str(NOW - 3600)}], now=NOW)
+ck("실패 전 씨앗 파싱", store3.get("24")["price"] == 2850000,
+   store3.get("24")["price"])
+ck("실패 1회는 이벤트 없음",
+   tr3.check_one("24", FakeAPI(exc=RuntimeError("boom")), NOW + 800) == [])
+ck("실패 후에도 next_check 는 전진",
+   store3.get("24")["next_check"] == NOW + 800 + aw.FRESH_INTERVAL,
+   store3.get("24")["next_check"])
+api24 = FakeAPI({"gone": False, "title": "보테가", "url": "u24", "price": 2900000,
+                 "status": "ongoing", "republish_count": 2,
+                 "published_at": NOW - 3600, "region": "강남"})
+ev = tr3.check_one("24", api24, NOW + 900)
+ck("실패 뒤 첫 성공 조회도 기준선 — 이벤트 없음", ev == [], ev)
+ck("실패 뒤 기준선도 실측 가격 저장", store3.get("24")["price"] == 2900000,
+   store3.get("24")["price"])
+ck("실패 뒤 기준선도 실측 끌올수 저장", store3.get("24")["republish_count"] == 2)
+ck("성공하면 fail 초기화", store3.get("24")["fail"] == 0,
+   store3.get("24")["fail"])
+ck("성공 조회가 last_check 를 옮김",
+   store3.get("24")["last_check"] == NOW + 900, store3.get("24")["last_check"])
+api24b = FakeAPI({"gone": False, "title": "보테가", "url": "u24", "price": 2500000,
+                  "status": "ongoing", "republish_count": 3,
+                  "published_at": NOW - 3600, "region": "강남"})
+ev = tr3.check_one("24", api24b, NOW + 1000)
+kinds24 = sorted(e["kind"] for e in ev)
+ck("그 다음 변화는 정상 발화", kinds24 == ["price_down", "republished"], kinds24)
+ck("발화 기준은 실측 2900000", ev[0]["old"] == 2900000, ev[0])
 
 tr3.add_from_matches([{"article_id": "23", "title": "에르메스", "region": "강남",
                        "url": "u23", "price": "1원", "time": str(NOW - 3600)}],

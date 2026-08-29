@@ -351,6 +351,11 @@ class WatchTracker:
         # 아직 한 번도 재조회하지 않은 행 = 씨앗값만 들어 있다. 씨앗의 가격은
         # 알림 표시 문자열에서, republish_count 는 0 고정으로 만든 값이라 API 실측과
         # 비교하면 없는 변동이 잡힌다. 첫 조회는 기준선 확보로만 쓰고 알리지 않는다.
+        #
+        # last_check 는 이 표식의 전부다 — 관측에 성공한 경로만 쓸 수 있다.
+        # 실패 경로가 last_check 를 건드리면 등호가 깨져 아직 씨앗뿐인 행이
+        # '이미 기준선을 잡은 행'으로 둔갑하고, 첫 성공 조회가 씨앗과 비교돼
+        # 없는 변동을 알린다. 실패는 fail·next_check 만 움직인다.
         seeding = old.get("last_check") == old.get("first_seen")
         try:
             new = api.fetch(str(article_id))
@@ -398,12 +403,16 @@ class WatchTracker:
         return events
 
     def _note_failure(self, old, article_id, now) -> list[dict]:
-        """조회 실패는 매물의 변화가 아니다 — 알리지 않고 세기만 한다."""
+        """조회 실패는 매물의 변화가 아니다 — 알리지 않고 세기만 한다.
+
+        last_check 는 건드리지 않는다: 관측에 실패했으니 '마지막 관측'이 아니고,
+        check_one 의 기준선 표식(last_check == first_seen)이 실패 한 번에 깨지면
+        안 된다. 일정은 next_check 로만 움직이므로 영향 없다."""
         fail = (old.get("fail") or 0) + 1
         if fail >= MAX_FAIL:
-            self.store.mark(article_id, fail=fail, tier=TIER_EVICTED, last_check=now)
+            self.store.mark(article_id, fail=fail, tier=TIER_EVICTED)
         else:
-            self.store.mark(article_id, fail=fail, last_check=now,
+            self.store.mark(article_id, fail=fail,
                             next_check=now + interval_for(old.get("tier") or TIER_FRESH))
         return []
 
