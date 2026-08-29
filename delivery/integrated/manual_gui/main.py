@@ -214,7 +214,9 @@ class _WatchNotifyThread(QtCore.QThread):
 class _WatchSweepThread(QtCore.QThread):
     """워치리스트 재조회 — 네트워크가 GUI 를 막지 않게 백그라운드에서 돈다.
 
-    sqlite 커넥션은 이 스레드만 만진다. GUI 는 done 으로 받은 숫자만 쓴다."""
+    sqlite 커넥션은 GUI 스레드(add_from_matches)와 공유한다. 모든 store 메서드가
+    단문 + 즉시 commit 이라 커넥션 뮤텍스로 직렬화된다 — 여러 문장을 한 트랜잭션에
+    묶게 되면 그때는 잠금이 필요하다."""
     done = QtCore.pyqtSignal(list, int, int)      # events, active_count, next_due_at
     log = QtCore.pyqtSignal(str)
 
@@ -222,6 +224,14 @@ class _WatchSweepThread(QtCore.QThread):
         super().__init__()
         self._tracker, self._store = tracker, store
         self._budget, self._interval = budget, interval
+        self._stopped = False
+
+    def stop(self):
+        """다음 항목부터 멈춘다. sweep 은 provider 가 None 이면 그 자리서 끝낸다."""
+        self._stopped = True
+
+    def _provider(self):
+        return None if self._stopped else self._budget.next()
 
     def run(self):
         events = []
@@ -230,7 +240,7 @@ class _WatchSweepThread(QtCore.QThread):
             n = watch_sweep_budget(self._store.active_count(), self._interval)
             if n:
                 self._budget.reload()
-                events = self._tracker.sweep(self._budget.next, n)
+                events = self._tracker.sweep(self._provider, n)
         except Exception as e:
             self.log.emit(f"[가격추적] 스윕 실패: {str(e)[:120]}")
         try:
@@ -647,6 +657,7 @@ class MainWindow(QMainWindow):
         self._watch_timer = None
         self._watch_active = 0
         self._watch_next_due = 0
+        self._watch_init_error = ""
         try:
             from daangn_ext import article_watch as _aw
             self._watch_store = _aw.WatchStore("./data/watch.db")
@@ -655,7 +666,8 @@ class MainWindow(QMainWindow):
             self._watch_timer = QtCore.QTimer(self)
             self._watch_timer.timeout.connect(self._watch_sweep_tick)
         except Exception as e:
-            print("워치리스트 초기화 실패:", str(e)[:120])
+            self._watch_init_error = str(e)[:200]
+            print("워치리스트 초기화 실패:", self._watch_init_error)
         # 실시간 헬스줄(토큰/수확/폴링) — 무인 신뢰 위해 5초마다 갱신
         self._alert_health_timer = QtCore.QTimer(self)
         self._alert_health_timer.timeout.connect(self._refresh_alert_health)
@@ -3004,11 +3016,16 @@ class MainWindow(QMainWindow):
             self._watch_timer.stop()
         th = getattr(self, "_watch_thread", None)
         if th is not None and th.isRunning():
-            th.wait(3000)
+            th.stop()                      # 다음 항목부터 중단
+            if not th.wait(5000):          # 진행 중인 요청 하나는 기다린다
+                th.terminate()
+                th.wait(1000)
         for t in list(getattr(self, "_watch_threads", []) or []):
-            if t.isRunning():
-                t.wait(3000)
-        if getattr(self, "_watch_store", None):
+            if t.isRunning() and not t.wait(3000):
+                t.terminate()
+                t.wait(1000)
+        alive = th is not None and th.isRunning()
+        if getattr(self, "_watch_store", None) and not alive:
             self._watch_store.close()
 
     def clearItemList(self):
