@@ -13,7 +13,6 @@ from daangn.workers import CancelableImageDownloader, ExportExcel
 from daangn.model import Product
 from daangn.task import CrawlTask
 from daangn.ui_mainwindow import Ui_MainWindow
-from daangn_ext import article_watch
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
@@ -59,6 +58,7 @@ def watch_sweep_budget(active, interval_sec):
 
     활성 전체를 fresh 주기(4시간) 안에 한 바퀴 돈다고 보고 비례 배분한다.
     활성이 있으면 최소 1건은 본다."""
+    from daangn_ext import article_watch
     active = int(active or 0)
     if active <= 0:
         return 0
@@ -209,6 +209,35 @@ class _WatchNotifyThread(QtCore.QThread):
                     emit(f"[구글시트] {wrote}행 기록")
             except Exception as e:
                 emit(f"[구글시트] 실패: {str(e)[:50]}")
+
+
+class _WatchSweepThread(QtCore.QThread):
+    """워치리스트 재조회 — 네트워크가 GUI 를 막지 않게 백그라운드에서 돈다.
+
+    sqlite 커넥션은 이 스레드만 만진다. GUI 는 done 으로 받은 숫자만 쓴다."""
+    done = QtCore.pyqtSignal(list, int, int)      # events, active_count, next_due_at
+    log = QtCore.pyqtSignal(str)
+
+    def __init__(self, tracker, store, budget, interval):
+        super().__init__()
+        self._tracker, self._store = tracker, store
+        self._budget, self._interval = budget, interval
+
+    def run(self):
+        events = []
+        try:
+            self._tracker.enforce_cap()
+            n = watch_sweep_budget(self._store.active_count(), self._interval)
+            if n:
+                self._budget.reload()
+                events = self._tracker.sweep(self._budget.next, n)
+        except Exception as e:
+            self.log.emit(f"[가격추적] 스윕 실패: {str(e)[:120]}")
+        try:
+            self.done.emit(events, self._store.active_count(),
+                           self._store.next_due_at())
+        except Exception:
+            self.done.emit(events, 0, 0)
 
 
 class _AlertWorker(QtCore.QThread):
@@ -610,13 +639,23 @@ class MainWindow(QMainWindow):
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
         # ── 워치리스트(가격변동 추적) ──
-        self._watch_store = article_watch.WatchStore("./data/watch.db")
-        self._watch_tracker = article_watch.WatchTracker(self._watch_store)
-        self._watch_budget = article_watch.AccountBudget("./accounts.json")
+        self._watch_store = None
+        self._watch_tracker = None
+        self._watch_budget = None
+        self._watch_thread = None
         self._watch_threads = []
-        self._watch_timer = QtCore.QTimer(self)
-        self._watch_timer.timeout.connect(self._watch_sweep_tick)
-        self._watch_timer.start(WATCH_SWEEP_INTERVAL * 1000)
+        self._watch_timer = None
+        self._watch_active = 0
+        self._watch_next_due = 0
+        try:
+            from daangn_ext import article_watch as _aw
+            self._watch_store = _aw.WatchStore("./data/watch.db")
+            self._watch_tracker = _aw.WatchTracker(self._watch_store)
+            self._watch_budget = _aw.AccountBudget("./accounts.json")
+            self._watch_timer = QtCore.QTimer(self)
+            self._watch_timer.timeout.connect(self._watch_sweep_tick)
+        except Exception as e:
+            print("워치리스트 초기화 실패:", str(e)[:120])
         # 실시간 헬스줄(토큰/수확/폴링) — 무인 신뢰 위해 5초마다 갱신
         self._alert_health_timer = QtCore.QTimer(self)
         self._alert_health_timer.timeout.connect(self._refresh_alert_health)
@@ -1072,12 +1111,16 @@ class MainWindow(QMainWindow):
     def on_alert_autopoll(self):
         if self._alert_poll_timer.isActive():
             self._alert_poll_timer.stop()
+            if self._watch_timer:
+                self._watch_timer.stop()
             self._set_sleep_block(False)
             self.alertAutoPollBtn.setText("자동 폴링 시작")
             self.alertLog.append("[자동폴링] 정지")
         else:
             iv = self.alertPollInterval.value() * self._night_factor()
             self._alert_poll_timer.start(iv * 1000)
+            if self._watch_timer:
+                self._watch_timer.start(WATCH_SWEEP_INTERVAL * 1000)
             self._set_sleep_block(True)
             self.alertAutoPollBtn.setText("자동 폴링 정지")
             nf = self._night_factor()
@@ -1128,8 +1171,14 @@ class MainWindow(QMainWindow):
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
             self._notify_matches(new_items)
-            self._watch_tracker.add_from_matches(new_items)
             self._save_match_seen()
+            try:
+                added = self._watch_tracker.add_from_matches(new_items) \
+                    if self._watch_tracker else 0
+                if added:
+                    self.alertLog.append(f"[가격추적] {added}건 추적 시작")
+            except Exception as e:
+                self.alertLog.append(f"[가격추적] 등록 실패: {str(e)[:80]}")
         try:
             self._refresh_alert_health()
         except Exception:
@@ -1173,19 +1222,24 @@ class MainWindow(QMainWindow):
         th.start()
 
     def _watch_sweep_tick(self):
-        """10분마다 워치리스트를 예산만큼 재조회하고 변동을 알린다."""
-        try:
-            self._watch_tracker.enforce_cap()
-            budget = watch_sweep_budget(self._watch_store.active_count(),
-                                        WATCH_SWEEP_INTERVAL)
-            if not budget:
-                return
-            self._watch_budget.reload()
-            events = self._watch_tracker.sweep(self._watch_budget.next, budget)
-            if events:
-                self._notify_watch_events(events)
-        except Exception as e:
-            self.alertLog.append(f"[가격추적] 스윕 실패: {str(e)[:120]}")
+        """10분마다 워치리스트를 예산만큼 재조회한다(백그라운드)."""
+        if not self._watch_tracker:
+            return
+        th = getattr(self, "_watch_thread", None)
+        if th is not None and th.isRunning():
+            return                      # 이전 스윕이 아직 돌면 건너뛴다
+        th = _WatchSweepThread(self._watch_tracker, self._watch_store,
+                               self._watch_budget, WATCH_SWEEP_INTERVAL)
+        th.log.connect(self.alertLog.append)
+        th.done.connect(self._on_watch_swept)
+        self._watch_thread = th
+        th.start()
+
+    def _on_watch_swept(self, events, active, next_due):
+        self._watch_active = int(active)
+        self._watch_next_due = int(next_due)
+        if events:
+            self._notify_watch_events(events)
 
     def _notify_watch_events(self, events):
         lines = watch_event_lines(events)
@@ -1193,6 +1247,9 @@ class MainWindow(QMainWindow):
             return
         for line in lines:
             self.alertLog.append(f"[가격추적] {line}")
+        nt = getattr(self, "_notify", {}) or {}
+        if not ((nt.get("tg_token") and nt.get("tg_chat")) or nt.get("sheet_url")):
+            return
         th = _WatchNotifyThread(getattr(self, "_notify", {}) or {}, lines)
         th.log.connect(self.alertLog.append)
         th.finished.connect(lambda t=th: self._watch_threads.remove(t)
@@ -2943,6 +3000,16 @@ class MainWindow(QMainWindow):
         if self.worker_thread is not None and self.worker_thread.isRunning():
             self.worker_thread.cancel()
             self.worker_thread.wait(3000)
+        if getattr(self, "_watch_timer", None):
+            self._watch_timer.stop()
+        th = getattr(self, "_watch_thread", None)
+        if th is not None and th.isRunning():
+            th.wait(3000)
+        for t in list(getattr(self, "_watch_threads", []) or []):
+            if t.isRunning():
+                t.wait(3000)
+        if getattr(self, "_watch_store", None):
+            self._watch_store.close()
 
     def clearItemList(self):
         self.controller.clear_products()
