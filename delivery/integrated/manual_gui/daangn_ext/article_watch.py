@@ -420,7 +420,7 @@ class AccountBudget:
         self._day_fn = day_fn or _today
         self._used = {}
         self._day = self._day_fn()
-        self._cursor = 0
+        self._last_label = None
         self._accounts = []
         self.reload()
 
@@ -451,14 +451,18 @@ class AccountBudget:
         cands = self._valid()
         if not cands:
             return None
-        for _ in range(len(cands)):
-            a = cands[self._cursor % len(cands)]
-            self._cursor += 1
-            label = a.get("label") or ""
+        labels = [a.get("label") or "" for a in cands]
+        start = labels.index(self._last_label) + 1 \
+            if self._last_label in labels else 0
+        for i in range(len(cands)):
+            idx = (start + i) % len(cands)
+            label = labels[idx]
             if self._used.get(label, 0) < self.daily_cap:
                 self._used[label] = self._used.get(label, 0) + 1
-                return self._factory(a.get("access"), config_path=self.config_path,
-                                     proxy=a.get("proxy")), label
+                self._last_label = label
+                return self._factory(cands[idx].get("access"),
+                                     config_path=self.config_path,
+                                     proxy=cands[idx].get("proxy")), label
         return None
 
 

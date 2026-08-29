@@ -439,6 +439,20 @@ bud3 = aw.AccountBudget(os.path.join(tempfile.mkdtemp(), "없음.json"),
                         day_fn=lambda: DAY["v"])
 ck("파일 없으면 None", bud3.next() is None)
 
+acc3_fp = os.path.join(tempfile.mkdtemp(), "accounts3.json")
+_json.dump([{"label": l, "access": "tok-" + l, "proxy": None}
+            for l in ("x", "y", "z")],
+           open(acc3_fp, "w", encoding="utf-8"))
+aw.token_remaining = lambda t: 9999
+bud4 = aw.AccountBudget(acc3_fp, daily_cap=5, api_factory=fake_factory,
+                        day_fn=lambda: DAY["v"])
+seq3 = [bud4.next()[1] for _ in range(3)]
+ck("3계정 순환", seq3 == ["x", "y", "z"], seq3)
+aw.token_remaining = lambda t: 10 if t == "tok-y" else 9999   # y 만 만료
+after = bud4.next()[1]
+ck("목록 축소 후 직전 계정 반복 없음", after != "z", after)
+ck("축소 후에도 유효 계정만", after in ("x",), after)
+
 aw.token_remaining = orig_remaining
 
 passed = sum(1 for _, ok in R if ok)
