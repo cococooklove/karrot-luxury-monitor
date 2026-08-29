@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -113,6 +114,52 @@ api = aw.ArticleDetailAPI("tok", client=fake_client(200, {
     "article": dict(ARTICLE_OK["article"], visible=False)}))
 ck("visible False 면 gone", api.fetch("1")["gone"] is True)
 api.close()
+
+print("=== D. WatchStore ===")
+dbp = os.path.join(tempfile.mkdtemp(), "watch.db")
+st = aw.WatchStore(dbp)
+
+st.upsert({"id": "1", "title": "가", "region": "강남", "url": "u1", "price": 1000,
+           "status": "ongoing", "republish_count": 0, "published_at": 100,
+           "first_seen": 100, "last_check": 100, "next_check": 200,
+           "tier": "fresh", "fail": 0})
+st.upsert({"id": "2", "title": "나", "region": "서초", "url": "u2", "price": 2000,
+           "status": "ongoing", "republish_count": 0, "published_at": 50,
+           "first_seen": 100, "last_check": 100, "next_check": 300,
+           "tier": "aged", "fail": 0})
+st.upsert({"id": "3", "title": "다", "region": "송파", "url": "u3", "price": 3000,
+           "status": "closed", "republish_count": 0, "published_at": 10,
+           "first_seen": 100, "last_check": 100, "next_check": 150,
+           "tier": "dead", "fail": 0})
+
+ck("get 저장값", st.get("1")["price"] == 1000)
+ck("get 없는 id → None", st.get("nope") is None)
+ck("active_count = 2", st.active_count() == 2, st.active_count())
+ck("due(250) → ['1']", st.due(250, 10) == ["1"], st.due(250, 10))
+ck("due 는 dead 제외", "3" not in st.due(999, 10))
+ck("due 정렬·limit", st.due(999, 1) == ["1"], st.due(999, 1))
+ck("oldest_active → ['2','1']", st.oldest_active(2) == ["2", "1"], st.oldest_active(2))
+ck("next_due_at = 200", st.next_due_at() == 200, st.next_due_at())
+
+st.upsert({"id": "1", "title": "가", "region": "강남", "url": "u1", "price": 900,
+           "status": "ongoing", "republish_count": 0, "published_at": 100,
+           "first_seen": 100, "last_check": 400, "next_check": 500,
+           "tier": "fresh", "fail": 0})
+ck("upsert 갱신", st.get("1")["price"] == 900)
+ck("upsert 후에도 2행", st.active_count() == 2)
+
+st.mark("1", tier="dead", fail=3)
+ck("mark 부분갱신", st.get("1")["tier"] == "dead" and st.get("1")["fail"] == 3)
+ck("mark 후 active_count = 1", st.active_count() == 1)
+ck("mark 다른 컬럼 보존", st.get("1")["price"] == 900)
+ck("mark 모르는 컬럼 무시", st.mark("1", zzz=1) is None)
+st.close()
+
+st2 = aw.WatchStore(dbp)
+ck("재열기 영속", st2.get("1")["price"] == 900)
+ck("활성 없으면 next_due_at 0", aw.WatchStore(
+    os.path.join(tempfile.mkdtemp(), "empty.db")).next_due_at() == 0)
+st2.close()
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

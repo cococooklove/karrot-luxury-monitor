@@ -103,3 +103,89 @@ class ArticleDetailAPI:
                 self._client.close()
             except Exception:
                 pass
+
+
+_COLUMNS = ("id", "title", "region", "url", "price", "status", "republish_count",
+            "published_at", "first_seen", "last_check", "next_check", "tier", "fail")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS watch (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    region TEXT,
+    url TEXT,
+    price INTEGER,
+    status TEXT,
+    republish_count INTEGER,
+    published_at INTEGER,
+    first_seen INTEGER,
+    last_check INTEGER,
+    next_check INTEGER,
+    tier TEXT,
+    fail INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_watch_due ON watch (tier, next_check);
+"""
+
+
+class WatchStore:
+    """추적 중인 매물의 마지막 관측값과 다음 점검 시각."""
+
+    def __init__(self, path: str = "./data/watch.db"):
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        self._db = sqlite3.connect(path, check_same_thread=False)
+        self._db.row_factory = sqlite3.Row
+        self._db.executescript(_SCHEMA)
+        self._db.commit()
+
+    def upsert(self, row: dict) -> None:
+        vals = [row.get(c) for c in _COLUMNS]
+        placeholders = ",".join("?" * len(_COLUMNS))
+        updates = ",".join(f"{c}=excluded.{c}" for c in _COLUMNS if c != "id")
+        self._db.execute(
+            f"INSERT INTO watch ({','.join(_COLUMNS)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}", vals)
+        self._db.commit()
+
+    def get(self, article_id: str) -> dict | None:
+        r = self._db.execute("SELECT * FROM watch WHERE id=?",
+                             (str(article_id),)).fetchone()
+        return dict(r) if r else None
+
+    def due(self, now: int, limit: int) -> list[str]:
+        rows = self._db.execute(
+            "SELECT id FROM watch WHERE tier!='dead' AND next_check<=? "
+            "ORDER BY next_check ASC LIMIT ?", (int(now), int(limit))).fetchall()
+        return [r["id"] for r in rows]
+
+    def active_count(self) -> int:
+        return self._db.execute(
+            "SELECT COUNT(*) c FROM watch WHERE tier!='dead'").fetchone()["c"]
+
+    def oldest_active(self, n: int) -> list[str]:
+        rows = self._db.execute(
+            "SELECT id FROM watch WHERE tier!='dead' ORDER BY published_at ASC LIMIT ?",
+            (int(n),)).fetchall()
+        return [r["id"] for r in rows]
+
+    def next_due_at(self) -> int:
+        r = self._db.execute(
+            "SELECT MIN(next_check) v FROM watch WHERE tier!='dead'").fetchone()
+        return int(r["v"] or 0)
+
+    def mark(self, article_id: str, **fields) -> None:
+        cols = [c for c in fields if c in _COLUMNS and c != "id"]
+        if not cols:
+            return
+        sets = ",".join(f"{c}=?" for c in cols)
+        self._db.execute(f"UPDATE watch SET {sets} WHERE id=?",
+                         [fields[c] for c in cols] + [str(article_id)])
+        self._db.commit()
+
+    def close(self) -> None:
+        try:
+            self._db.close()
+        except Exception:
+            pass
