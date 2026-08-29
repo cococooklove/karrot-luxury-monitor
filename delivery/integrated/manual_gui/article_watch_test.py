@@ -214,6 +214,183 @@ ev = aw.diff_events(OLD, newrow(price=700, status="closed"), NOW)
 kinds = sorted(e["kind"] for e in ev)
 ck("동시 변화 2건", kinds == ["price_down", "sold"], kinds)
 
+print("=== G. parse_price_text ===")
+ck("410,000원 → 410000", aw.parse_price_text("410,000원") == 410000)
+ck("나눔 → 0", aw.parse_price_text("나눔") == 0)
+ck("None → 0", aw.parse_price_text(None) == 0)
+ck("정수 그대로", aw.parse_price_text(5000) == 5000)
+
+print("=== H. 투입과 상한 ===")
+dbp2 = os.path.join(tempfile.mkdtemp(), "w2.db")
+store = aw.WatchStore(dbp2)
+tr = aw.WatchTracker(store)
+
+MATCHES = [
+    {"article_id": "10", "title": "샤넬", "region": "강남", "url": "u10",
+     "price": "1,000,000원", "time": str(NOW - 3600)},
+    {"article_id": "11", "title": "디올", "region": "서초", "url": "u11",
+     "price": "500,000원", "time": str(NOW - 5 * 86400)},
+]
+ck("신규 2건 투입", tr.add_from_matches(MATCHES, now=NOW) == 2)
+ck("중복 투입 0건", tr.add_from_matches(MATCHES, now=NOW) == 0)
+ck("가격 파싱 저장", store.get("10")["price"] == 1000000)
+ck("fresh 등급", store.get("10")["tier"] == "fresh")
+ck("aged 등급", store.get("11")["tier"] == "aged")
+ck("next_check 미래", store.get("10")["next_check"] > NOW)
+ck("article_id 없으면 무시", tr.add_from_matches([{"title": "x"}], now=NOW) == 0)
+ck("15일 지난 매칭은 투입 안 함",
+   tr.add_from_matches([{"article_id": "99", "title": "옛것", "region": "r",
+                         "url": "u", "price": "1원",
+                         "time": str(NOW - 15 * 86400)}], now=NOW) == 0)
+
+for i in range(aw.ACTIVE_CAP + 5):
+    store.upsert({"id": f"c{i}", "title": "t", "region": "r", "url": "u",
+                  "price": 1, "status": "ongoing", "republish_count": 0,
+                  "published_at": NOW - i * 60, "first_seen": NOW,
+                  "last_check": NOW, "next_check": NOW + 10, "tier": "fresh",
+                  "fail": 0})
+before = store.active_count()
+dropped = tr.enforce_cap(NOW)
+ck("상한까지 강등", store.active_count() == aw.ACTIVE_CAP,
+   f"{before} -> {store.active_count()}")
+ck("강등 수 반환", dropped == before - aw.ACTIVE_CAP, dropped)
+ck("가장 오래된 것부터", store.get("c%d" % (aw.ACTIVE_CAP + 4))["tier"] == "dead")
+ck("상한 이하면 0", tr.enforce_cap(NOW) == 0)
+
+print("=== I. check_one ===")
+dbp3 = os.path.join(tempfile.mkdtemp(), "w3.db")
+store3 = aw.WatchStore(dbp3)
+tr3 = aw.WatchTracker(store3)
+tr3.add_from_matches([{"article_id": "20", "title": "구찌", "region": "강남",
+                       "url": "u20", "price": "900,000원",
+                       "time": str(NOW - 3600)}], now=NOW)
+
+
+class FakeAPI:
+    def __init__(self, result=None, exc=None):
+        self.result, self.exc, self.calls = result, exc, 0
+
+    def fetch(self, article_id):
+        self.calls += 1
+        if self.exc:
+            raise self.exc
+        return dict(self.result, id=str(article_id))
+
+
+def http_error(code):
+    req = httpx.Request("GET", "https://x/")
+    return httpx.HTTPStatusError("boom", request=req,
+                                 response=httpx.Response(code, request=req))
+
+
+api_ok = FakeAPI({"gone": False, "title": "구찌", "url": "u20", "price": 800000,
+                  "status": "ongoing", "republish_count": 0,
+                  "published_at": NOW - 3600, "region": "강남"})
+ev = tr3.check_one("20", api_ok, NOW + 100)
+ck("인하 이벤트", len(ev) == 1 and ev[0]["kind"] == "price_down", ev)
+ck("새 가격 저장", store3.get("20")["price"] == 800000)
+ck("last_check 갱신", store3.get("20")["last_check"] == NOW + 100)
+ck("next_check 재계산",
+   store3.get("20")["next_check"] == NOW + 100 + aw.FRESH_INTERVAL)
+ck("두 번째 조회는 이벤트 없음", tr3.check_one("20", api_ok, NOW + 200) == [])
+ck("없는 id 는 조용히 빈 목록", tr3.check_one("없음", api_ok, NOW) == [])
+
+api_closed = FakeAPI({"gone": False, "title": "구찌", "url": "u20", "price": 800000,
+                      "status": "closed", "republish_count": 0,
+                      "published_at": NOW - 3600, "region": "강남"})
+ev = tr3.check_one("20", api_closed, NOW + 250)
+ck("판매완료 이벤트", len(ev) == 1 and ev[0]["kind"] == "sold", ev)
+ck("판매완료 후 dead", store3.get("20")["tier"] == "dead")
+
+tr3.add_from_matches([{"article_id": "22", "title": "루이", "region": "강남",
+                       "url": "u22", "price": "1원", "time": str(NOW - 3600)}],
+                     now=NOW)
+ev = tr3.check_one("22", FakeAPI({"gone": True}), NOW + 300)
+ck("삭제 이벤트", len(ev) == 1 and ev[0]["kind"] == "deleted")
+ck("삭제 후 dead", store3.get("22")["tier"] == "dead")
+ck("dead 는 due 에서 빠짐", store3.due(NOW + 99999, 10) == [])
+
+tr3.add_from_matches([{"article_id": "21", "title": "펜디", "region": "강남",
+                       "url": "u21", "price": "100,000원",
+                       "time": str(NOW - 3600)}], now=NOW)
+api_err = FakeAPI(exc=RuntimeError("boom"))
+for i in range(aw.MAX_FAIL):
+    ck(f"실패 {i+1}회 이벤트 없음",
+       tr3.check_one("21", api_err, NOW + 400 + i) == [])
+ck("MAX_FAIL 후 dead", store3.get("21")["tier"] == "dead")
+ck("fail 카운터", store3.get("21")["fail"] == aw.MAX_FAIL)
+
+tr3.add_from_matches([{"article_id": "23", "title": "에르메스", "region": "강남",
+                       "url": "u23", "price": "1원", "time": str(NOW - 3600)}],
+                     now=NOW)
+try:
+    tr3.check_one("23", FakeAPI(exc=http_error(429)), NOW + 500)
+    ck("429 → AccountUnavailable", False)
+except aw.AccountUnavailable:
+    ck("429 → AccountUnavailable", True)
+ck("429 는 fail 안 올림", store3.get("23")["fail"] == 0)
+ck("429 는 next_check 미룸",
+   store3.get("23")["next_check"] == NOW + 500 + aw.RATE_LIMIT_DELAY,
+   store3.get("23")["next_check"])
+
+try:
+    tr3.check_one("23", FakeAPI(exc=http_error(401)), NOW + 600)
+    ck("401 → AccountUnavailable", False)
+except aw.AccountUnavailable:
+    ck("401 → AccountUnavailable", True)
+ck("401 는 fail 안 올림", store3.get("23")["fail"] == 0)
+
+try:
+    tr3.check_one("23", FakeAPI(exc=http_error(500)), NOW + 700)
+    ck("500 은 일반 실패", store3.get("23")["fail"] == 1, store3.get("23")["fail"])
+except aw.AccountUnavailable:
+    ck("500 은 일반 실패", False)
+
+print("=== J. sweep ===")
+dbp4 = os.path.join(tempfile.mkdtemp(), "w4.db")
+store4 = aw.WatchStore(dbp4)
+tr4 = aw.WatchTracker(store4)
+for i in range(5):
+    store4.upsert({"id": f"s{i}", "title": "t", "region": "r", "url": "u",
+                   "price": 100, "status": "ongoing", "republish_count": 0,
+                   "published_at": NOW - 3600, "first_seen": NOW,
+                   "last_check": NOW, "next_check": NOW - 1, "tier": "fresh",
+                   "fail": 0})
+
+shared = FakeAPI({"gone": False, "title": "t", "url": "u", "price": 90,
+                  "status": "ongoing", "republish_count": 0,
+                  "published_at": NOW - 3600, "region": "r"})
+evs = tr4.sweep(lambda: (shared, "acc-a"), budget=3, now=NOW)
+ck("예산만큼만 조회", shared.calls == 3, shared.calls)
+ck("이벤트 3건", len(evs) == 3, len(evs))
+ck("남은 2건은 due 유지", len(store4.due(NOW, 10)) == 2)
+ck("계정 없으면 조회 0", tr4.sweep(lambda: None, budget=10, now=NOW) == [])
+
+dbp5 = os.path.join(tempfile.mkdtemp(), "w5.db")
+store5 = aw.WatchStore(dbp5)
+tr5 = aw.WatchTracker(store5)
+for i in range(3):
+    store5.upsert({"id": f"r{i}", "title": "t", "region": "r", "url": "u",
+                   "price": 100, "status": "ongoing", "republish_count": 0,
+                   "published_at": NOW - 3600, "first_seen": NOW,
+                   "last_check": NOW, "next_check": NOW - 1, "tier": "fresh",
+                   "fail": 0})
+bad_api = FakeAPI(exc=http_error(429))
+good_api = FakeAPI({"gone": False, "title": "t", "url": "u", "price": 90,
+                    "status": "ongoing", "republish_count": 0,
+                    "published_at": NOW - 3600, "region": "r"})
+seq = [(bad_api, "acc-bad"), (bad_api, "acc-bad"), (good_api, "acc-good"),
+       (good_api, "acc-good"), (good_api, "acc-good")]
+
+
+def provider():
+    return seq.pop(0) if seq else None
+
+
+evs = tr5.sweep(provider, budget=3, now=NOW)
+ck("막힌 계정은 이후 건너뜀", bad_api.calls == 1, bad_api.calls)
+ck("다른 계정으로 이어감", good_api.calls >= 1, good_api.calls)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

@@ -236,3 +236,161 @@ def diff_events(old: dict, new: dict, now: int) -> list[dict]:
         out.append(_ev("republished", old, new, orc, nrc, now))
 
     return out
+
+
+class AccountUnavailable(Exception):
+    """이 계정으로는 이번 스윕을 더 진행할 수 없다(401/429)."""
+
+
+def parse_price_text(s) -> int:
+    """매칭 응답의 '410,000원' 같은 문자열에서 숫자만 뽑는다. 없으면 0."""
+    if isinstance(s, int):
+        return s
+    if not isinstance(s, str):
+        return 0
+    digits = re.sub(r"[^0-9]", "", s)
+    return int(digits) if digits else 0
+
+
+class WatchTracker:
+    """등급·상한 정책과 diff. 네트워크는 주입받은 api 로만 한다."""
+
+    def __init__(self, store: WatchStore, now_fn=time.time):
+        self.store = store
+        self._now_fn = now_fn
+
+    def _now(self, now=None) -> int:
+        return int(now if now is not None else self._now_fn())
+
+    def add_from_matches(self, matches, now=None) -> int:
+        now = self._now(now)
+        added = 0
+        for m in matches or []:
+            aid = m.get("article_id")
+            if not aid:
+                continue
+            aid = str(aid)
+            if self.store.get(aid) is not None:
+                continue
+            try:
+                published = int(m.get("time") or 0)
+            except (TypeError, ValueError):
+                published = 0
+            tier = tier_for(published, now)
+            if tier == "dead":
+                continue
+            self.store.upsert({
+                "id": aid,
+                "title": m.get("title") or "",
+                "region": m.get("region") or "",
+                "url": m.get("url") or "",
+                "price": parse_price_text(m.get("price")),
+                "status": STATUS_ONGOING,
+                "republish_count": 0,
+                "published_at": published,
+                "first_seen": now,
+                "last_check": now,
+                "next_check": now + interval_for(tier),
+                "tier": tier,
+                "fail": 0,
+            })
+            added += 1
+        return added
+
+    def enforce_cap(self, now=None) -> int:
+        self._now(now)
+        over = self.store.active_count() - ACTIVE_CAP
+        if over <= 0:
+            return 0
+        for aid in self.store.oldest_active(over):
+            self.store.mark(aid, tier="dead")
+        return over
+
+    def check_one(self, article_id, api, now=None) -> list[dict]:
+        now = self._now(now)
+        old = self.store.get(str(article_id))
+        if old is None:
+            return []
+        try:
+            new = api.fetch(str(article_id))
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            if code in (401, 429):
+                delay = RATE_LIMIT_DELAY if code == 429 \
+                    else interval_for(old.get("tier") or "fresh")
+                self.store.mark(article_id, next_check=now + delay)
+                raise AccountUnavailable(str(code))
+            return self._note_failure(old, article_id, now)
+        except Exception:
+            return self._note_failure(old, article_id, now)
+
+        events = diff_events(old, new, now)
+        if new.get("gone"):
+            self.store.mark(article_id, tier="dead", fail=0, last_check=now)
+            return events
+
+        tier = tier_for(new.get("published_at") or old.get("published_at") or 0, now)
+        if new.get("status") == STATUS_CLOSED:
+            tier = "dead"
+        self.store.upsert({
+            "id": str(article_id),
+            "title": new.get("title") or old.get("title"),
+            "region": new.get("region") or old.get("region"),
+            "url": new.get("url") or old.get("url"),
+            "price": new.get("price"),
+            "status": new.get("status"),
+            "republish_count": new.get("republish_count") or 0,
+            "published_at": new.get("published_at") or old.get("published_at") or 0,
+            "first_seen": old.get("first_seen") or now,
+            "last_check": now,
+            "next_check": now + interval_for(tier),
+            "tier": tier,
+            "fail": 0,
+        })
+        return events
+
+    def _note_failure(self, old, article_id, now) -> list[dict]:
+        """조회 실패는 매물의 변화가 아니다 — 알리지 않고 세기만 한다."""
+        fail = (old.get("fail") or 0) + 1
+        if fail >= MAX_FAIL:
+            self.store.mark(article_id, fail=fail, tier="dead", last_check=now)
+        else:
+            self.store.mark(article_id, fail=fail, last_check=now,
+                            next_check=now + interval_for(old.get("tier") or "fresh"))
+        return []
+
+    def sweep(self, api_for_account, budget: int, now=None) -> list[dict]:
+        """예산만큼 점검한다. api_for_account 는 매 건마다 불리고
+        (api, label) 또는 예산 소진 시 None 을 돌려줘야 한다."""
+        now = self._now(now)
+        out = []
+        blocked = set()
+        for aid in self.store.due(now, int(budget)):
+            api = label = None
+            for _ in range(4):
+                got = api_for_account()
+                if not got:
+                    return out
+                if got[1] in blocked:
+                    _close(got[0])
+                    continue
+                api, label = got
+                break
+            if api is None:
+                return out
+            try:
+                out.extend(self.check_one(aid, api, now))
+            except AccountUnavailable:
+                blocked.add(label)
+            finally:
+                _close(api)
+        return out
+
+
+def _close(obj) -> None:
+    fn = getattr(obj, "close", None)
+    if callable(fn):
+        try:
+            fn()
+        except Exception:
+            pass
