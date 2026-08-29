@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """세션 이식 (SMS 없이 로그인): accounts.json 의 refresh 토큰으로 karrot_token.ds 를
-구성해 LDPlayer 인스턴스의 당근 앱 데이터에 심는다. 앱 실행 시 refresh 로 access 갱신 → 로그인.
+구성해 LDPlayer 인스턴스 당근 앱에 심는다. 앱 실행 시 refresh 로 access 갱신 → 로그인.
 
-서버(LDPlayer)서 실행:
+이 LDPlayer su 는 'su -c' 따옴표가 안 먹어 'su 0 <cmd>' 형식 사용.
+파일 주입은 adb push(/sdcard) → su 0 cp 로 (파이프/리다이렉트 회피).
+
+서버(LDPlayer)서:
   python tools/server_transplant.py --code 452902230637059559 --serial 127.0.0.1:5555
 """
 import argparse
 import base64
 import glob
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 
 PKG = "com.towneers.www"
-DS = f"/data/data/{PKG}/files/datastore/karrot_token.ds"
+DS_DIR = f"/data/data/{PKG}/files/datastore"
+DS = f"{DS_DIR}/karrot_token.ds"
 
 
 def _varint(n):
@@ -28,7 +34,6 @@ def _varint(n):
 
 
 def build_token_ds(refresh, access="", auth=""):
-    """proto: field1=refresh, 2=access, 3=auth (wire type 2, string)."""
     def field(num, s):
         if not s:
             return b""
@@ -45,8 +50,8 @@ def find_adb():
     return "adb"
 
 
-def sh(adb, serial, *args):
-    return subprocess.run([adb, "-s", serial, *args], capture_output=True)
+def run(*args):
+    return subprocess.run(list(args), capture_output=True)
 
 
 def main():
@@ -56,56 +61,46 @@ def main():
     ap.add_argument("--accounts", default="./accounts.json")
     ap.add_argument("--no-launch", action="store_true")
     a = ap.parse_args()
+    adb, S = find_adb(), a.serial
+
+    def su(*cmd):   # su 0 <cmd> (따옴표 이슈 없는 형식)
+        return run(adb, "-s", S, "shell", "su", "0", *cmd)
 
     accts = json.load(open(a.accounts, encoding="utf-8"))
     acct = next((x for x in accts if str(x.get("code")) == a.code), None)
     if not acct:
         sys.exit(f"[이식] 계정 {a.code} accounts.json 에 없음")
     ds = build_token_ds(acct.get("refresh", ""), acct.get("access", ""), acct.get("auth", ""))
-    b64 = base64.b64encode(ds).decode()
+    print(f"[이식] adb={adb} serial={S} code={a.code} ds={len(ds)}B")
+    run(adb, "connect", S)
 
-    adb = find_adb()
-    print(f"[이식] adb={adb} serial={a.serial} code={a.code} ds={len(ds)}B")
-    subprocess.run([adb, "connect", a.serial], capture_output=True)
+    if b"uid=0" not in su("id").stdout:
+        sys.exit(f"[이식] su 0 루트 불가 (LDPlayer Root 권한 확인)")
 
-    # 루트 확인
-    r = sh(adb, a.serial, "shell", "su", "-c", "id")
-    if b"uid=0" not in r.stdout:
-        sys.exit(f"[이식] su 루트 불가: {r.stdout.decode()[:80]} {r.stderr.decode()[:80]}")
-
-    # 데이터폴더 생성 위해 앱 최초 1회 실행(설치만 했으면 /data/data/PKG 없음)
-    if b"/data/data/" not in sh(adb, a.serial, "shell", "su", "-c",
-                                f"ls -d /data/data/{PKG} 2>/dev/null").stdout:
-        print("[이식] 데이터폴더 없음 → 앱 최초 실행으로 생성")
-        sh(adb, a.serial, "shell", "monkey", "-p", PKG, "-c",
-           "android.intent.category.LAUNCHER", "1")
-        time.sleep(10)
-
-    # app uid (stat 실패 시 dumpsys 폴백)
-    uid = sh(adb, a.serial, "shell", "su", "-c",
-             f"stat -c %u /data/data/{PKG}").stdout.decode().strip()
+    uid = su("stat", "-c", "%u", f"/data/data/{PKG}").stdout.decode().strip()
     if not uid.isdigit():
-        out = sh(adb, a.serial, "shell", "su", "-c",
-                 f"dumpsys package {PKG} | grep -o 'userId=[0-9]*'").stdout.decode()
-        import re as _re
-        m = _re.search(r"userId=(\d+)", out)
-        uid = m.group(1) if m else ""
-    if not uid.isdigit():
-        sys.exit(f"[이식] app uid 감지 실패 (당근 설치/실행 확인 필요)")
+        sys.exit(f"[이식] uid 감지 실패: {uid!r} (당근 앱 최초 1회 실행 필요)")
     print(f"[이식] app uid={uid}")
 
-    sh(adb, a.serial, "shell", "su", "-c", f"am force-stop {PKG}")
+    su("am", "force-stop", PKG)
     time.sleep(1)
-    cmd = (f"mkdir -p /data/data/{PKG}/files/datastore && "
-           f"echo {b64} | base64 -d > {DS} && "
-           f"chown {uid}:{uid} {DS} && chmod 600 {DS} && "
-           f"ls -l {DS}")
-    r = sh(adb, a.serial, "shell", "su", "-c", cmd)
-    print("[이식] push:", r.stdout.decode().strip()[:120], r.stderr.decode().strip()[:120])
+    su("mkdir", "-p", DS_DIR)
+
+    # 로컬 임시파일 → adb push → su 0 cp (파이프/리다이렉트 회피)
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".ds")
+    tf.write(ds); tf.close()
+    run(adb, "-s", S, "push", tf.name, "/sdcard/karrot_token.ds")
+    os.unlink(tf.name)
+    su("cp", "/sdcard/karrot_token.ds", DS)
+    su("chown", f"{uid}:{uid}", DS)
+    su("chmod", "600", DS)
+    su("rm", "/sdcard/karrot_token.ds")
+    ls = su("ls", "-l", DS).stdout.decode().strip()
+    print(f"[이식] push 완료: {ls}")
 
     if not a.no_launch:
-        sh(adb, a.serial, "shell", "monkey", "-p", PKG, "-c",
-           "android.intent.category.LAUNCHER", "1")
+        run(adb, "-s", S, "shell", "monkey", "-p", PKG, "-c",
+            "android.intent.category.LAUNCHER", "1")
         print("[이식] 앱 실행됨 — 20~30초 후 harvest 로 access 갱신 확인")
 
 
