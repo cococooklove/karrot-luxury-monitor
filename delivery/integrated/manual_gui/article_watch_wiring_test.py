@@ -66,6 +66,12 @@ ck("분 단위 표기", "5분" in m.watch_status_text(5, 1300, 1000),
 ck("다음 점검 지남", "대기" in m.watch_status_text(5, 900, 1000),
    m.watch_status_text(5, 900, 1000))
 
+print("=== D. headless_watch_due ===")
+ck("주기 안 지남 → False", m.headless_watch_due(1000, 1100, 600) is False)
+ck("주기 지남 → True", m.headless_watch_due(1000, 1700, 600) is True)
+ck("경계 포함", m.headless_watch_due(1000, 1600, 600) is True)
+ck("처음(0) → True", m.headless_watch_due(0, 10, 600) is True)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

@@ -81,6 +81,15 @@ def watch_status_text(active, next_check_at, now):
     return f"추적 중 {active}건 · 다음 점검 {when}"
 
 
+def headless_watch_due(last_sweep, now, interval):
+    """헤드리스 루프에서 이번 회에 스윕할 차례인지.
+
+    아직 한 번도 안 돌았으면(0/None) 바로 돈다 — --once 스모크가 성립하도록."""
+    if not last_sweep:
+        return True
+    return int(now) - int(last_sweep) >= int(interval)
+
+
 class _HarvestThread(QtCore.QThread):
     """백그라운드 자동 수확 — 앱 실행 중 주기적으로 LDPlayer/폰서 토큰 갱신.
     accounts.json 을 항상 신선하게 유지 → 수동 수확 불필요. access 30분 만료 전 갱신."""
@@ -3308,11 +3317,44 @@ def _run_headless():
             except Exception as e:
                 log(f"[구글시트] 실패: {str(e)[:60]}")
 
+    def _notify_lines(lines, nt):
+        """워치리스트 변동 줄 전송 — 텔레그램 + 구글시트."""
+        if not lines:
+            return
+        tok, chat = nt.get("tg_token"), nt.get("tg_chat")
+        if tok and chat:
+            try:
+                from daangn.notify import TelegramSender
+                tg = TelegramSender(tok, chat, log=log)
+                tg.enqueue("📉 가격변동\n" + "\n".join(lines))
+                tg.flush()
+                log(f"[텔레그램] 변동 {len(lines)}건 전송")
+            except Exception as e:
+                log(f"[텔레그램] 실패: {str(e)[:60]}")
+        if nt.get("sheet_url"):
+            try:
+                from daangn.notify import SheetWriter
+                sw = SheetWriter(nt.get("sheet_url"),
+                                 nt.get("sheet_cred") or "./credentials.json", log=log)
+                ts = _time.strftime("%Y-%m-%d %H:%M")
+                for ln in lines:
+                    sw.enqueue_row([ts, "가격변동", ln])
+                wrote, _ = sw.flush()
+                if wrote:
+                    log(f"[구글시트] {wrote}행 기록")
+            except Exception as e:
+                log(f"[구글시트] 실패: {str(e)[:60]}")
+
     log("=== 헤드리스 무인 모니터 시작 ===")
     seen_order = _load_seen()          # FIFO 순서 리스트
     seen = set(seen_order)             # 빠른 조회
     SEEN_CAP = 20000                   # 메모리 상한(무한증가 방지, 오래된 것 FIFO 축출)
     last_harvest = 0.0
+    from daangn_ext import article_watch
+    watch_store = article_watch.WatchStore("./data/watch.db")
+    watch_tracker = article_watch.WatchTracker(watch_store)
+    watch_budget = article_watch.AccountBudget("./accounts.json")
+    last_watch_sweep = 0.0
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
     if "--register" in argv:
@@ -3363,9 +3405,26 @@ def _run_headless():
         if fresh:
             log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
             _notify(fresh, _notify_cfg())
+            watch_tracker.add_from_matches(fresh)
             _save_seen(seen_order)
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
+        # 워치리스트 스윕 — 폴링과 같은 스레드에서 10분 간격으로만
+        if headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
+            last_watch_sweep = now
+            try:
+                watch_tracker.enforce_cap()
+                budget = watch_sweep_budget(watch_store.active_count(),
+                                            WATCH_SWEEP_INTERVAL)
+                if budget:
+                    watch_budget.reload()
+                    lines = watch_event_lines(
+                        watch_tracker.sweep(watch_budget.next, budget))
+                    if lines:
+                        log("[가격추적] " + " / ".join(lines))
+                        _notify_lines(lines, _notify_cfg())
+            except Exception as e:
+                log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
         if once:
             log("--once 완료"); break
         eff = interval * _night_factor(nights)
