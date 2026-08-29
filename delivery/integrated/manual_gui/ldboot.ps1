@@ -27,14 +27,47 @@ else {
         W "DefaultPassword 없음 - RDP 승격 불가(콘솔 세션에서는 기동 실패함)"
     }
     else {
+        # RDP 포트는 기본 3389 가 아닐 수 있다(이 서버는 1098) → 레지스트리에서 읽는다.
+        $port = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp").PortNumber
+        if (-not $port) { $port = 3389 }
+        $target = "localhost:$port"
         cmdkey /generic:TERMSRV/localhost /user:$($w.DefaultUserName) /pass:$($w.DefaultPassword) | Out-Null
-        W "루프백 RDP 접속 시도"
-        Start-Process mstsc -ArgumentList "/v:localhost", "/w:1920", "/h:1080"
-        for ($i = 0; $i -lt 24; $i++) {
+        cmdkey /generic:TERMSRV/$target /user:$($w.DefaultUserName) /pass:$($w.DefaultPassword) | Out-Null
+        # 자체 서명 인증서 경고 모달이 뜨면 무인 진행이 막힌다 → 경고 무시
+        New-Item -Path "HKCU:\Software\Microsoft\Terminal Server Client" -Force | Out-Null
+        Set-ItemProperty "HKCU:\Software\Microsoft\Terminal Server Client" -Name AuthenticationLevelOverride -Value 0 -Type DWord
+        # 접속 설정은 .rdp 파일로 넘긴다(자격증명 프롬프트/인증서 확인 끔)
+        $rdp = "C:\karrot\loopback.rdp"
+        @(
+          "full address:s:$target"
+          "username:s:$($w.DefaultUserName)"
+          "authentication level:i:0"
+          "prompt for credentials:i:0"
+          "promptcredentialonce:i:0"
+          "negotiate security layer:i:1"
+          "screen mode id:i:1"
+          "desktopwidth:i:1920"
+          "desktopheight:i:1080"
+          "session bpp:i:32"
+        ) | Set-Content $rdp -Encoding ASCII
+        # 부팅 직후엔 RDP 리스너가 아직 안 떠 있을 수 있으므로 포트가 열릴 때까지 대기
+        for ($i = 0; $i -lt 30; $i++) {
+            if ((Test-NetConnection -ComputerName localhost -Port $port -WarningAction SilentlyContinue).TcpTestSucceeded) { break }
             Start-Sleep 5
-            if ((quser 2>$null) -match "rdp-tcp") { W "RDP 세션 승격 완료 ($($i * 5 + 5)s)"; break }
         }
-        if (-not ((quser 2>$null) -match "rdp-tcp")) { W "RDP 승격 실패 - 그대로 진행" }
+        for ($try = 1; $try -le 3; $try++) {
+            W "루프백 RDP 접속 시도 $try ($target)"
+            # .rdp 파일로 띄우면 "게시자를 확인할 수 없습니다" 경고가 뜬다 → /v 인수로 직접 접속
+            Start-Process mstsc -ArgumentList "/v:$target", "/w:1920", "/h:1080"
+            for ($i = 0; $i -lt 12; $i++) {
+                Start-Sleep 5
+                if ((quser 2>$null) -match "rdp-tcp") { break }
+            }
+            if ((quser 2>$null) -match "rdp-tcp") { W "RDP 세션 승격 완료"; break }
+            taskkill /IM mstsc.exe /F 2>$null | Out-Null   # 실패 팝업 정리
+            Start-Sleep 10
+        }
+        if (-not ((quser 2>$null) -match "rdp-tcp")) { W "RDP 승격 실패 - 그대로 진행(기동 실패 예상)" }
         Start-Sleep 10
     }
 }
