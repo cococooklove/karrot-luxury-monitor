@@ -189,3 +189,50 @@ class WatchStore:
             self._db.close()
         except Exception:
             pass
+
+
+def tier_for(published_at: int, now: int) -> str:
+    """게시 시각으로 점검 등급을 정한다. 시각을 모르면 fresh 로 본다."""
+    if not published_at:
+        return "fresh"
+    age = int(now) - int(published_at)
+    if age < FRESH_AGE:
+        return "fresh"
+    if age < AGED_AGE:
+        return "aged"
+    return "dead"
+
+
+def interval_for(tier: str) -> int:
+    return {"fresh": FRESH_INTERVAL, "aged": AGED_INTERVAL}.get(tier, 0)
+
+
+def _ev(kind, old_row, new_row, old, new, now):
+    return {"kind": kind,
+            "id": str(old_row.get("id")),
+            "title": new_row.get("title") or old_row.get("title") or "",
+            "url": new_row.get("url") or old_row.get("url") or "",
+            "old": old, "new": new, "at": int(now)}
+
+
+def diff_events(old: dict, new: dict, now: int) -> list[dict]:
+    """저장값과 새 관측값을 비교해 이벤트 목록을 만든다.
+
+    예약중(reserved)은 알리지 않는다 — 되돌아오는 경우가 흔해 소음이 된다."""
+    if new.get("gone"):
+        return [_ev("deleted", old, new, old.get("status"), "gone", now)]
+
+    out = []
+    op, np_ = old.get("price"), new.get("price")
+    if isinstance(op, int) and isinstance(np_, int) and op != np_:
+        out.append(_ev("price_down" if np_ < op else "price_up", old, new, op, np_, now))
+
+    os_, ns = old.get("status"), new.get("status")
+    if ns == STATUS_CLOSED and os_ != STATUS_CLOSED:
+        out.append(_ev("sold", old, new, os_, ns, now))
+
+    orc, nrc = old.get("republish_count") or 0, new.get("republish_count") or 0
+    if nrc > orc:
+        out.append(_ev("republished", old, new, orc, nrc, now))
+
+    return out

@@ -161,6 +161,59 @@ ck("활성 없으면 next_due_at 0", aw.WatchStore(
     os.path.join(tempfile.mkdtemp(), "empty.db")).next_due_at() == 0)
 st2.close()
 
+print("=== E. 등급 판정 ===")
+NOW = 1_000_000
+ck("1시간 전 → fresh", aw.tier_for(NOW - 3600, NOW) == "fresh")
+ck("47시간 전 → fresh", aw.tier_for(NOW - 47 * 3600, NOW) == "fresh")
+ck("49시간 전 → aged", aw.tier_for(NOW - 49 * 3600, NOW) == "aged")
+ck("13일 전 → aged", aw.tier_for(NOW - 13 * 86400, NOW) == "aged")
+ck("15일 전 → dead", aw.tier_for(NOW - 15 * 86400, NOW) == "dead")
+ck("published_at 0 → fresh", aw.tier_for(0, NOW) == "fresh")
+ck("fresh 주기 4시간", aw.interval_for("fresh") == 4 * 3600)
+ck("aged 주기 24시간", aw.interval_for("aged") == 24 * 3600)
+ck("dead 주기 0", aw.interval_for("dead") == 0)
+
+print("=== F. diff_events ===")
+OLD = {"id": "1", "title": "가방", "url": "u", "price": 1000,
+       "status": "ongoing", "republish_count": 0}
+
+
+def newrow(**kw):
+    base = {"id": "1", "gone": False, "title": "가방", "url": "u", "price": 1000,
+            "status": "ongoing", "republish_count": 0}
+    base.update(kw)
+    return base
+
+
+ck("변화 없음 → 이벤트 0", aw.diff_events(OLD, newrow(), NOW) == [])
+
+ev = aw.diff_events(OLD, newrow(price=800), NOW)
+ck("가격 인하 1건", len(ev) == 1 and ev[0]["kind"] == "price_down", ev)
+ck("인하 old/new", ev[0]["old"] == 1000 and ev[0]["new"] == 800)
+ck("이벤트에 url", ev[0]["url"] == "u")
+ck("이벤트에 at", ev[0]["at"] == NOW)
+ck("이벤트에 id", ev[0]["id"] == "1")
+
+ev = aw.diff_events(OLD, newrow(price=1200), NOW)
+ck("가격 인상", len(ev) == 1 and ev[0]["kind"] == "price_up")
+
+ev = aw.diff_events(OLD, newrow(status="closed"), NOW)
+ck("판매완료", len(ev) == 1 and ev[0]["kind"] == "sold", ev)
+
+ev = aw.diff_events(OLD, newrow(status="reserved"), NOW)
+ck("예약중은 이벤트 아님", ev == [], ev)
+
+ev = aw.diff_events(OLD, {"id": "1", "gone": True}, NOW)
+ck("삭제", len(ev) == 1 and ev[0]["kind"] == "deleted", ev)
+ck("삭제 이벤트도 title 보존", ev[0]["title"] == "가방", ev[0])
+
+ev = aw.diff_events(OLD, newrow(republish_count=1), NOW)
+ck("끌올", len(ev) == 1 and ev[0]["kind"] == "republished")
+
+ev = aw.diff_events(OLD, newrow(price=700, status="closed"), NOW)
+kinds = sorted(e["kind"] for e in ev)
+ck("동시 변화 2건", kinds == ["price_down", "sold"], kinds)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:
