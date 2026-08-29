@@ -103,11 +103,30 @@ def _adb(adb_bin, serial, *args, timeout=30):
 
 
 def list_instances(adb_bin):
+    """연결된 기기 목록. LDPlayer 는 인스턴스마다 emulator-P 와 127.0.0.1:(P+1) 를
+    둘 다 노출할 수 있어(수동 connect 시) 같은 인스턴스가 중복 → 병렬 수확서 서로
+    간섭(force-stop 충돌). emulator-* 를 정본으로 두고 중복 127.0.0.1 은 제거."""
     try:
         out = _adb(adb_bin, None, "devices")
-        return [l.split("\t")[0] for l in out.splitlines()[1:] if "\tdevice" in l]
+        devs = [l.split("\t")[0] for l in out.splitlines()[1:] if "\tdevice" in l]
     except Exception:
         return []
+    emu_ports = set()
+    for d in devs:
+        if d.startswith("emulator-"):
+            try: emu_ports.add(int(d.split("-")[1]))
+            except Exception: pass
+    result = []
+    for d in devs:
+        if d.startswith("127.0.0.1:"):
+            try:
+                # 127.0.0.1:(P+1) 는 emulator-P 와 동일 인스턴스 → emulator 있으면 skip
+                if (int(d.split(":")[1]) - 1) in emu_ports:
+                    continue
+            except Exception:
+                pass
+        result.append(d)
+    return result
 
 
 # ── LDPlayer 자동 부팅 (클라가 LDPlayer 안 켜도 되게) ──
