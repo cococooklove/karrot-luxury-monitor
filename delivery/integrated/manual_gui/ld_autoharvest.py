@@ -170,8 +170,20 @@ def ld_launch(console, index):
         return False
 
 
-def ensure_ldplayer(adb_bin, boot_wait=120, log=None):
+def ld_quit(console, index):
+    try:
+        subprocess.run([console, "quit", "--index", str(index)], timeout=30,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return True
+    except Exception:
+        return False
+
+
+def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=1):
     """adb 에 기기가 없으면 LDPlayer 인스턴스를 부팅해 올라올 때까지 대기.
+
+    동시 기동은 VM start 전 hang 을 유발(무인 재부팅 복구 실패의 원인) → **순차 기동**.
+    인스턴스마다 launch → adb 기기 수 증가 확인(최대 boot_wait) → 실패시 quit 후 재시도.
     반환: 사용가능 serial 리스트."""
     log = log or (lambda m: None)
     cur = list_instances(adb_bin)
@@ -185,21 +197,29 @@ def ensure_ldplayer(adb_bin, boot_wait=120, log=None):
     if not insts:
         log("[LDPlayer] 인스턴스 없음 — .ldbk 복원 필요")
         return []
-    to_boot = [i for i in insts if not i[2]]
-    if to_boot:
-        log(f"[LDPlayer] {len(to_boot)}개 인스턴스 부팅…")
-        for idx, name, _ in to_boot:
+    log(f"[LDPlayer] {len(insts)}개 인스턴스 순차 부팅(간격 {gap}s)…")
+    for idx, name, running in insts:
+        before = len(list_instances(adb_bin))
+        for attempt in range(retry + 1):
+            if attempt:
+                log(f"[LDPlayer] {name}(idx {idx}) 부팅 실패 → 재기동 {attempt}/{retry}")
+                ld_quit(console, idx)
+                time.sleep(8)
             ld_launch(console, idx)
-    # adb 기기 올라올 때까지 폴링
-    waited = 0
-    while waited < boot_wait:
-        time.sleep(5); waited += 5
-        cur = list_instances(adb_bin)
-        if len(cur) >= len(insts):
-            log(f"[LDPlayer] {len(cur)}개 기동 완료 ({waited}s)")
-            return cur
+            waited = 0
+            while waited < boot_wait:
+                time.sleep(5); waited += 5
+                if len(list_instances(adb_bin)) > before:
+                    log(f"[LDPlayer] {name}(idx {idx}) 기동 완료 ({waited}s)")
+                    break
+            else:
+                continue
+            break
+        else:
+            log(f"[LDPlayer] {name}(idx {idx}) 기동 실패 — 건너뜀")
+        time.sleep(gap)
     cur = list_instances(adb_bin)
-    log(f"[LDPlayer] {len(cur)}/{len(insts)}개 기동 (대기 {boot_wait}s 초과)")
+    log(f"[LDPlayer] {len(cur)}/{len(insts)}개 기동")
     return cur
 
 
