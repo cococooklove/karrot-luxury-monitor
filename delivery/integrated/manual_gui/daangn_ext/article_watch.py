@@ -244,8 +244,10 @@ class AccountUnavailable(Exception):
 
 def parse_price_text(s) -> int:
     """매칭 응답의 '410,000원' 같은 문자열에서 숫자만 뽑는다. 없으면 0."""
-    if isinstance(s, int):
-        return s
+    if isinstance(s, bool):
+        return 0
+    if isinstance(s, (int, float)):
+        return int(s)
     if not isinstance(s, str):
         return 0
     digits = re.sub(r"[^0-9]", "", s)
@@ -298,7 +300,6 @@ class WatchTracker:
         return added
 
     def enforce_cap(self, now=None) -> int:
-        self._now(now)
         over = self.store.active_count() - ACTIVE_CAP
         if over <= 0:
             return 0
@@ -316,9 +317,8 @@ class WatchTracker:
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
             if code in (401, 429):
-                delay = RATE_LIMIT_DELAY if code == 429 \
-                    else interval_for(old.get("tier") or "fresh")
-                self.store.mark(article_id, next_check=now + delay)
+                if code == 429:
+                    self.store.mark(article_id, next_check=now + RATE_LIMIT_DELAY)
                 raise AccountUnavailable(str(code))
             return self._note_failure(old, article_id, now)
         except Exception:
@@ -337,7 +337,8 @@ class WatchTracker:
             "title": new.get("title") or old.get("title"),
             "region": new.get("region") or old.get("region"),
             "url": new.get("url") or old.get("url"),
-            "price": new.get("price"),
+            "price": new.get("price") if isinstance(new.get("price"), int)
+                     else old.get("price"),
             "status": new.get("status"),
             "republish_count": new.get("republish_count") or 0,
             "published_at": new.get("published_at") or old.get("published_at") or 0,
@@ -361,7 +362,12 @@ class WatchTracker:
 
     def sweep(self, api_for_account, budget: int, now=None) -> list[dict]:
         """예산만큼 점검한다. api_for_account 는 매 건마다 불리고
-        (api, label) 또는 예산 소진 시 None 을 돌려줘야 한다."""
+        (api, label) 또는 예산 소진 시 None 을 돌려줘야 한다.
+
+        sweep 은 사용한 api 를 매번 닫는다(_close) — 그래서 api_for_account 는
+        호출마다 새 클라이언트를 만들어 돌려줘야 한다. 계정당 클라이언트를
+        캐시해서 재사용하는 provider 를 쓰면 이미 닫힌 client 를 다시 넘기게
+        되어 깨진다."""
         now = self._now(now)
         out = []
         blocked = set()

@@ -333,12 +333,16 @@ ck("429 는 next_check 미룸",
    store3.get("23")["next_check"] == NOW + 500 + aw.RATE_LIMIT_DELAY,
    store3.get("23")["next_check"])
 
+nc_before_401 = store3.get("23")["next_check"]
 try:
     tr3.check_one("23", FakeAPI(exc=http_error(401)), NOW + 600)
     ck("401 → AccountUnavailable", False)
 except aw.AccountUnavailable:
     ck("401 → AccountUnavailable", True)
 ck("401 는 fail 안 올림", store3.get("23")["fail"] == 0)
+ck("401 는 next_check 안 건드림",
+   store3.get("23")["next_check"] == nc_before_401,
+   store3.get("23")["next_check"])
 
 try:
     tr3.check_one("23", FakeAPI(exc=http_error(500)), NOW + 700)
@@ -389,7 +393,7 @@ def provider():
 
 evs = tr5.sweep(provider, budget=3, now=NOW)
 ck("막힌 계정은 이후 건너뜀", bad_api.calls == 1, bad_api.calls)
-ck("다른 계정으로 이어감", good_api.calls >= 1, good_api.calls)
+ck("다른 계정으로 이어감", good_api.calls == 2, good_api.calls)
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
