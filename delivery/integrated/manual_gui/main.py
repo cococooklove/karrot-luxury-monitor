@@ -260,11 +260,20 @@ class _WatchSweepThread(QtCore.QThread):
     def run(self):
         events = []
         try:
-            self._tracker.enforce_cap()
+            # 첫 스윕 전(최대 10분) 패널이 '추적 중 0건'으로 보이지 않게 먼저 현황만
+            self.done.emit([], self._store.active_count(), self._store.next_due_at())
+        except Exception:
+            pass
+        try:
+            dropped = self._tracker.enforce_cap()
+            if dropped:
+                self.log.emit(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
             n = watch_sweep_budget(self._store.active_count(), self._interval)
             if n:
                 self._budget.reload()
                 events = self._tracker.sweep(self._provider, n)
+                if getattr(self._tracker, "last_sweep_exhausted", False):
+                    self.log.emit("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
         except Exception as e:
             self.log.emit(f"[가격추적] 스윕 실패: {str(e)[:120]}")
         try:
@@ -3423,13 +3432,17 @@ def _run_headless():
                 headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
             last_watch_sweep = now
             try:
-                watch_tracker.enforce_cap()
+                dropped = watch_tracker.enforce_cap()
+                if dropped:
+                    log(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
                 budget = watch_sweep_budget(watch_store.active_count(),
                                             WATCH_SWEEP_INTERVAL)
                 if budget:
                     watch_budget.reload()
                     lines = watch_event_lines(
                         watch_tracker.sweep(watch_budget.next, budget))
+                    if getattr(watch_tracker, "last_sweep_exhausted", False):
+                        log("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
                     if lines:
                         log("[가격추적] " + " / ".join(lines))
                         _notify_lines(lines, _notify_cfg())

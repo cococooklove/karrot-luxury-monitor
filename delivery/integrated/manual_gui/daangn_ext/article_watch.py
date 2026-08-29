@@ -24,6 +24,16 @@ STATUS_ONGOING = "ongoing"
 STATUS_RESERVED = "reserved"
 STATUS_CLOSED = "closed"
 
+TIER_FRESH = "fresh"
+TIER_AGED = "aged"
+# dead 는 되돌아올 수 없는 종착 — 판매완료·삭제 전용(중복 알림 방지).
+# 상한 초과·연속 실패로 추적을 접는 것은 매물의 최후가 아니므로 evicted 로 둔다.
+# evicted 는 다시 매칭되면(= 아직 살아 있다는 뜻) add_from_matches 가 재등록한다.
+TIER_DEAD = "dead"
+TIER_EVICTED = "evicted"
+ACTIVE_TIERS = (TIER_FRESH, TIER_AGED)
+_ACTIVE_SQL = "tier IN ('fresh','aged')"
+
 FRESH_AGE = 48 * 3600
 AGED_AGE = 14 * 24 * 3600
 FRESH_INTERVAL = 4 * 3600
@@ -33,6 +43,8 @@ DAILY_CAP_PER_ACCOUNT = 300
 MAX_FAIL = 5
 RATE_LIMIT_DELAY = 1800
 MIN_TOKEN_REMAINING = 120
+SWEEP_ITEM_DELAY = 0.3          # 건 사이 간격 — 연속 TLS 핸드셰이크로 튀지 않게
+WATCH_BUDGET_FP = "./data/watch_budget.json"
 
 
 def parse_iso(s) -> int:
@@ -156,23 +168,23 @@ class WatchStore:
 
     def due(self, now: int, limit: int) -> list[str]:
         rows = self._db.execute(
-            "SELECT id FROM watch WHERE tier!='dead' AND next_check<=? "
+            f"SELECT id FROM watch WHERE {_ACTIVE_SQL} AND next_check<=? "
             "ORDER BY next_check ASC LIMIT ?", (int(now), int(limit))).fetchall()
         return [r["id"] for r in rows]
 
     def active_count(self) -> int:
         return self._db.execute(
-            "SELECT COUNT(*) c FROM watch WHERE tier!='dead'").fetchone()["c"]
+            f"SELECT COUNT(*) c FROM watch WHERE {_ACTIVE_SQL}").fetchone()["c"]
 
     def oldest_active(self, n: int) -> list[str]:
         rows = self._db.execute(
-            "SELECT id FROM watch WHERE tier!='dead' ORDER BY published_at ASC LIMIT ?",
+            f"SELECT id FROM watch WHERE {_ACTIVE_SQL} ORDER BY published_at ASC LIMIT ?",
             (int(n),)).fetchall()
         return [r["id"] for r in rows]
 
     def next_due_at(self) -> int:
         r = self._db.execute(
-            "SELECT MIN(next_check) v FROM watch WHERE tier!='dead'").fetchone()
+            f"SELECT MIN(next_check) v FROM watch WHERE {_ACTIVE_SQL}").fetchone()
         return int(r["v"] or 0)
 
     def mark(self, article_id: str, **fields) -> None:
@@ -194,17 +206,17 @@ class WatchStore:
 def tier_for(published_at: int, now: int) -> str:
     """게시 시각으로 점검 등급을 정한다. 시각을 모르면 fresh 로 본다."""
     if not published_at:
-        return "fresh"
+        return TIER_FRESH
     age = int(now) - int(published_at)
     if age < FRESH_AGE:
-        return "fresh"
+        return TIER_FRESH
     if age < AGED_AGE:
-        return "aged"
-    return "dead"
+        return TIER_AGED
+    return TIER_DEAD
 
 
 def interval_for(tier: str) -> int:
-    return {"fresh": FRESH_INTERVAL, "aged": AGED_INTERVAL}.get(tier, 0)
+    return {TIER_FRESH: FRESH_INTERVAL, TIER_AGED: AGED_INTERVAL}.get(tier, 0)
 
 
 def _ev(kind, old_row, new_row, old, new, now):
@@ -242,16 +254,36 @@ class AccountUnavailable(Exception):
     """이 계정으로는 이번 스윕을 더 진행할 수 없다(401/429)."""
 
 
+_UNIT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(억|만)?")
+
+
 def parse_price_text(s) -> int:
-    """매칭 응답의 '410,000원' 같은 문자열에서 숫자만 뽑는다. 없으면 0."""
+    """매칭 응답의 가격 문자열 → 원 단위 정수. 판단 불가면 0.
+
+    알림 문자열은 큰 금액을 줄여 쓴다('285만원'). 숫자만 뽑으면 285 가 되어
+    실제 2,850,000 과 백만 배 어긋나므로 만·억 단위를 반드시 풀어야 한다."""
     if isinstance(s, bool):
         return 0
     if isinstance(s, (int, float)):
         return int(s)
     if not isinstance(s, str):
         return 0
-    digits = re.sub(r"[^0-9]", "", s)
-    return int(digits) if digits else 0
+    txt = s.replace(",", "")
+    if not re.search(r"\d", txt):
+        return 0                       # '나눔' 등
+    if "억" not in txt and "만" not in txt:
+        digits = re.sub(r"[^0-9]", "", txt)
+        return int(digits) if digits else 0
+    total = 0
+    matched = False
+    for num, unit in _UNIT_RE.findall(txt):
+        try:
+            v = float(num)
+        except ValueError:
+            continue
+        matched = True
+        total += v * {"억": 100000000, "만": 10000}.get(unit, 1)
+    return int(total) if matched else 0
 
 
 class WatchTracker:
@@ -260,6 +292,7 @@ class WatchTracker:
     def __init__(self, store: WatchStore, now_fn=time.time):
         self.store = store
         self._now_fn = now_fn
+        self.last_sweep_exhausted = False
 
     def _now(self, now=None) -> int:
         return int(now if now is not None else self._now_fn())
@@ -272,14 +305,17 @@ class WatchTracker:
             if not aid:
                 continue
             aid = str(aid)
-            if self.store.get(aid) is not None:
+            prev = self.store.get(aid)
+            # evicted 는 상한/실패로 접었을 뿐이다 — 다시 매칭됐다는 건 살아 있다는
+            # 뜻이니 재등록한다. dead(판매완료·삭제)와 추적 중인 행은 건너뛴다.
+            if prev is not None and (prev.get("tier") or "") != TIER_EVICTED:
                 continue
             try:
                 published = int(m.get("time") or 0)
             except (TypeError, ValueError):
                 published = 0
             tier = tier_for(published, now)
-            if tier == "dead":
+            if tier == TIER_DEAD:
                 continue
             self.store.upsert({
                 "id": aid,
@@ -304,7 +340,7 @@ class WatchTracker:
         if over <= 0:
             return 0
         for aid in self.store.oldest_active(over):
-            self.store.mark(aid, tier="dead")
+            self.store.mark(aid, tier=TIER_EVICTED)
         return over
 
     def check_one(self, article_id, api, now=None) -> list[dict]:
@@ -312,6 +348,10 @@ class WatchTracker:
         old = self.store.get(str(article_id))
         if old is None:
             return []
+        # 아직 한 번도 재조회하지 않은 행 = 씨앗값만 들어 있다. 씨앗의 가격은
+        # 알림 표시 문자열에서, republish_count 는 0 고정으로 만든 값이라 API 실측과
+        # 비교하면 없는 변동이 잡힌다. 첫 조회는 기준선 확보로만 쓰고 알리지 않는다.
+        seeding = old.get("last_check") == old.get("first_seen")
         try:
             new = api.fetch(str(article_id))
         except httpx.HTTPStatusError as e:
@@ -324,14 +364,21 @@ class WatchTracker:
         except Exception:
             return self._note_failure(old, article_id, now)
 
-        events = diff_events(old, new, now)
+        # 값을 못 받은 가격(0·음수·비정수)은 '내려간 것'이 아니라 '모르는 것'이다.
+        # 저장값을 그대로 두고 이번 회차의 가격 이벤트는 만들지 않는다.
+        np_ = new.get("price")
+        if not new.get("gone") and (isinstance(np_, bool)
+                                    or not isinstance(np_, int) or np_ <= 0):
+            new["price"] = old.get("price")
+
+        events = [] if seeding else diff_events(old, new, now)
         if new.get("gone"):
-            self.store.mark(article_id, tier="dead", fail=0, last_check=now)
+            self.store.mark(article_id, tier=TIER_DEAD, fail=0, last_check=now)
             return events
 
         tier = tier_for(new.get("published_at") or old.get("published_at") or 0, now)
         if new.get("status") == STATUS_CLOSED:
-            tier = "dead"
+            tier = TIER_DEAD
         self.store.upsert({
             "id": str(article_id),
             "title": new.get("title") or old.get("title"),
@@ -354,10 +401,10 @@ class WatchTracker:
         """조회 실패는 매물의 변화가 아니다 — 알리지 않고 세기만 한다."""
         fail = (old.get("fail") or 0) + 1
         if fail >= MAX_FAIL:
-            self.store.mark(article_id, fail=fail, tier="dead", last_check=now)
+            self.store.mark(article_id, fail=fail, tier=TIER_EVICTED, last_check=now)
         else:
             self.store.mark(article_id, fail=fail, last_check=now,
-                            next_check=now + interval_for(old.get("tier") or "fresh"))
+                            next_check=now + interval_for(old.get("tier") or TIER_FRESH))
         return []
 
     def sweep(self, api_for_account, budget: int, now=None) -> list[dict]:
@@ -367,15 +414,24 @@ class WatchTracker:
         sweep 은 사용한 api 를 매번 닫는다(_close) — 그래서 api_for_account 는
         호출마다 새 클라이언트를 만들어 돌려줘야 한다. 계정당 클라이언트를
         캐시해서 재사용하는 provider 를 쓰면 이미 닫힌 client 를 다시 넘기게
-        되어 깨진다."""
+        되어 깨진다.
+
+        self.last_sweep_exhausted: 이번 스윕이 계정 예산이 떨어져 대기열을 남긴 채
+        끝났으면 True. 조용히 커버리지가 줄어드는 것을 호출자가 알아채라고 둔다."""
         now = self._now(now)
         out = []
         blocked = set()
+        self.last_sweep_exhausted = False
+        first = True
         for aid in self.store.due(now, int(budget)):
+            if not first:
+                time.sleep(SWEEP_ITEM_DELAY)
+            first = False
             api = label = None
             for _ in range(4):
                 got = api_for_account()
                 if not got:
+                    self.last_sweep_exhausted = True
                     return out
                 if got[1] in blocked:
                     _close(got[0])
@@ -383,6 +439,7 @@ class WatchTracker:
                 api, label = got
                 break
             if api is None:
+                self.last_sweep_exhausted = True
                 return out
             try:
                 out.extend(self.check_one(aid, api, now))
@@ -407,22 +464,56 @@ def _today() -> str:
 
 
 class AccountBudget:
-    """유효 토큰 계정을 라운드로빈으로 내주고 하루 요청 수를 계정별로 제한한다."""
+    """유효 토큰 계정을 라운드로빈으로 내주고 하루 요청 수를 계정별로 제한한다.
+
+    사용량은 파일에 남긴다 — 재시작(크래시·배포·--once)마다 '하루' 상한이
+    0 으로 돌아가면 상한이 아니게 된다.
+
+    주의: 이 예산은 AccountScheduler 의 예산과 별개다. 두 컴포넌트가 같은 계정을
+    쓰면 계정 전체 요청 수는 어느 한쪽 상한을 넘을 수 있다 — 합산 예산은 후속
+    과제이고 여기서 고칠 범위가 아니다."""
 
     def __init__(self, accounts_fp: str = "./accounts.json",
                  daily_cap: int = DAILY_CAP_PER_ACCOUNT,
                  config_path: str = "./data/config.json",
-                 api_factory=None, day_fn=None):
+                 api_factory=None, day_fn=None,
+                 budget_fp: str = WATCH_BUDGET_FP):
         self.accounts_fp = accounts_fp
+        self.budget_fp = budget_fp
         self.daily_cap = int(daily_cap)
         self.config_path = config_path
         self._factory = api_factory or _default_api_factory
         self._day_fn = day_fn or _today
-        self._used = {}
         self._day = self._day_fn()
+        self._used = self._load_usage()
         self._last_label = None
         self._accounts = []
         self.reload()
+
+    def _load_usage(self) -> dict:
+        """없거나·깨졌거나·어제 것이면 '오늘 0부터'. 절대 예외를 올리지 않는다."""
+        try:
+            with open(self.budget_fp, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or data.get("day") != self._day:
+                return {}
+            used = data.get("used")
+            if not isinstance(used, dict):
+                return {}
+            return {str(k): int(v) for k, v in used.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        except Exception:
+            return {}
+
+    def _save_usage(self) -> None:
+        try:
+            d = os.path.dirname(self.budget_fp)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(self.budget_fp, "w", encoding="utf-8") as f:
+                json.dump({"day": self._day, "used": self._used}, f)
+        except Exception:
+            pass
 
     def reload(self) -> None:
         try:
@@ -436,6 +527,7 @@ class AccountBudget:
         if today != self._day:
             self._day = today
             self._used = {}
+            self._save_usage()
 
     def _valid(self) -> list[dict]:
         return [a for a in self._accounts
@@ -460,6 +552,7 @@ class AccountBudget:
             if self._used.get(label, 0) < self.daily_cap:
                 self._used[label] = self._used.get(label, 0) + 1
                 self._last_label = label
+                self._save_usage()
                 return self._factory(cands[idx].get("access"),
                                      config_path=self.config_path,
                                      proxy=cands[idx].get("proxy")), label
