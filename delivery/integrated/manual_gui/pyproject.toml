@@ -1,15 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "daangn"
 version = "0.1.0"
-description = "Add your description here"
+description = "Karrot luxury monitor"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "bs4>=0.0.2",
     "curl-cffi>=0.13.0",
+    "httpx[http2]>=0.27.0",
     "openpyxl>=3.1.5",
     "pillow>=12.0.0",
     "pyinstaller>=6.16.0",
     "pyqt6>=6.10.0",
     "gspread>=6.0.0",
 ]
+
+# 명시적 패키지 선언 — flat-layout 자동탐지(assets/daangn/daangn_ext 다중) 오류 방지
+[tool.setuptools]
+packages = ["daangn", "daangn_ext"]
+py-modules = ["main", "ld_autoharvest"]
