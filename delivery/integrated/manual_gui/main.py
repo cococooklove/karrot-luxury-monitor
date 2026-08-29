@@ -3131,6 +3131,12 @@ def _run_headless():
 
 if __name__ == "__main__":
     import sys as _sys
+    # Windows 콘솔(cp1252/cp949)서 한글 로그 UnicodeEncodeError 방지
+    for _st in (_sys.stdout, _sys.stderr):
+        try:
+            _st.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     if "--headless" in _sys.argv:
         _run_headless()
     elif "--watchdog" in _sys.argv:
