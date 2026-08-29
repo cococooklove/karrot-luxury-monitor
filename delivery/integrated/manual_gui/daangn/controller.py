@@ -51,6 +51,13 @@ class MainController(QObject):
             self.model.clear_all()
 
     def load_proxy_settings(self) -> str | None:
+        import os
+        if not os.path.exists(self.settings_path):
+            # 파일 없음 = 프록시 미사용(정상). 모달 띄우지 않고 기본값.
+            self.req_min_ms = 1000
+            self.max_workers = 16
+            self.proxies = []
+            return None
         try:
             with open(self.settings_path, "r") as f:
                 data = f.read().strip()
