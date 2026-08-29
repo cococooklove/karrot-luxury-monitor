@@ -23,9 +23,11 @@ if (-not $py) {
 
 # 2) Repo ZIP (no git)
 Log "2/4 Downloading repo (ZIP)"
+Set-Location $env:SystemRoot   # cwd out of C:\karrot so it can be replaced on re-run
 $zip = "$env:TEMP\karrot.zip"
 Invoke-WebRequest "https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip" -OutFile $zip
-if (Test-Path C:\karrot) { Remove-Item C:\karrot -Recurse -Force }
+if (Test-Path C:\karrot) { Remove-Item C:\karrot -Recurse -Force -ErrorAction SilentlyContinue }
+if (Test-Path C:\karrot) { Fail "C:\karrot in use (close other shells/programs using it) and retry" }
 if (Test-Path C:\karrot_tmp) { Remove-Item C:\karrot_tmp -Recurse -Force }
 Expand-Archive $zip -DestinationPath C:\karrot_tmp -Force
 Move-Item C:\karrot_tmp\karrot-luxury-monitor-master C:\karrot
