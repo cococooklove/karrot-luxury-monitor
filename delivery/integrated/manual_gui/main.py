@@ -66,6 +66,21 @@ def watch_sweep_budget(active, interval_sec):
     return max(1, int(per_cycle + 0.999))
 
 
+def watch_status_text(active, next_check_at, now):
+    """추적 현황 한 줄."""
+    active = int(active or 0)
+    if not active:
+        return "추적 중 0건"
+    left = int(next_check_at or 0) - int(now)
+    if left <= 0:
+        return f"추적 중 {active}건 · 다음 점검 대기"
+    if left >= 3600:
+        when = f"{left // 3600}시간 {(left % 3600) // 60}분 후"
+    else:
+        when = f"{max(1, left // 60)}분 후"
+    return f"추적 중 {active}건 · 다음 점검 {when}"
+
+
 class _HarvestThread(QtCore.QThread):
     """백그라운드 자동 수확 — 앱 실행 중 주기적으로 LDPlayer/폰서 토큰 갱신.
     accounts.json 을 항상 신선하게 유지 → 수동 수확 불필요. access 30분 만료 전 갱신."""
@@ -625,6 +640,16 @@ class MainWindow(QMainWindow):
         v.addWidget(self.matchTable, 1)
         self._thumb_threads = []
 
+        # ── 가격 추적 현황 ──
+        watch_box = QtWidgets.QGroupBox("가격 추적")
+        watch_v = QtWidgets.QVBoxLayout(watch_box)
+        self._watch_label = QtWidgets.QLabel("추적 중 0건")
+        self._watch_list = QtWidgets.QListWidget()
+        self._watch_list.setMaximumHeight(140)
+        watch_v.addWidget(self._watch_label)
+        watch_v.addWidget(self._watch_list)
+        v.addWidget(watch_box)
+
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
         v.addWidget(self.alertLog)
 
@@ -852,6 +877,21 @@ class MainWindow(QMainWindow):
         self.dashHealth.setStyleSheet(
             "font-size:13px; font-weight:600; padding:8px 10px; border-radius:8px;"
             f"background:{bg}; color:#D6CDBB; border:1px solid #2E2720;")
+        self._refresh_watch_panel()
+
+    def _refresh_watch_panel(self):
+        """가격 추적 현황 한 줄 갱신 — 스윕 스레드가 남긴 캐시만 읽는다(sqlite 동시접근 방지)."""
+        try:
+            import time as _t
+            err = getattr(self, "_watch_init_error", "")
+            if err:
+                self._watch_label.setText(f"추적 꺼짐 — 초기화 실패: {err[:80]}")
+                return
+            self._watch_label.setText(watch_status_text(
+                getattr(self, "_watch_active", 0),
+                getattr(self, "_watch_next_due", 0), int(_t.time())))
+        except Exception:
+            pass
 
     def on_alert_fleet(self):
         """계정 팜 현황 다이얼로그 — 계정별 상태 색상코딩, 열려있는 동안 5초 자동갱신."""
@@ -1259,6 +1299,9 @@ class MainWindow(QMainWindow):
             return
         for line in lines:
             self.alertLog.append(f"[가격추적] {line}")
+            self._watch_list.insertItem(0, line)
+        while self._watch_list.count() > 20:
+            self._watch_list.takeItem(self._watch_list.count() - 1)
         nt = getattr(self, "_notify", {}) or {}
         if not ((nt.get("tg_token") and nt.get("tg_chat")) or nt.get("sheet_url")):
             return

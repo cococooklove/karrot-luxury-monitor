@@ -55,6 +55,17 @@ ck("활성 많을수록 예산 큼",
 ck("최소 1 보장", m.watch_sweep_budget(1, 600) >= 1)
 ck("스윕 주기 상수", m.WATCH_SWEEP_INTERVAL == 600)
 
+print("=== C. watch_status_text ===")
+s = m.watch_status_text(42, 1000 + 3600, 1000)
+ck("건수 포함", "42" in s, s)
+ck("시간 표기", "1시간" in s, s)
+ck("추적 0건", m.watch_status_text(0, 0, 1000) == "추적 중 0건",
+   m.watch_status_text(0, 0, 1000))
+ck("분 단위 표기", "5분" in m.watch_status_text(5, 1300, 1000),
+   m.watch_status_text(5, 1300, 1000))
+ck("다음 점검 지남", "대기" in m.watch_status_text(5, 900, 1000),
+   m.watch_status_text(5, 900, 1000))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:
