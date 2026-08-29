@@ -13,6 +13,7 @@ from daangn.workers import CancelableImageDownloader, ExportExcel
 from daangn.model import Product
 from daangn.task import CrawlTask
 from daangn.ui_mainwindow import Ui_MainWindow
+from daangn_ext import article_watch
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
@@ -21,6 +22,48 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다", "디올", "셀린느",
                  "보테가베네타", "생로랑", "발렌시아가", "펜디", "버버리", "몽클레르",
                  "고야드", "롤렉스", "까르띠에", "티파니", "불가리", "반클리프", "오메가"]
+
+WATCH_SWEEP_INTERVAL = 600          # 워치리스트 스윕 주기(초)
+
+_WATCH_LABELS = {
+    "price_down": "↓ 가격 인하",
+    "price_up": "↑ 가격 인상",
+    "sold": "판매완료",
+    "deleted": "삭제됨",
+    "republished": "끌올",
+}
+
+
+def watch_event_lines(events):
+    """워치리스트 이벤트 → 알림 한 줄씩. 모르는 종류는 건너뛴다."""
+    out = []
+    for e in events or []:
+        label = _WATCH_LABELS.get(e.get("kind"))
+        if not label:
+            continue
+        title = e.get("title") or e.get("id") or ""
+        url = e.get("url") or ""
+        kind = e.get("kind")
+        if kind in ("price_down", "price_up"):
+            body = f"{int(e.get('old') or 0):,}원 → {int(e.get('new') or 0):,}원"
+        elif kind == "republished":
+            body = f"{e.get('old')}회 → {e.get('new')}회"
+        else:
+            body = ""
+        out.append(" ".join(x for x in (f"[{label}]", title, body, url) if x))
+    return out
+
+
+def watch_sweep_budget(active, interval_sec):
+    """이번 스윕에서 조회할 최대 건수.
+
+    활성 전체를 fresh 주기(4시간) 안에 한 바퀴 돈다고 보고 비례 배분한다.
+    활성이 있으면 최소 1건은 본다."""
+    active = int(active or 0)
+    if active <= 0:
+        return 0
+    per_cycle = active * int(interval_sec) / float(article_watch.FRESH_INTERVAL)
+    return max(1, int(per_cycle + 0.999))
 
 
 class _HarvestThread(QtCore.QThread):
@@ -121,6 +164,46 @@ class _NotifyThread(QtCore.QThread):
                     sw.enqueue_row([ts, m.get("keyword") or "", m.get("title") or "",
                                     m.get("price") or "", m.get("region") or "",
                                     m.get("_account") or "", m.get("url") or ""])
+                wrote, failed = sw.flush()
+                if wrote:
+                    emit(f"[구글시트] {wrote}행 기록")
+            except Exception as e:
+                emit(f"[구글시트] 실패: {str(e)[:50]}")
+
+
+class _WatchNotifyThread(QtCore.QThread):
+    """워치리스트 변동 알림 — 텔레그램 + 구글시트. GUI 안 멈춤."""
+    log = QtCore.pyqtSignal(str)
+
+    def __init__(self, notify, lines):
+        super().__init__()
+        self.notify = notify or {}
+        self.lines = list(lines)
+
+    def run(self):
+        import time as _t
+        emit = lambda m: self.log.emit(m)
+        if not self.lines:
+            return
+        tok, chat = self.notify.get("tg_token"), self.notify.get("tg_chat")
+        if tok and chat:
+            try:
+                from daangn.notify import TelegramSender
+                tg = TelegramSender(tok, chat, log=emit)
+                tg.enqueue("📉 가격변동\n" + "\n".join(self.lines))
+                tg.flush()
+                emit(f"[텔레그램] 변동 {len(self.lines)}건 전송")
+            except Exception as e:
+                emit(f"[텔레그램] 실패: {str(e)[:50]}")
+        if self.notify.get("sheet_url"):
+            try:
+                from daangn.notify import SheetWriter
+                sw = SheetWriter(self.notify.get("sheet_url"),
+                                 self.notify.get("sheet_cred") or "./credentials.json",
+                                 log=emit)
+                ts = _t.strftime("%Y-%m-%d %H:%M")
+                for ln in self.lines:
+                    sw.enqueue_row([ts, "가격변동", ln])
                 wrote, failed = sw.flush()
                 if wrote:
                     emit(f"[구글시트] {wrote}행 기록")
@@ -526,6 +609,14 @@ class MainWindow(QMainWindow):
         self._last_new = 0
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
+        # ── 워치리스트(가격변동 추적) ──
+        self._watch_store = article_watch.WatchStore("./data/watch.db")
+        self._watch_tracker = article_watch.WatchTracker(self._watch_store)
+        self._watch_budget = article_watch.AccountBudget("./accounts.json")
+        self._watch_threads = []
+        self._watch_timer = QtCore.QTimer(self)
+        self._watch_timer.timeout.connect(self._watch_sweep_tick)
+        self._watch_timer.start(WATCH_SWEEP_INTERVAL * 1000)
         # 실시간 헬스줄(토큰/수확/폴링) — 무인 신뢰 위해 5초마다 갱신
         self._alert_health_timer = QtCore.QTimer(self)
         self._alert_health_timer.timeout.connect(self._refresh_alert_health)
@@ -1037,6 +1128,7 @@ class MainWindow(QMainWindow):
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
             self._notify_matches(new_items)
+            self._watch_tracker.add_from_matches(new_items)
             self._save_match_seen()
         try:
             self._refresh_alert_health()
@@ -1078,6 +1170,34 @@ class MainWindow(QMainWindow):
         th.finished.connect(lambda t=th: self._notify_threads.remove(t)
                             if t in self._notify_threads else None)
         self._notify_threads.append(th)
+        th.start()
+
+    def _watch_sweep_tick(self):
+        """10분마다 워치리스트를 예산만큼 재조회하고 변동을 알린다."""
+        try:
+            self._watch_tracker.enforce_cap()
+            budget = watch_sweep_budget(self._watch_store.active_count(),
+                                        WATCH_SWEEP_INTERVAL)
+            if not budget:
+                return
+            self._watch_budget.reload()
+            events = self._watch_tracker.sweep(self._watch_budget.next, budget)
+            if events:
+                self._notify_watch_events(events)
+        except Exception as e:
+            self.alertLog.append(f"[가격추적] 스윕 실패: {str(e)[:120]}")
+
+    def _notify_watch_events(self, events):
+        lines = watch_event_lines(events)
+        if not lines:
+            return
+        for line in lines:
+            self.alertLog.append(f"[가격추적] {line}")
+        th = _WatchNotifyThread(getattr(self, "_notify", {}) or {}, lines)
+        th.log.connect(self.alertLog.append)
+        th.finished.connect(lambda t=th: self._watch_threads.remove(t)
+                            if t in self._watch_threads else None)
+        self._watch_threads.append(th)
         th.start()
 
     def _set_thumb(self, item, data):
