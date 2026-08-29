@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 작업 디렉터리는 `delivery/integrated/manual_gui/`. 이 계획의 모든 상대 경로는 여기 기준이다.
-- 테스트는 이 저장소 관례를 따른다: 최상위 `<이름>_test.py`, `pytest` 아님, `python <이름>_test.py` 로 실행, `ck(name, cond)` 헬퍼로 PASS/FAIL 을 찍고 마지막에 `sys.exit(0 if passed == len(R) else 1)`. 본보기는 `throttle_test.py`.
+- 테스트는 이 저장소 관례를 따른다: 최상위 `<이름>_test.py`, `pytest` 아님, `/Users/younglee/당근부동산_숨고/.venv/bin/python <이름>_test.py` 로 실행(맨 `python` 에는 httpx·PyQt6 가 없다), `ck(name, cond)` 헬퍼로 PASS/FAIL 을 찍고 마지막에 `sys.exit(0 if passed == len(R) else 1)`. 본보기는 `throttle_test.py`.
 - 단위 테스트는 네트워크를 타지 않는다. `ArticleDetailAPI` 는 `httpx.Client` 를 주입받아 `httpx.MockTransport` 로 바꿀 수 있어야 한다.
 - 각 Step 4 의 기대값은 "모든 항목 PASS, 실패 목록 비어 있음"이다. 총 건수는 앞선 Task 들이 남긴 항목이 누적되므로 숫자를 고정하지 않는다.
 - 호스트와 경로: `webapp.kr.karrotmarket.com`, `GET /api/v24/articles/{id}.json`. 헤더는 `daangn_ext.keyword_alert_api._headers(access_token, config_path)` 를 그대로 쓴다.
@@ -173,7 +173,7 @@ sys.exit(0 if passed == len(R) else 1)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: FAIL — `ImportError: cannot import name 'article_watch' from 'daangn_ext'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -290,7 +290,7 @@ class ArticleDetailAPI:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 - [ ] **Step 5: Commit**
@@ -379,7 +379,7 @@ st2.close()
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: FAIL — `AttributeError: module 'daangn_ext.article_watch' has no attribute 'WatchStore'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -475,7 +475,7 @@ class WatchStore:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 - [ ] **Step 5: Commit**
@@ -567,7 +567,7 @@ ck("동시 변화 2건", kinds == ["price_down", "sold"], kinds)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: FAIL — `AttributeError: module 'daangn_ext.article_watch' has no attribute 'tier_for'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -624,7 +624,7 @@ def diff_events(old: dict, new: dict, now: int) -> list[dict]:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 - [ ] **Step 5: Commit**
@@ -841,7 +841,7 @@ ck("다른 계정으로 이어감", good_api.calls >= 1, good_api.calls)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: FAIL — `AttributeError: module 'daangn_ext.article_watch' has no attribute 'parse_price_text'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1009,7 +1009,7 @@ def _close(obj) -> None:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 - [ ] **Step 5: Commit**
@@ -1094,7 +1094,7 @@ aw.token_remaining = orig_remaining
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: FAIL — `AttributeError: module 'daangn_ext.article_watch' has no attribute 'AccountBudget'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1169,7 +1169,7 @@ def _default_api_factory(token, config_path=None, proxy=None):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 - [ ] **Step 5: Commit**
@@ -1282,7 +1282,7 @@ sys.exit(0 if passed == len(R) else 1)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_wiring_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_wiring_test.py`
 Expected: FAIL — `AttributeError: module 'main' has no attribute 'watch_event_lines'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1435,7 +1435,7 @@ class _WatchNotifyThread(QtCore.QThread):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_wiring_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_wiring_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 `python article_watch_test.py` 도 다시 돌려 여전히 전부 PASS 인지 확인한다.
@@ -1486,7 +1486,7 @@ ck("다음 점검 지남", "대기" in m.watch_status_text(5, 900, 1000),
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_wiring_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_wiring_test.py`
 Expected: FAIL — `AttributeError: module 'main' has no attribute 'watch_status_text'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1553,7 +1553,7 @@ def watch_status_text(active, next_check_at, now):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_wiring_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_wiring_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 창이 실제로 만들어지는지도 본다.
@@ -1598,7 +1598,7 @@ ck("처음(0) → True", m.headless_watch_due(0, 10, 600) is True)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_wiring_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_wiring_test.py`
 Expected: FAIL — `AttributeError: module 'main' has no attribute 'headless_watch_due'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1611,27 +1611,58 @@ def headless_watch_due(last_sweep, now, interval):
     return int(now) - int(last_sweep or 0) >= int(interval)
 ```
 
-`_run_headless` 의 폴링 루프 시작 전에 초기화를 넣는다.
+`_run_headless` 안에는 이미 로컬 함수 `_notify(items, nt)` 가 있다. 그것은 매칭 dict 를 받으므로 문자열 줄에는 쓸 수 없다. 바로 아래에 줄 전송용을 새로 만든다.
+
+```python
+    def _notify_lines(lines, nt):
+        """워치리스트 변동 줄 전송 — 텔레그램 + 구글시트."""
+        if not lines:
+            return
+        tok, chat = nt.get("tg_token"), nt.get("tg_chat")
+        if tok and chat:
+            try:
+                from daangn.notify import TelegramSender
+                tg = TelegramSender(tok, chat, log=log)
+                tg.enqueue("📉 가격변동\n" + "\n".join(lines))
+                tg.flush()
+                log(f"[텔레그램] 변동 {len(lines)}건 전송")
+            except Exception as e:
+                log(f"[텔레그램] 실패: {str(e)[:60]}")
+        if nt.get("sheet_url"):
+            try:
+                from daangn.notify import SheetWriter
+                sw = SheetWriter(nt.get("sheet_url"),
+                                 nt.get("sheet_cred") or "./credentials.json", log=log)
+                ts = _time.strftime("%Y-%m-%d %H:%M")
+                for ln in lines:
+                    sw.enqueue_row([ts, "가격변동", ln])
+                wrote, _ = sw.flush()
+                if wrote:
+                    log(f"[구글시트] {wrote}행 기록")
+            except Exception as e:
+                log(f"[구글시트] 실패: {str(e)[:60]}")
+```
+
+`log("=== 헤드리스 무인 모니터 시작 ===")` 아래, `seen_order = _load_seen()` 근처에 초기화를 넣는다.
 
 ```python
     watch_store = article_watch.WatchStore("./data/watch.db")
     watch_tracker = article_watch.WatchTracker(watch_store)
     watch_budget = article_watch.AccountBudget("./accounts.json")
-    last_watch_sweep = 0
+    last_watch_sweep = 0.0
 ```
 
-폴링에서 신규 매칭을 추린 직후 투입한다. `_run_headless` 가 이미 쓰고 있는 신규 목록 변수를 그대로 넘긴다.
+신규 매칭 목록 변수는 `fresh` 다. `if fresh:` 블록 안, `_notify(fresh, _notify_cfg())` 아래에 한 줄 넣는다.
 
 ```python
-        watch_tracker.add_from_matches(new_items)
+            watch_tracker.add_from_matches(fresh)
 ```
 
-루프 끝, 다음 폴링까지 쉬기 전에 스윕을 넣는다. 텔레그램 전송은 `_run_headless` 가 이미 쓰고 있는 전송 경로를 그대로 쓴다 — 새 전송 코드를 만들지 않는다.
+스윕은 `if once:` 판정 **앞에** 넣는다 — `--once` 로도 한 번은 돌아야 스모크가 된다. 시간 모듈 별칭은 `_time` 이다.
 
 ```python
-        now_ts = int(time.time())
-        if headless_watch_due(last_watch_sweep, now_ts, WATCH_SWEEP_INTERVAL):
-            last_watch_sweep = now_ts
+        if headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
+            last_watch_sweep = now
             try:
                 watch_tracker.enforce_cap()
                 budget = watch_sweep_budget(watch_store.active_count(),
@@ -1641,16 +1672,15 @@ def headless_watch_due(last_sweep, now, interval):
                     lines = watch_event_lines(
                         watch_tracker.sweep(watch_budget.next, budget))
                     if lines:
-                        print("[가격추적]\n" + "\n".join(lines))
-                        # 여기서 부르는 전송 함수는 _run_headless 안에 이미 있는
-                        # 텔레그램 전송 호출과 같은 것을 쓴다
+                        log("[가격추적] " + " / ".join(lines))
+                        _notify_lines(lines, _notify_cfg())
             except Exception as e:
-                print("[가격추적] 스윕 실패:", str(e)[:120])
+                log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd delivery/integrated/manual_gui && python article_watch_wiring_test.py`
+Run: `cd delivery/integrated/manual_gui && /Users/younglee/당근부동산_숨고/.venv/bin/python article_watch_wiring_test.py`
 Expected: PASS — 실패 목록이 비어 있고 종료 코드 0
 
 - [ ] **Step 5: Commit**
