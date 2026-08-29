@@ -395,6 +395,52 @@ evs = tr5.sweep(provider, budget=3, now=NOW)
 ck("막힌 계정은 이후 건너뜀", bad_api.calls == 1, bad_api.calls)
 ck("다른 계정으로 이어감", good_api.calls == 2, good_api.calls)
 
+print("=== K. AccountBudget ===")
+import json as _json
+
+acc_fp = os.path.join(tempfile.mkdtemp(), "accounts.json")
+_json.dump([{"label": l, "access": "tok-" + l, "proxy": None} for l in ("a", "b")],
+           open(acc_fp, "w", encoding="utf-8"))
+
+DAY = {"v": "2026-08-29"}
+
+
+def fake_factory(token, config_path=None, proxy=None):
+    return FakeAPI({"gone": False, "title": "t", "url": "u", "price": 1,
+                    "status": "ongoing", "republish_count": 0,
+                    "published_at": NOW, "region": "r"})
+
+
+orig_remaining = aw.token_remaining
+aw.token_remaining = lambda t: 9999          # 전부 유효한 토큰으로 취급
+
+bud = aw.AccountBudget(acc_fp, daily_cap=2, api_factory=fake_factory,
+                       day_fn=lambda: DAY["v"])
+ck("총 예산 = 계정수 x 상한", bud.remaining() == 4, bud.remaining())
+got = [bud.next() for _ in range(4)]
+ck("4건 모두 발급", all(g is not None for g in got))
+ck("라운드로빈", [g[1] for g in got] == ["a", "b", "a", "b"], [g[1] for g in got])
+ck("소진 후 None", bud.next() is None)
+ck("remaining 0", bud.remaining() == 0)
+
+DAY["v"] = "2026-08-30"
+ck("날짜 바뀌면 리셋", bud.remaining() == 4)
+ck("리셋 후 발급", bud.next() is not None)
+
+aw.token_remaining = lambda t: 10            # 만료 임박 = 무효
+bud2 = aw.AccountBudget(acc_fp, daily_cap=2, api_factory=fake_factory,
+                        day_fn=lambda: DAY["v"])
+ck("유효 토큰 없으면 None", bud2.next() is None)
+ck("유효 토큰 없으면 remaining 0", bud2.remaining() == 0)
+
+aw.token_remaining = lambda t: 9999
+bud3 = aw.AccountBudget(os.path.join(tempfile.mkdtemp(), "없음.json"),
+                        daily_cap=2, api_factory=fake_factory,
+                        day_fn=lambda: DAY["v"])
+ck("파일 없으면 None", bud3.next() is None)
+
+aw.token_remaining = orig_remaining
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

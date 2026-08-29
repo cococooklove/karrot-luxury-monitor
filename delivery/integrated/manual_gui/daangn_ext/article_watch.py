@@ -400,3 +400,68 @@ def _close(obj) -> None:
             fn()
         except Exception:
             pass
+
+
+def _today() -> str:
+    return _dt.date.today().isoformat()
+
+
+class AccountBudget:
+    """유효 토큰 계정을 라운드로빈으로 내주고 하루 요청 수를 계정별로 제한한다."""
+
+    def __init__(self, accounts_fp: str = "./accounts.json",
+                 daily_cap: int = DAILY_CAP_PER_ACCOUNT,
+                 config_path: str = "./data/config.json",
+                 api_factory=None, day_fn=None):
+        self.accounts_fp = accounts_fp
+        self.daily_cap = int(daily_cap)
+        self.config_path = config_path
+        self._factory = api_factory or _default_api_factory
+        self._day_fn = day_fn or _today
+        self._used = {}
+        self._day = self._day_fn()
+        self._cursor = 0
+        self._accounts = []
+        self.reload()
+
+    def reload(self) -> None:
+        try:
+            with open(self.accounts_fp, encoding="utf-8") as f:
+                self._accounts = json.load(f) or []
+        except Exception:
+            self._accounts = []
+
+    def _roll_day(self) -> None:
+        today = self._day_fn()
+        if today != self._day:
+            self._day = today
+            self._used = {}
+
+    def _valid(self) -> list[dict]:
+        return [a for a in self._accounts
+                if token_remaining(a.get("access") or "") > MIN_TOKEN_REMAINING]
+
+    def remaining(self) -> int:
+        self._roll_day()
+        return sum(max(0, self.daily_cap - self._used.get(a.get("label") or "", 0))
+                   for a in self._valid())
+
+    def next(self):
+        self._roll_day()
+        cands = self._valid()
+        if not cands:
+            return None
+        for _ in range(len(cands)):
+            a = cands[self._cursor % len(cands)]
+            self._cursor += 1
+            label = a.get("label") or ""
+            if self._used.get(label, 0) < self.daily_cap:
+                self._used[label] = self._used.get(label, 0) + 1
+                return self._factory(a.get("access"), config_path=self.config_path,
+                                     proxy=a.get("proxy")), label
+        return None
+
+
+def _default_api_factory(token, config_path=None, proxy=None):
+    return ArticleDetailAPI(token, config_path=config_path or "./data/config.json",
+                            proxy=proxy)
