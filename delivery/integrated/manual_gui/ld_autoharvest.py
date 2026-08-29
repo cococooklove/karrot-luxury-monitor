@@ -261,12 +261,20 @@ def harvest_one(adb_bin, serial, nudge=True, min_remaining=600):
     if cur and _access_remaining(cur.get("access", "")) > min_remaining:
         return cur                       # 아직 신선 → nudge 불필요
     if nudge:
+        # 이미 포그라운드인 앱에 launch 는 no-op → 콜드스타트(force-stop→launch)로
+        # 앱이 refresh 하게 강제. 실측 10초 내 갱신, 최대 24초 대기.
         try:
+            _adb(adb_bin, serial, "shell", "am", "force-stop", PKG, timeout=20)
+            time.sleep(1)
             _adb(adb_bin, serial, "shell", "monkey", "-p", PKG,
                  "-c", "android.intent.category.LAUNCHER", "1", timeout=20)
-            time.sleep(6)
         except Exception:
             pass
+        for _ in range(8):
+            time.sleep(3)
+            fresh = _read_parse(adb_bin, serial)
+            if fresh and _access_remaining(fresh.get("access", "")) > min_remaining:
+                return fresh
         fresh = _read_parse(adb_bin, serial)
         if fresh:
             return fresh
@@ -275,7 +283,11 @@ def harvest_one(adb_bin, serial, nudge=True, min_remaining=600):
 
 def merge_accounts(accounts_fp, rows):
     base = json.load(open(accounts_fp, encoding="utf-8")) if os.path.exists(accounts_fp) else []
-    by = {a.get("code"): a for a in base}
+    # code 중복 제거(후행 항목 우선 — 최근 수확분)
+    by = {}
+    for a in base:
+        by[a.get("code")] = a
+    base = list(by.values())
     upd = ins = 0
     for r in rows:
         c = r["code"]
