@@ -73,7 +73,25 @@ def main():
     if b"uid=0" not in r.stdout:
         sys.exit(f"[이식] su 루트 불가: {r.stdout.decode()[:80]} {r.stderr.decode()[:80]}")
 
-    uid = sh(adb, a.serial, "shell", "su", "-c", f"stat -c %u /data/data/{PKG}").stdout.decode().strip()
+    # 데이터폴더 생성 위해 앱 최초 1회 실행(설치만 했으면 /data/data/PKG 없음)
+    if b"/data/data/" not in sh(adb, a.serial, "shell", "su", "-c",
+                                f"ls -d /data/data/{PKG} 2>/dev/null").stdout:
+        print("[이식] 데이터폴더 없음 → 앱 최초 실행으로 생성")
+        sh(adb, a.serial, "shell", "monkey", "-p", PKG, "-c",
+           "android.intent.category.LAUNCHER", "1")
+        time.sleep(10)
+
+    # app uid (stat 실패 시 dumpsys 폴백)
+    uid = sh(adb, a.serial, "shell", "su", "-c",
+             f"stat -c %u /data/data/{PKG}").stdout.decode().strip()
+    if not uid.isdigit():
+        out = sh(adb, a.serial, "shell", "su", "-c",
+                 f"dumpsys package {PKG} | grep -o 'userId=[0-9]*'").stdout.decode()
+        import re as _re
+        m = _re.search(r"userId=(\d+)", out)
+        uid = m.group(1) if m else ""
+    if not uid.isdigit():
+        sys.exit(f"[이식] app uid 감지 실패 (당근 설치/실행 확인 필요)")
     print(f"[이식] app uid={uid}")
 
     sh(adb, a.serial, "shell", "su", "-c", f"am force-stop {PKG}")
