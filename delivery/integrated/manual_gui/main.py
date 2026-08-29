@@ -3419,7 +3419,8 @@ def _run_headless():
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
         # 워치리스트 스윕 — 폴링과 같은 스레드에서 10분 간격으로만
-        if watch_tracker and headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
+        if watch_tracker and watch_budget and \
+                headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
             last_watch_sweep = now
             try:
                 watch_tracker.enforce_cap()
