@@ -4166,11 +4166,8 @@ class MainWindow(QMainWindow):
             return
 
         # 추가/제외 키워드 파싱
-        def split_kw(text):
-            import re
-            return [k for k in re.split(r"[,\s]+", text.strip()) if k]
-        extra = split_kw(self.extraEdit.text())
-        exclude = split_kw(self.excludeEdit.text())
+        extra = self._split_keywords(self.extraEdit.text())
+        exclude = self._split_keywords(self.excludeEdit.text())
         # 앱API 통일: 수동도 항상 app-API(search-bff) 경로. 웹크롤(robust_fetch) 폐지.
         # (체크박스와 무관하게 True — 자동/수동 동일 데이터소스)
         adaptive = True
@@ -4313,6 +4310,12 @@ class MainWindow(QMainWindow):
         closeBtn.clicked.connect(dlg.accept)
         dlg.exec()
 
+    @staticmethod
+    def _split_keywords(text: str) -> list[str]:
+        """추가/제외 키워드 입력을 쉼표·공백으로 쪼갠다. 수동 검색과 엑셀 크롤링이 공유한다."""
+        import re
+        return [k for k in re.split(r"[,\s]+", (text or "").strip()) if k]
+
     def crawl_from_excel(self):
         if self.controller.is_task_running():
             self.alert("작업이 진행 중입니다")
@@ -4341,6 +4344,15 @@ class MainWindow(QMainWindow):
             self.alert("엑셀에 유효한 검색 조건이 없습니다")
             return
 
+        # 화면에 입력한 추가/제외 키워드와 토큰 갱신 설정을 엑셀 조건에도 그대로 태운다.
+        # (예전엔 여기서 빠져 있어 같은 조건인데 수동 검색과 결과가 달랐고,
+        #  adaptive 가 False 라 구단위 분할이 없어 상한 290 건에서 잘렸다.)
+        extra = self._split_keywords(self.extraEdit.text())
+        exclude = self._split_keywords(self.excludeEdit.text())
+        access_token = None
+        if self.tokenRefreshCheck.isChecked():
+            access_token = self._refresh_tokens()
+
         self._enter_task()
         self.clearItemList()
 
@@ -4356,6 +4368,10 @@ class MainWindow(QMainWindow):
                             only_tradeable=tradeable,
                             minimum=task["minimum"],
                             maximum=task["maximum"],
+                            extra_keywords=extra,
+                            exclude_keywords=exclude,
+                            adaptive=True,
+                            access_token=access_token,
                         )
                     )
             self.controller.start_task(requests)
@@ -4383,7 +4399,10 @@ class MainWindow(QMainWindow):
         required = {"area", "keyword"}
         missing = required - header_map.keys()
         if missing:
-            return [], [f"엑셀에 다음 열이 필요합니다: {', '.join(sorted(missing))}"]
+            # 사용자가 엑셀에 실제로 적어야 하는 건 한글 머리글이다 → 내부 키 대신 한글로 안내.
+            ko = {v: k for k, v in self.EXCEL_HEADER_ALIASES.items()}
+            names = ", ".join(ko.get(m, m) for m in sorted(missing))
+            return [], [f"엑셀 첫 행에 다음 열이 필요합니다: {names}"]
 
         area_idx = header_map["area"]
         keyword_idx = header_map["keyword"]
