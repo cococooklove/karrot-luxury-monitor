@@ -1,107 +1,151 @@
-"""현 상태 전 기능 테스트 — 각 항목 PASS/FAIL 출력."""
-import os, sys, time, sqlite3, tempfile
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+"""daangn_ext 공통 로직 + 창 조립 테스트 (네트워크 불필요).
+
+    python full_test.py
+
+옛 버전은 실제 당근 API 를 때리는 구간(라이브 수집)과 없어진 API
+(TokenManager.ensure_safe)를 함께 들고 있어 오래 빨간 채로 있었다. 라이브
+구간은 자격증명 없는 환경에서 영원히 실패하므로 뺐고, 검색 스윕 엔진 구간은
+sweep_engine_test.py 가 엔진을 직접 검증하므로 거기로 넘겼다. 여기 남은 것은
+다른 스위트가 건드리지 않는 daangn_ext 순수 로직과 창 조립이다.
+"""
+import base64
+import json
+import os
+import sys
+import tempfile
+import time
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+app_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, app_dir)
+os.chdir(app_dir)
 
 R = []
-def check(name, cond, extra=""):
-    R.append((name, bool(cond), extra))
+
+
+def ck(name, cond, extra=""):
+    R.append((name, bool(cond)))
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}  {extra}")
 
-print("=== A. daangn_ext 로직 ===")
+
+print("=== A. 토큰 매니저 ===")
 from daangn_ext import token_manager as T
-from daangn_ext.search_filters import KeywordRule, apply_filter
-from daangn_ext.account_store import AccountStore
-from daangn_ext import auth, rest_scheduler
-import base64, json
+
+
 def mkjwt(code="z", ttl=1800, age=0, typ="access"):
-    now=int(time.time())-age
-    h=base64.urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b'=').decode()
-    p=base64.urlsafe_b64encode(json.dumps({"iat":now,"exp":now+ttl,"code":code,"type":typ}).encode()).rstrip(b'=').decode()
+    now = int(time.time()) - age
+    h = base64.urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b"=").decode()
+    p = base64.urlsafe_b64encode(json.dumps(
+        {"iat": now, "exp": now + ttl, "code": code, "type": typ}
+    ).encode()).rstrip(b"=").decode()
     return f"{h}.{p}.s"
-check("토큰 exp/code 디코드", T.token_code(mkjwt())=="z" and T._jwt_payload(mkjwt())["exp"]-T._jwt_payload(mkjwt())["iat"]==1800)
-refreshed={"n":0}
-def fr(a): refreshed["n"]+=1; return mkjwt(ttl=1800), mkjwt(ttl=21600,typ="refresh")
-tm=T.TokenManager(refresh_fn=fr); a=tm.add(refresh=mkjwt(typ="refresh"),access=mkjwt(ttl=1800,age=1795)); tm.ensure(a)
-check("검색전 토큰 자동갱신(만료임박)", refreshed["n"]==1 and a.expires_in()>1700)
-tmg=T.TokenManager()
-check("토큰 graceful(엔드포인트 공백)", tmg.ensure_safe(tmg.add(refresh=mkjwt(typ="refresh"),access=mkjwt(ttl=1800,age=1795))) is not None or True)
+
+
+ck("토큰 code 디코드", T.token_code(mkjwt()) == "z")
+ck("토큰 exp 디코드",
+   T._jwt_payload(mkjwt())["exp"] - T._jwt_payload(mkjwt())["iat"] == 1800)
+
+refreshed = {"n": 0}
+
+
+def fr(acc):
+    refreshed["n"] += 1
+    return mkjwt(ttl=1800), mkjwt(ttl=21600, typ="refresh")
+
+
+tm = T.TokenManager(refresh_fn=fr)
+a = tm.add(refresh=mkjwt(typ="refresh"), access=mkjwt(ttl=1800, age=1795))
+tm.ensure(a)
+ck("만료 임박이면 검색 전에 갱신", refreshed["n"] == 1 and a.expires_in() > 1700)
+tm.ensure(a)
+ck("아직 살아 있으면 갱신 안 함", refreshed["n"] == 1)
+
+# 갱신이 실패해도 배치 전체가 죽으면 안 된다 — refresh_all 이 계정별로 삼킨다.
+# (옛 ensure_safe 자리. 그 메서드는 없어졌고 이쪽이 실제 graceful 경로다.)
+ck("ensure_safe 는 없어진 API", not hasattr(T.TokenManager, "ensure_safe"))
+
+
+def boom(acc):
+    raise RuntimeError("refresh endpoint down")
+
+
+tm2 = T.TokenManager(refresh_fn=boom)
+tm2.add(refresh=mkjwt(code="a", typ="refresh"), access=mkjwt(ttl=1800, age=1795))
+tm2.add(refresh=mkjwt(code="b", typ="refresh"), access=mkjwt(ttl=1800))
+try:
+    st = tm2.refresh_all()
+except Exception as e:
+    st = {"raised": str(e)}
+ck("갱신 실패는 계정별로 격리(예외를 밖으로 안 던짐)",
+   len(st) == 2 and any("fail" in v for v in st.values())
+   and any(v.startswith("ok") for v in st.values()), str(st))
+
+print("\n=== B. 검색 필터 ===")
+from daangn_ext.search_filters import KeywordRule, apply_filter
+
+
 class P:
-    def __init__(s,n,d): s.name,s.description=n,d
-prods=[P("샤넬 클래식 정품 영수증","풀박스"),P("샤넬 레플 미러급","가품"),P("구찌 지갑","정품")]
-kept=apply_filter(prods, KeywordRule(required=["샤넬"],extra=["정품"],extra_mode="and",exclude=["레플","미러"]))
-check("키워드 포함필터(추가+제외)", len(kept)==1 and kept[0].name.startswith("샤넬 클래식"))
-st=AccountStore(tempfile.mktemp(suffix=".json")); st.add_pair(mkjwt(typ="refresh"),"http://u:p@1.2.3.4:8000","010")
-check("계정+프록시 저장", len(st)==1 and st.proxies()==["http://u:p@1.2.3.4:8000"])
-h1=auth.build_headers("https://api.kr.karrotmarket.com/x","TOK"); h2=auth.build_headers("https://www.daangn.com/x","TOK")
-check("토큰 주입(karrot O/daangn X)", h1.get("authorization")=="Bearer TOK" and "authorization" not in h2)
-check("휴식 랜덤 n~n", 0<=rest_scheduler.sleep_between(0,0.01)<=0.01)
+    def __init__(self, n, d):
+        self.name, self.description = n, d
 
-print("\n=== B. 라이브 수동 수집 (실제 당근) ===")
-from daangn import api
-try:
-    dong=api.get_products("역삼동-6035","역삼동","구찌",True,None,None)
-    check("동단위 수집(get_products)", len(dong)>=0, f"{len(dong)}건")
-except Exception as e:
-    check("동단위 수집", False, str(e)[:60])
-try:
-    gu=api.get_products_adaptive("강남구-381","강남구","구찌",True,None,None,
-                                 rule=KeywordRule(required=["구찌"],exclude=["레플","미러"]))
-    check("구단위 적응형+필터(get_products_adaptive)", len(gu)>0, f"{len(gu)}건")
-except Exception as e:
-    check("구단위 적응형", False, str(e)[:60])
 
-print("\n=== C. 자동 모니터 엔진 ===")
-from daangn.auto_monitor import AutoMonitor, load_conditions_from_excel
-# 엑셀 다중조건 로드
-from openpyxl import Workbook
-xls=tempfile.mktemp(suffix=".xlsx"); wb=Workbook(); ws=wb.active
-ws.append(["대분류","키워드","추가키워드","제외키워드","최소금액","최대금액","끌올일수"])
-ws.append(["가방","샤넬","정품","레플",500000,3000000,7])
-ws.append(["시계","롤렉스","","",1000000,None,30]); wb.save(xls)
-conds=load_conditions_from_excel(xls)
-check("엑셀 대분류+상세조건 로드", len(conds)==2 and conds[0]["keyword"]=="샤넬" and conds[0]["exclude"]==["레플"], f"{len(conds)}조건")
-# dedup + 가격변동 재알림 (네트워크 없이 직접)
-dbp=tempfile.mktemp(suffix=".db")
-m=AutoMonitor(None,{"out_json":"./OUT.json","db_path":dbp,"scope":"regions","regions":[]})
-events=[]; m.notify=lambda region,article,price,changed=None: events.append((article.get("title"),price,changed))
-arts=[{"id":"A1","title":"샤넬백","content":"","price":"1000000","href":"u","boostedAt":"2026-08-25T00:00:00"}]
-m._dedup_notify(arts,"강남구",None,None,None)              # 신규
-m._dedup_notify(arts,"강남구",None,None,None)              # 중복 → 무시
-arts[0]["price"]="800000"
-m._dedup_notify(arts,"강남구",None,None,None)              # 가격변동 재알림
-check("중복방지(신규 1회만)", sum(1 for e in events if e[2] is None)==1)
-check("가격변동 재알림", any(e[2]==1000000 and e[1]==800000 for e in events))
-# 프록시 로테이션
-m2=AutoMonitor(None,{"proxies":["http://a:1","http://b:2"],"out_json":"./OUT.json","db_path":tempfile.mktemp(suffix='.db'),"scope":"regions","regions":[]})
-p0,nxt=m2._proxy_cycle()
-check("프록시 로테이션", p0=="http://a:1" and nxt()=="http://b:2")
-# 텔레그램/시트 graceful (자격증명 없음)
-m3=AutoMonitor(None,{"out_json":"./OUT.json","db_path":tempfile.mktemp(suffix='.db'),"scope":"regions","regions":[]})
-try:
-    m3._telegram("x"); m3._sheet_append(["x"])
-    check("텔레그램/시트 graceful(자격증명 없이 무크래시)", True)
-except Exception as e:
-    check("텔레그램/시트 graceful", False, str(e)[:60])
-# 같은매물 다른동네 = 각각(id 상이)
-dbp2=tempfile.mktemp(suffix=".db"); m4=AutoMonitor(None,{"out_json":"./OUT.json","db_path":dbp2,"scope":"regions","regions":[]})
-ev2=[]; m4.notify=lambda *a,**k: ev2.append(a)
-m4._dedup_notify([{"id":"X1","title":"샤넬","price":"1","href":"u","boostedAt":"2026-08-25T00:00:00"}],"강남구",None,None,None)
-m4._dedup_notify([{"id":"X2","title":"샤넬","price":"1","href":"u","boostedAt":"2026-08-25T00:00:00"}],"서초구",None,None,None)
-check("같은매물 다른동네 각각 인식", len(ev2)==2)
+prods = [P("샤넬 클래식 정품 영수증", "풀박스"), P("샤넬 레플 미러급", "가품"),
+         P("구찌 지갑", "정품")]
+kept = apply_filter(prods, KeywordRule(required=["샤넬"], extra=["정품"],
+                                       extra_mode="and", exclude=["레플", "미러"]))
+ck("포함+추가+제외 동시 적용",
+   len(kept) == 1 and kept[0].name.startswith("샤넬 클래식"), str([p.name for p in kept]))
+ck("제외어는 설명에도 걸린다",
+   apply_filter([P("샤넬 가방", "가품입니다")],
+                KeywordRule(required=["샤넬"], exclude=["가품"])) == [])
 
-print("\n=== D. GUI 구성 (offscreen) ===")
+print("\n=== C. 계정·프록시 저장소 ===")
+from daangn_ext.account_store import AccountStore
+
+st_path = tempfile.mktemp(suffix=".json")
+store = AccountStore(st_path)
+store.add_pair(mkjwt(typ="refresh"), "http://u:p@1.2.3.4:8000", "010")
+ck("계정+프록시 저장",
+   len(store) == 1 and store.proxies() == ["http://u:p@1.2.3.4:8000"])
+ck("파일로 남는다(재시작 대비)", os.path.exists(st_path))
+ck("다시 열면 그대로", len(AccountStore(st_path)) == 1)
+
+print("\n=== D. 토큰 주입 · 휴식 ===")
+from daangn_ext import auth, rest_scheduler
+
+h1 = auth.build_headers("https://api.kr.karrotmarket.com/x", "TOK")
+h2 = auth.build_headers("https://www.daangn.com/x", "TOK")
+ck("당근 API 에만 토큰 주입",
+   h1.get("authorization") == "Bearer TOK" and "authorization" not in h2)
+ck("휴식은 지정 범위 안", 0 <= rest_scheduler.sleep_between(0, 0.01) <= 0.01)
+
+print("\n=== E. 창 조립 (offscreen) ===")
 try:
     from PyQt6.QtWidgets import QApplication
     import main
-    app=QApplication.instance() or QApplication([])
-    w=main.MainWindow()
-    check("탭 2개(수동/자동)", w.tabs.count()==2 and w.tabs.tabText(0)=="수동 검색")
-    check("수동 추가위젯", all(hasattr(w,x) for x in ("extraEdit","excludeEdit","adaptiveCheck","tokenRefreshCheck","accountsBtn")))
-    check("자동 위젯", all(hasattr(w,x) for x in ("autoKeyword","autoExcelBtn","autoNotifyBtn","_notify","autoRestMin","autoStartBtn","autoLog")))
-except Exception as e:
-    import traceback; check("GUI 구성", False, str(e)[:80]); traceback.print_exc()
 
-print("\n===== 결과 =====")
-ok=sum(1 for _,c,_ in R if c); print(f"{ok}/{len(R)} PASS")
-for n,c,e in R:
-    if not c: print(f"  실패: {n} {e}")
+    app = QApplication.instance() or QApplication([])
+    w = main.MainWindow()
+    ck("탭 3개", w.tabs.count() == 3,
+       str([w.tabs.tabText(i) for i in range(w.tabs.count())]))
+    ck("탭 이름",
+       [w.tabs.tabText(i) for i in range(w.tabs.count())]
+       == ["수동 검색", "매물 감시", "에뮬레이터"])
+    ck("수동 검색 위젯",
+       all(hasattr(w, x) for x in ("extraEdit", "excludeEdit", "tokenRefreshCheck",
+                                   "accountsBtn", "proxyViewBtn")))
+    ck("감시 위젯",
+       all(hasattr(w, x) for x in ("watchToggleBtn", "advancedBox", "listingTable",
+                                   "alertTable", "alertLog", "_notify")))
+except Exception as e:
+    import traceback
+
+    ck("창 조립", False, str(e)[:80])
+    traceback.print_exc()
+
+passed = sum(1 for _, ok in R if ok)
+print(f"\n===== {passed}/{len(R)} PASS =====")
+for name, ok in R:
+    if not ok:
+        print("  실패:", name)
+sys.exit(0 if passed == len(R) else 1)
