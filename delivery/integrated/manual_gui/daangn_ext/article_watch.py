@@ -401,8 +401,6 @@ class WatchTracker:
             except (TypeError, ValueError):
                 published = 0
             tier = tier_for(published, now)
-            if tier == TIER_DEAD:
-                continue
             price = parse_price_text(m.get("price"))
             self.store.upsert({
                 "id": aid,
@@ -426,6 +424,11 @@ class WatchTracker:
                 "last_change": 0,
                 "last_delta": 0,
             })
+            # 14일 넘은 매물은 추적하지 않는다. 그래도 행은 남긴다 — 행이 없으면
+            # 다음 폴링마다 '처음 본 매물'이 되어 같은 매물을 계속 재알림한다.
+            # 묘비일 뿐 구독이 아니므로 added 에는 세지 않는다.
+            if tier == TIER_DEAD:
+                continue
             if price:
                 self.store.add_price(aid, now, price)
             added += 1

@@ -156,6 +156,23 @@ tr2.check_one("77", FakeAPI([dict(BASE, price=2600000)]), now=NOW + 30)
 ck("무변동은 이력 안 늘림", len(st2.price_history("77")) == 2,
    str(st2.price_history("77")))
 
+# ── G. 오래된 매물도 묘비 행을 남긴다 ──
+# 행이 없으면 store.get() 이 매번 None 이라 같은 매물을 폴링마다 재알림한다.
+print("=== G. dead 묘비 ===")
+st4 = aw.WatchStore(os.path.join(d2, "w4.db"))
+tr4 = aw.WatchTracker(st4)
+OLD = [{"article_id": "99", "title": "오래된 매물", "price": "10만원",
+        "region": "압구정", "url": "u99", "time": NOW - 30 * DAY,
+        "keyword": "샤넬"}]
+ck("오래된 매치는 추적수에 안 셈", tr4.add_from_matches(OLD, now=NOW) == 0)
+r99 = st4.get("99")
+ck("그래도 행은 남는다", r99 is not None)
+ck("등급은 dead", r99 and r99["tier"] == aw.TIER_DEAD, str(r99 and r99.get("tier")))
+ck("dead 는 active 아님", st4.active_count() == 0, str(st4.active_count()))
+ck("dead 는 due 없음", st4.due(NOW + 10 * DAY, 10) == [], str(st4.due(NOW, 10)))
+ck("두 번째 투입도 0 — 재알림 안 남", tr4.add_from_matches(OLD, now=NOW + 60) == 0)
+ck("묘비는 그대로 dead", st4.get("99")["tier"] == aw.TIER_DEAD)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

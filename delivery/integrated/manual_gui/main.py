@@ -1265,7 +1265,6 @@ class MainWindow(QMainWindow):
         self.alertTgTestBtn.clicked.connect(self.on_alert_tg_test)
         self._alert_worker = None
         self._match_links = {}
-        self._match_seen = self._load_match_seen()
         self._last_harvest_ts = 0
         self._last_poll_ts = 0
         self._last_new = 0
@@ -1929,16 +1928,19 @@ class MainWindow(QMainWindow):
         new = 0
         new_items = []
         for m in matches:
-            key = str(m.get("id") or m.get("article_id") or m.get("title"))
-            if key in self._match_seen:
+            aid = str(m.get("article_id") or m.get("id") or "")
+            if not aid:
                 continue
-            self._match_seen.add(key); new += 1
+            # watch 테이블이 '본 매물'의 진실이다 — dead 행을 지우지 않으므로
+            # 판매완료·삭제된 매물이 다시 떠도 재알림하지 않는다.
+            if self._watch_store and self._watch_store.get(aid) is not None:
+                continue
+            new += 1
             new_items.append(m)
         self._last_new = new
         if new:
-            self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
+            self.alertLog.append(f"[매칭] 신규 {new}건 추가")
             self._notify_matches(new_items)
-            self._save_match_seen()
             try:
                 added = self._watch_tracker.add_from_matches(new_items) \
                     if self._watch_tracker else 0
@@ -1949,27 +1951,6 @@ class MainWindow(QMainWindow):
             self._refresh_listing_table()
         try:
             self._refresh_alert_health()
-        except Exception:
-            pass
-
-    _MATCH_SEEN_FILE = "./data/match_seen.json"
-
-    def _load_match_seen(self):
-        import json as _json, os as _os
-        try:
-            with open(self._MATCH_SEEN_FILE, encoding="utf-8") as _f:
-                return set(_json.load(_f))
-        except Exception:
-            return set()
-
-    def _save_match_seen(self):
-        import json as _json, os as _os
-        try:
-            _os.makedirs(_os.path.dirname(self._MATCH_SEEN_FILE), exist_ok=True)
-            # 최근 5000개만 유지(무한증가 방지)
-            keep = list(self._match_seen)[-5000:]
-            with open(self._MATCH_SEEN_FILE, "w", encoding="utf-8") as _f:
-                _json.dump(keep, _f)
         except Exception:
             pass
 
@@ -4069,29 +4050,6 @@ def _run_headless():
         except Exception:
             return {}
 
-    SEEN_FP = "./data/match_seen.json"
-    def _load_seen():
-        try:
-            with open(SEEN_FP, encoding="utf-8") as f:
-                data = _json.load(f)
-            # 순서 보존 dedup(FIFO 유지)
-            out, s = [], set()
-            for k in data:
-                if k not in s:
-                    s.add(k); out.append(k)
-            return out
-        except Exception:
-            return []
-    def _save_seen(order):
-        try:
-            _os.makedirs(_os.path.dirname(SEEN_FP), exist_ok=True)
-            tmp = SEEN_FP + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                _json.dump(order[-5000:], f)
-            _os.replace(tmp, SEEN_FP)
-        except Exception:
-            pass
-
     def _night_factor_live():
         if not bool(_settings().get("night")):
             return 1
@@ -4162,9 +4120,6 @@ def _run_headless():
                 log(f"[구글시트] 실패: {str(e)[:60]}")
 
     log("=== 헤드리스 무인 모니터 시작 ===")
-    seen_order = _load_seen()          # FIFO 순서 리스트
-    seen = set(seen_order)             # 빠른 조회
-    SEEN_CAP = 20000                   # 메모리 상한(무한증가 방지, 오래된 것 FIFO 축출)
     last_harvest = 0.0
     watch_store = watch_tracker = watch_budget = None
     last_watch_sweep = 0.0
@@ -4175,6 +4130,9 @@ def _run_headless():
         watch_budget = article_watch.AccountBudget("./accounts.json")
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
+    # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).
+    # 저장소가 없을 때만 이 프로세스 안에서 쓰는 대체 집합으로 재알림을 막는다.
+    fallback_seen = set()
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
     if "--register" in argv:
@@ -4211,16 +4169,18 @@ def _run_headless():
         except Exception as e:
             log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
         fresh = []
-        for idx, x in enumerate(matches):
-            base = x.get("id") or x.get("article_id") or x.get("title")
-            k = str(base) if base else f"_noid_{now:.0f}_{idx}"   # 키 없으면 고유화(오탐 dedup 방지)
-            if k in seen: continue
-            seen.add(k); seen_order.append(k); fresh.append(x)
-        # 메모리 상한: 초과분 FIFO 축출(오래된 것부터)
-        if len(seen_order) > SEEN_CAP:
-            drop = seen_order[:-SEEN_CAP]
-            seen.difference_update(drop)
-            del seen_order[:-SEEN_CAP]
+        for x in matches:
+            aid = str(x.get("article_id") or x.get("id") or "")
+            if not aid:
+                continue
+            if watch_store is not None:
+                if watch_store.get(aid) is not None:
+                    continue
+            elif aid in fallback_seen:
+                continue
+            else:
+                fallback_seen.add(aid)
+            fresh.append(x)
         if fresh:
             log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
             _notify(fresh, _notify_cfg())
@@ -4230,7 +4190,6 @@ def _run_headless():
                     log(f"[가격추적] {added}건 추적 시작")
             except Exception as e:
                 log(f"[가격추적] 등록 실패: {str(e)[:80]}")
-            _save_seen(seen_order)
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
         # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
