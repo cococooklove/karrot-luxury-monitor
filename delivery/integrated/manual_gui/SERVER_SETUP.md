@@ -41,17 +41,39 @@ python main.py --headless
 - 등록·폴링·수확·텔레그램·시트 전부 GUI 없이.
 - 커버모드/야간감속 = alert_settings.json 따름.
 
-## 5. 자동시작 + 크래시복구 (작업 스케줄러)
+## 5. 자동시작 (install.ps1 이 등록한다 — 손으로 만들지 말 것)
+
+`install.ps1` 6단계가 아래를 멱등하게 등록한다. 추가 작업은 필요 없다.
+
+| 항목 | 값 | 역할 |
+|---|---|---|
+| HKCU `Run\LDPlayerBoot` | `powershell -File C:\karrot\ldboot.ps1` | 로그온 시 함대 순차 기동 |
+| `C:\karrot\ldboot.ps1` | 리포 사본(`delivery\integrated\manual_gui\ldboot.ps1`)을 부르는 shim | 자동실행이 보는 고정 경로 |
+| 작업 `karrotgui` | `pythonw main.py` (작업 폴더 = 앱 폴더), **트리거 없음** | `ldboot.ps1` 이 마지막에 `schtasks /run /tn karrotgui` 로 호출 |
+
+왜 이 모양인가:
+
+- **shim 이 필요한 이유** — 자동실행 진입점은 `C:\karrot\ldboot.ps1` 로 고정인데 재설치는
+  `C:\karrot` 을 통째로 갈아끼운다. 실제 파일을 거기 두면 재설치 한 번에 사라지고,
+  부팅해도 함대도 앱도 안 뜬다(운영 서버에서 실제로 이렇게 깨져 있었다).
+- **SYSTEM 으로 돌리면 안 되는 이유** — LDPlayer 는 사용자 세션이 있어야 게스트를 띄운다.
+  `ldboot.ps1` 이 루프백 RDP 로 세션을 승격시키는 것도 로그온 사용자 권한이 필요하다.
+- **`karrotgui` 에 트리거를 두지 않는 이유** — 앱의 `ensure_ldplayer` 와 `ldboot.ps1` 이
+  동시에 인스턴스를 띄우면 게스트 커널이 hang 한다. 반드시 함대가 다 올라온 뒤에 호출한다.
+
+수동 조작:
+
 ```powershell
-$act = New-ScheduledTaskAction -Execute "python.exe" -Argument "main.py --headless" -WorkingDirectory "C:\karrot\delivery\integrated\manual_gui"
-$trg = New-ScheduledTaskTrigger -AtStartup
-$set = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0
-Register-ScheduledTask -TaskName "KarrotMonitor" -Action $act -Trigger $trg -Settings $set -RunLevel Highest -User "SYSTEM"
+schtasks /run /tn karrotgui                       # 앱만 다시 띄우기
+powershell -ExecutionPolicy Bypass -File C:\karrot\ldboot.ps1   # 함대까지 처음부터
 ```
-→ 부팅 자동실행 + 죽으면 1분 후 재시작(999회). 완전 무인.
+
+> 겹치는 옛 작업(`karrotgui2`, `karrotgui3`, `ldlaunch0~5`, `ldboot1`, `ldq1`, `rdpsess` 등)이
+> 남아 있으면 `install.ps1` 이 노란 경고로 알려준다. `ldlaunch*` 가 동시에 돌면 LDPlayer 가
+> hang 하고 `karrotgui2/3` 는 앱을 중복 실행하므로, 확인 후 `schtasks /delete /tn <이름> /f`.
 
 ## 6. 테스트 순서
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
 2. 키워드 등록(계정당 최대 30개): 코드 `MultiAccountAlerts.register_all(LUXURY_BRANDS)` or GUI 1회
 3. 텔레그램 수신 확인
-4. 상시 실행 전환(5번 스케줄러)
+4. 서버 재부팅 1회 → `C:\karrot\ldboot.log` 에 `최종 adb devices=5 / 5` 와 `모니터 앱 시작` 확인

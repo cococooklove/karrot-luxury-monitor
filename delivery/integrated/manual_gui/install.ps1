@@ -9,7 +9,7 @@ function Fail($m){ Write-Host ("[install][FAIL] " + $m) -ForegroundColor Red; ex
 # 1) Python
 $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) {
-  Log "1/5 Installing Python 3.12 (direct download)"
+  Log "1/6 Installing Python 3.12 (direct download)"
   $ver = "3.12.7"
   $url = "https://www.python.org/ftp/python/$ver/python-$ver-amd64.exe"
   $exe = "$env:TEMP\python-$ver.exe"
@@ -18,11 +18,11 @@ if (-not $py) {
   $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
   if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Fail "python not found after install (PATH). Re-login RDP and retry." }
 } else {
-  Log ("1/5 Python present: " + ((python --version) 2>&1))
+  Log ("1/6 Python present: " + ((python --version) 2>&1))
 }
 
 # 2) Repo ZIP (no git)
-Log "2/5 Downloading repo (ZIP)"
+Log "2/6 Downloading repo (ZIP)"
 Set-Location $env:SystemRoot   # cwd out of C:\karrot so it can be replaced on re-run
 $zip = "$env:TEMP\karrot.zip"
 $appRel = "delivery\integrated\manual_gui"
@@ -148,7 +148,7 @@ foreach ($critical in @("accounts.json", "data\config.json")) {
 Set-Location $app
 
 # 3) Dependencies
-Log "3/5 Installing Python deps (pip)"
+Log "3/6 Installing Python deps (pip)"
 python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed" }
 python -m pip install -e .
@@ -156,16 +156,72 @@ if ($LASTEXITCODE -ne 0) { Fail "dependency install failed" }
 New-Item -ItemType Directory -Force -Path "$app\data" | Out-Null
 
 # 4) Headless smoke
-Log "4/5 Headless smoke (--once)"
+Log "4/6 Headless smoke (--once)"
 python main.py --headless --once --no-harvest
 if ($LASTEXITCODE -ne 0) { Fail ("headless smoke failed (exit " + $LASTEXITCODE + ")") }
 
 # 5) Desktop shortcuts (best-effort: RDP session with no desktop still installs fine)
-Log "5/5 Desktop shortcuts"
+Log "5/6 Desktop shortcuts"
 try {
   & "$app\make_shortcuts.ps1" -AppDir $app
 } catch {
   Write-Host ("[install] shortcut skipped: " + $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# 6) 부팅 자동실행 등록
+# 서버는 재부팅 뒤 사람 없이 스스로 올라와야 한다. 그런데 자동실행 진입점은
+# C:\karrot\ldboot.ps1 로 고정돼 있는 반면, 이 스크립트는 C:\karrot 을 통째로
+# 리포지토리로 갈아끼운다 → 재설치 한 번에 그 파일이 사라지고, 부팅해도 함대도
+# 앱도 안 뜬다(운영 서버에서 실제로 이렇게 깨져 있었다).
+# 그래서 고정 경로에는 리포 사본을 부르는 shim 만 두고 내용은 리포에서 관리한다.
+Log "6/6 Boot autostart (shim + Run + karrotgui task)"
+
+$shimPath = "C:\karrot\ldboot.ps1"
+$shim = @"
+# 자동실행이 가리키는 고정 경로. 실제 내용은 리포지토리 사본이 갖는다.
+# install.ps1 이 매 설치마다 다시 만든다 — 직접 고치지 말 것.
+& "`$PSScriptRoot\$appRel\ldboot.ps1"
+"@
+# PowerShell 5.1 은 BOM 없는 UTF-8 을 cp949 로 읽어 한글 주석을 깨뜨린다 → BOM 필수.
+[System.IO.File]::WriteAllText($shimPath, $shim, (New-Object System.Text.UTF8Encoding $true))
+Log ("  shim: " + $shimPath)
+
+# 로그온 시 함대 기동. ldboot.ps1 이 루프백 RDP 로 세션을 승격시켜야 하므로
+# SYSTEM 이 아니라 로그온 사용자로 돈다.
+try {
+  Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+    -Name "LDPlayerBoot" `
+    -Value ('powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $shimPath + '"') `
+    -Force
+  Log "  HKCU Run: LDPlayerBoot"
+} catch {
+  Write-Host ("[install] Run 등록 실패(수동 등록 필요): " + $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# ldboot.ps1 은 인스턴스를 다 띄운 뒤 schtasks /run /tn karrotgui 로 앱을 부른다.
+# 이 작업이 없으면 함대만 뜨고 모니터는 영영 안 뜬다. 트리거는 두지 않는다 —
+# 부팅 경로에서 앱과 인스턴스가 동시에 뜨면 게스트 커널이 hang 하기 때문이다.
+try {
+  $pyw = Join-Path (Split-Path (Get-Command python -ErrorAction Stop).Source) "pythonw.exe"
+  if (-not (Test-Path $pyw)) { $pyw = "pythonw.exe" }
+  $act = New-ScheduledTaskAction -Execute $pyw -Argument "main.py" -WorkingDirectory $app
+  $prin = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+  $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+  Register-ScheduledTask -TaskName "karrotgui" -Action $act -Principal $prin -Settings $set -Force | Out-Null
+  Log ("  task karrotgui: pythonw main.py  (작업 폴더 " + $app + ")")
+} catch {
+  Write-Host ("[install] karrotgui 작업 등록 실패(수동 등록 필요): " + $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# 손으로 만들어 둔 옛 작업이 남아 있으면 순차 기동을 깨거나 앱을 중복 실행한다.
+# 지우는 건 사람이 판단할 일이라 여기서는 알리기만 한다.
+$stale = @("karrotgui2","karrotgui3","karrotbat","ldboot","ldboot1","ldq1","rdpsess",
+           "ldlaunch0","ldlaunch1","ldlaunch2","ldlaunch3","ldlaunch4","ldlaunch5")
+$found = @($stale | Where-Object { Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue })
+if ($found.Count) {
+  Write-Host ("[install] 주의: 겹치는 옛 작업이 남아 있습니다 - " + ($found -join ", ")) -ForegroundColor Yellow
+  Write-Host "[install]   ldlaunch* 가 동시에 돌면 LDPlayer 가 hang 하고, karrotgui2/3 는 앱을 중복 실행합니다." -ForegroundColor Yellow
+  Write-Host "[install]   확인 후 지우세요:  schtasks /delete /tn <이름> /f" -ForegroundColor Yellow
 }
 
 Write-Host ("[install] DONE. path: " + $app) -ForegroundColor Green
