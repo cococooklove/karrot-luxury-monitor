@@ -318,6 +318,38 @@ def ld_quit(console, index):
         return False
 
 
+PROBE_TOKEN = "PROBE_OK"
+
+
+def ld_probe(console, index, token=PROBE_TOKEN, timeout=None):
+    """**인덱스로 직접** 그 인스턴스의 adb 에 말을 건다. 반환: 대답했는가.
+
+    `ldconsole adb --index N --command "shell echo PROBE_OK"` — ldconsole 이 인덱스
+    → serial 을 스스로 풀어준다. 그래서 우리가 포트 산술 같은 매핑을 지어낼 필요가
+    없고(list2 에는 serial 필드가 없다), '이 인덱스가 대답하는가'를 집계가 아니라
+    인스턴스 단위로 물을 수 있다. 실서버 실측:
+        > ldconsole.exe adb --index 1 --command "shell echo PROBE_OK"
+        PROBE_OK
+        > ldconsole.exe adb --index 3 --command "shell echo PROBE_OK"
+        adb.exe: device 'emulator-5560' not found
+
+    성공 판정은 **종료코드 0 + 토큰만 단독으로 있는 줄**이다. 부분일치를 안 쓰는
+    이유: ldconsole 버전에 따라 명령줄을 그대로 되울리는 경우가 있는데, 그러면
+    실패 출력에도 토큰이 섞여 무응답을 응답으로 오독한다."""
+    timeout = PROBE_TIMEOUT if timeout is None else timeout
+    try:
+        p = subprocess.run([console, "adb", "--index", str(index),
+                            "--command", f"shell echo {token}"],
+                           capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return False
+    if p.returncode != 0:
+        return False
+    out = (p.stdout or b"").decode("utf-8", "ignore")
+    return any(line.strip() == token for line in out.splitlines())
+
+
 def ld_kill_pid(pid):
     """quit 이 안 먹을 때의 최후 수단. 비대화형 세션(작업 스케줄러·서비스)에서
     보낸 quit 은 대화형 데스크톱 세션이 소유한 프로세스를 못 죽인다. 실패해도
@@ -342,7 +374,7 @@ FLEET_BOOT_BUDGET = 600.0
 # 인스턴스당 **한 사이클 내** 재기동 횟수 상한. 영구 고장난 인스턴스를 매 사이클
 # 무한정 다시 깨우면 클라 PC 에서 adb/VM 폭주가 된다.
 BOOT_RETRY = 1
-# adb 응답 확인 대기. `adb devices` 목록은 살아있다는 증거가 못 된다 —
+# 응답 확인 대기. `adb devices` 목록은 살아있다는 증거가 못 된다 —
 # 게스트 커널이 안 뜬 인스턴스도 device 로 남은 채 영원히 대답하지 않는다.
 PROBE_TIMEOUT = 8
 # 인덱스별 연속 기동 실패 횟수. 계속 실패하는 인스턴스를 부팅 순서 뒤로 미뤄
@@ -416,27 +448,13 @@ def _responsive(adb_bin, serial, timeout=PROBE_TIMEOUT):
         return False
 
 
-def _scan_live(adb_bin, live, dead, timeout=PROBE_TIMEOUT):
-    """아직 판정 안 된 serial 만 응답 확인해 live/dead 에 반영. 새로 살아난 serial 반환.
-    이미 판정한 serial 은 다시 찌르지 않는다 — 대기 루프가 매 5초마다 죽은 기기에
-    타임아웃을 낭비하지 않게."""
-    got = []
-    for s in list_instances(adb_bin):
-        if s in live or s in dead:
-            continue
-        if _responsive(adb_bin, s, timeout):
-            live.append(s)
-            got.append(s)
-        else:
-            dead.add(s)
-    return got
-
-
 def live_instances(adb_bin, timeout=PROBE_TIMEOUT):
-    """대답하는 기기만. list_instances 와 달리 hang 한 기기를 걸러낸다."""
-    live, dead = [], set()
-    _scan_live(adb_bin, live, dead, timeout)
-    return live
+    """대답하는 기기 serial 만. list_instances 와 달리 hang 한 기기를 걸러낸다.
+
+    이건 **수확기에 넘길 serial 목록**을 만드는 용도다(harvest_one 은 serial 로
+    말한다). 어떤 인스턴스를 켜고 죽일지 정하는 데는 쓰지 않는다 — 그건
+    ld_probe 로 인덱스마다 직접 묻는다."""
+    return [s for s in list_instances(adb_bin) if _responsive(adb_bin, s, timeout)]
 
 
 def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
@@ -445,59 +463,52 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
 
     예전에는 기기가 하나라도 보이면 그대로 끝냈다. 그래서 6대 중 1대만 살아 있어도
     "함대가 있다"고 판단해 나머지 5대를 영영 안 깨웠고, 그 계정들의 토큰은 2시간 뒤
-    만료된 채 방치됐다(= 유효계정 0). 그래서 '기기 존재'가 아니라 ldconsole list2 의
-    **인스턴스별 androidStarted** 로 판단한다.
+    만료된 채 방치됐다(= 유효계정 0). 이제는 집계를 안 본다: `ldconsole adb
+    --index N` 으로 **인스턴스마다 직접** 대답을 듣고, 대답 못 하면 켠다.
 
-    인스턴스는 **세 상태**로 나뉜다(전부 list2 가 그 인덱스에 대해 직접 알려준다):
-      1) started        → adb 가 대답하면 그대로 둔다.
-      2) !started, pid 있음 → hang. VM 은 RUNNING 이고 dnplayer 도 살아 있는데
-         게스트 커널이 안 떠 adb 기기가 영영 안 붙는다. **이 상태에서 launch 는
-         no-op 이다** — LDPlayer 는 이미 실행중으로 보고 조용히 무시한다. 반드시
-         quit(안 먹으면 pid 강제 종료) → 프로세스 소멸 확인 → launch 순서.
-      3) !started, pid 없음 → 그냥 launch.
+    인스턴스별 판정:
+      1) 프로브 응답      → 그대로 둔다.
+      2) 무응답 + 프로세스(pid/vboxPid) 있음 또는 androidStarted=1
+         → hang. VM 은 RUNNING 인데 게스트 커널이 안 떠 adb 가 영영 안 붙는다.
+           **이 상태에서 launch 는 no-op 이다** — LDPlayer 가 이미 실행중으로 보고
+           조용히 무시한다. quit(안 먹으면 pid 강제 종료) → 소멸 확인 → launch 순서.
+      3) 무응답 + 프로세스 없음 → 그냥 launch.
 
-    인덱스→serial 매핑은 쓰지 않는다. list2 에는 adb 포트/serial 필드가 없고
-    이 코드베이스 어디에도 인덱스로 serial 을 계산하는 곳이 없다. 그래서
-      - 무엇을 켤지·먼저 죽일지는 오직 list2 의 자기 인덱스 정보(started/pid)로 정하고,
-      - serial 은 '대답하는 기기 집합'으로만 다룬다(어느 인덱스 것인지 묻지 않는다).
-    started 인데 함대 응답이 0 인 경우도 전부 hang 으로 본다(지목이 모호하지 않다).
-    부분 결손(started 인데 일부만 응답)은 대상을 특정할 수 없으므로 크게 남기기만
-    하고 건드리지 않는다 — 잘못 지목해 멀쩡히 돌던 인스턴스를 죽이는 게 더 나쁘다.
+    (2)에는 androidStarted=1 인데 대답 안 하는 인스턴스가 **포함된다** — 클라 서버가
+    지금 딱 그 상태(6대 started, 5대 무응답)이고, 예전처럼 로그만 남기면 기계는
+    고장난 채로 남는다. 인덱스 프로브가 있으니 지목이 모호하지 않아 조치할 수 있다.
+
+    serial 은 반환값(수확기에 넘길 목록)에만 쓴다. 어떤 인덱스가 어떤 serial 인지는
+    묻지 않는다 — list2 에 그 필드가 없고 이 코드베이스 어디에도 인덱스로 serial 을
+    계산하는 곳이 없다. ldconsole 이 인덱스를 직접 받아 자기가 풀어준다.
 
     동시 기동은 VM 은 RUNNING 인데 게스트 커널이 안 뜨는 하드 실패다 → **순차 기동**."""
     log = log or (lambda m: None)
-    live, dead = [], set()
-    _scan_live(adb_bin, live, dead)
+    deadline = time.time() + max(0.0, float(budget))
     console = console or find_ldconsole(adb_bin)
     if not console:
-        if not live:
-            log("[LDPlayer] ldconsole.exe 못찾음 — LDPlayer 설치경로 확인")
-        return live
+        log("[LDPlayer] ldconsole.exe 못찾음 — LDPlayer 설치경로 확인")
+        return live_instances(adb_bin)
     insts = ld_rows(console)
     if not insts:
-        if not live:
-            log("[LDPlayer] 인스턴스 없음 — .ldbk 복원 필요")
-        return live
+        log("[LDPlayer] 인스턴스 없음 — .ldbk 복원 필요")
+        return live_instances(adb_bin)
 
-    started = [r for r in insts if r["started"]]
-    # (index, name, 프로세스가 남아 있어 quit 이 먼저 필요한가)
-    need = [(r["index"], r["name"], bool(r["pids"]))
-            for r in insts if not r["started"]]
+    # (index, name, quit 이 먼저 필요한가) — 인덱스마다 직접 물어본 결과다.
+    need, alive = [], 0
+    for r in insts:
+        if ld_probe(console, r["index"]):
+            alive += 1
+            continue
+        need.append((r["index"], r["name"], bool(r["pids"]) or r["started"]))
     _hung = sum(1 for _i, _n, h in need if h)
     if _hung:
-        log(f"[LDPlayer] 프로세스는 살아 있는데 안드로이드가 안 뜬 인스턴스 {_hung}개 —"
-            " launch 가 무시되는 상태라 종료부터 합니다")
-    if started and not live:
-        # 응답하는 기기가 0 → 실행중이라는 것들은 전부 hang. 지목이 모호하지 않다.
-        log(f"[LDPlayer] 실행중이라는 {len(started)}개가 모두 무응답 — 전부 재기동합니다")
-        need += [(r["index"], r["name"], True) for r in started]
-    elif len(live) < len(started):
-        log(f"[LDPlayer] 실행중 {len(started)}개 중 {len(live)}개만 응답 —"
-            " 무응답분은 인덱스를 특정할 수 없어 이번 사이클엔 건드리지 않습니다")
+        log(f"[LDPlayer] 프로세스는 살아 있는데 응답 없는 인스턴스 {_hung}개 —"
+            " 이 상태의 launch 는 무시되므로 종료부터 합니다")
 
     if not need:
-        log(f"[LDPlayer] {len(live)}/{len(insts)}개 응답 — 추가 기동 불필요")
-        return live
+        log(f"[LDPlayer] {alive}/{len(insts)}개 응답 — 추가 기동 불필요")
+        return live_instances(adb_bin)
 
     def _key(item):
         try:
@@ -507,15 +518,13 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
         return (_BOOT_FAILS.get(str(item[0]), 0), n)
 
     need.sort(key=_key)
-    log(f"[LDPlayer] {len(insts)}개 중 {len(need)}개 미기동 —"
+    log(f"[LDPlayer] {len(insts)}개 중 {len(need)}개 무응답 —"
         f" 순차 부팅(간격 {gap}s · 예산 {int(budget)}s)…")
-    deadline = time.time() + max(0.0, float(budget))
     for pos, (idx, name, hung) in enumerate(need):
         if time.time() >= deadline:
             log(f"[LDPlayer] 기동 예산 {int(budget)}s 소진 —"
                 f" 남은 {len(need) - pos}개는 다음 수확 주기에 이어서 올립니다")
             break
-        dead.clear()        # 재기동하면 같은 serial 이 다시 살아날 수 있다
         ok = down = False
         for attempt in range(retry + 1):
             if attempt:
@@ -531,13 +540,17 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
             while waited < boot_wait and time.time() < deadline:
                 time.sleep(5)
                 waited += 5
-                if _scan_live(adb_bin, live, dead):
+                # 기동 성공도 그 인덱스에게 직접 묻는다. '아무 기기나 새로 생겼나'
+                # 같은 집계는 다른 인스턴스가 늦게 뜬 것을 이 인스턴스의 성공으로
+                # 오독한다.
+                if ld_probe(console, idx):
                     log(f"[LDPlayer] {name}(idx {idx}) 기동 완료 ({waited}s)")
                     ok = True
                     break
             if ok:
                 break
         if ok:
+            alive += 1
             _BOOT_FAILS.pop(str(idx), None)
         else:
             # 실패해도 다음 인스턴스를 막지 않는다. 연속 실패는 다음 사이클 부팅
@@ -547,8 +560,8 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
                 f" (연속 {_BOOT_FAILS[str(idx)]}회, 다음 주기 후순위)")
         if pos + 1 < len(need) and time.time() < deadline:
             time.sleep(gap)
-    log(f"[LDPlayer] {len(live)}/{len(insts)}개 응답")
-    return live
+    log(f"[LDPlayer] {alive}/{len(insts)}개 응답")
+    return live_instances(adb_bin)
 
 
 def _find_token_path(adb_bin, serial):

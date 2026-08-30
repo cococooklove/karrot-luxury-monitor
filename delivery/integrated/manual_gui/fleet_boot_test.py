@@ -3,9 +3,12 @@
 지키는 것:
   A. 기기가 하나라도 있으면 끝내지 않는다. list2 의 인스턴스별 상태로 미기동분을
      전부 골라 켠다(오늘 클라 서버: 6대 중 1대만 살아 5대 방치).
-  B. adb devices 목록은 증거가 아니다 — 대답(shell echo)해야 살아있는 것으로 센다.
-  C. **3상태 분류**: started(그대로) / 프로세스는 있는데 안드로이드 미기동(quit
-     먼저, 소멸 확인 후 launch) / 아무것도 없음(그냥 launch).
+  B. 판정은 **인덱스별 프로브**다: `ldconsole adb --index N --command
+     "shell echo PROBE_OK"`. ldconsole 이 serial 을 스스로 풀어주므로 포트 산술을
+     지어낼 필요가 없고, 집계가 아니라 인스턴스 단위로 조치할 수 있다.
+     androidStarted=1 인데 무응답인 인스턴스(= 클라 서버 현재 상태)도 지목된다.
+  C. 무응답 인스턴스 처리: 프로세스가 남아 있으면 quit → 소멸 확인 → launch,
+     아무것도 없으면 그냥 launch.
      프로세스가 살아 있으면 LDPlayer 는 launch 를 조용히 무시한다 — 가짜 함대가
      그 동작을 그대로 흉내내므로, quit 을 빠뜨리면 이 스위트가 실패한다.
   D. 순차 기동(동시 launch 는 게스트 커널이 안 뜨는 하드 실패) + gap 유지.
@@ -97,12 +100,20 @@ class Fleet:
         return [self.serial(i) for i in range(self.n) if self.state[i] in _DEV]
 
     def responsive(self, adb_bin, serial, timeout=None):
+        """serial 기준 응답 — 반환값(수확기에 넘길 목록) 생성에만 쓰인다."""
         self._settle()
-        self.probes.append(serial)
         for i in range(self.n):
             if self.serial(i) == serial:
                 return self.state[i] == "up"
         return False
+
+    def ld_probe(self, console, index, token=None, timeout=None):
+        """`ldconsole adb --index N` — 인덱스로 직접 묻는다. 켜고 죽일 대상은
+        전부 이 결과가 정한다."""
+        self._settle()
+        i = int(index)
+        self.probes.append(i)
+        return self.state.get(i) == "up"
 
     def ld_rows(self, console):
         self._settle()
@@ -157,12 +168,13 @@ class Fleet:
 
 def run(fleet, clock, console="C:/fake/ldconsole.exe", **kw):
     logs = []
-    names = ("time", "list_instances", "_responsive", "ld_rows", "ld_launch",
-             "ld_quit", "ld_kill_pid", "find_ldconsole")
+    names = ("time", "list_instances", "_responsive", "ld_probe", "ld_rows",
+             "ld_launch", "ld_quit", "ld_kill_pid", "find_ldconsole")
     saved = {n: getattr(ld, n) for n in names}
     ld.time = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     ld.list_instances = fleet.list_instances
     ld._responsive = fleet.responsive
+    ld.ld_probe = fleet.ld_probe
     ld.ld_rows = fleet.ld_rows
     ld.ld_launch = fleet.ld_launch
     ld.ld_quit = fleet.ld_quit
@@ -225,30 +237,103 @@ ck("down 상태엔 quit 을 보내지 않는다",
    not any(k == "quit" for k, _ in f.calls), str(f.calls))
 ck("바로 launch", sorted(f.launches()) == [1, 2], str(f.calls))
 
-print("=== B. 응답 확인 — adb devices 목록은 증거가 아니다 ===")
+print("=== B. started 인데 무응답(ghost) — 클라 서버가 지금 갇힌 상태 ===")
+# 6대 전부 androidStarted=1 인데 5대는 대답을 안 한다. 집계로는 '5/6 무응답'까지만
+# 알 수 있어 예전엔 로그만 남기고 방치했다. 인덱스 프로브가 있으니 지목이 된다.
 reset_fails()
 c = Clock()
-# idx0 은 기기로 보이지만 무응답(ghost) · 나머지 down → 응답기기 0
-f = Fleet(c, n=3, ghost=(0,))
+f = Fleet(c, n=6, up=(0,), ghost=(1, 2, 3, 4, 5))
 out, logs = run(f, c, budget=100000)
-ck("무응답 기기를 살아있는 것으로 세지 않는다", f.state[0] == "up" or "dev-0" not in out,
-   str(out))
-ck("ghost 도 기동 대상이 된다", 0 in f.launches(), str(f.calls))
-ck("ghost 는 quit 먼저", 0 <= f.first("quit", 0) < f.first("launch", 0), str(f.calls))
-ck("전원 무응답을 크게 남긴다", any("모두 무응답" in x for x in logs), str(logs))
-ck("응답 확인이 실제로 나갔다", "dev-0" in f.probes, str(f.probes))
+ck("응답하는 idx0 은 quit 도 launch 도 안 한다",
+   f.first("quit", 0) == -1 and f.first("launch", 0) == -1, str(f.calls))
+for i in (1, 2, 3, 4, 5):
+    ck(f"무응답 idx{i}: quit → launch (같은 인덱스)",
+       0 <= f.first("quit", i) < f.first("launch", i), str(f.calls))
+ck("무시되는 launch 없음", f.noop_launches == [], str(f.noop_launches))
+ck("6대 전부 살아난다", sorted(out) == [f"dev-{i}" for i in range(6)], str(out))
+ck("인덱스마다 프로브가 나갔다", set(f.probes) >= set(range(6)), str(f.probes))
+ck("이제는 방치 문구를 남기지 않는다",
+   not any("특정할 수 없어" in x for x in logs), str(logs))
 
-print("=== B2. 부분 무응답은 지목하지 않는다(멀쩡한 걸 죽이지 않는다) ===")
+print("=== B2. 응답하는 인스턴스는 절대 건드리지 않는다 ===")
 reset_fails()
 c = Clock()
-f = Fleet(c, n=4, up=(0,), ghost=(1,))
-out, logs = run(f, c)
-ck("무응답 idx1 을 quit 하지 않는다", f.first("quit", 1) == -1, str(f.calls))
-ck("idx1 을 켜려 들지도 않는다", 1 not in f.launches(), str(f.calls))
-ck("프로세스 없는 2,3 만 켠다", sorted(f.launches()) == [2, 3], str(f.launches()))
-ck("부분 결손을 크게 남긴다", any("특정할 수 없어" in x for x in logs), str(logs))
+f = Fleet(c, n=4, up=(0, 2), ghost=(1,))
+out, logs = run(f, c, budget=100000)
+ck("응답하는 0,2 는 quit/launch 없음",
+   all(f.first(k, i) == -1 for k in ("quit", "launch") for i in (0, 2)), str(f.calls))
+ck("무응답 1(ghost)·3(down)만 켠다", sorted(f.launches()) == [1, 3], str(f.calls))
+ck("ghost 1 은 quit 먼저", 0 <= f.first("quit", 1) < f.first("launch", 1), str(f.calls))
+ck("down 3 은 quit 없이", f.first("quit", 3) == -1, str(f.calls))
 
-print("=== B3. _responsive 는 타임아웃 있는 shell echo 를 쓴다 ===")
+print("=== B3. ld_probe — ldconsole 이 인덱스로 직접 adb 를 태운다 ===")
+_pcalls = []
+
+
+class _PR:
+    def __init__(self, rc, out):
+        self.returncode, self.stdout = rc, out.encode("utf-8")
+
+
+def _probe_sub(reply):
+    def _run(cmd, **kw):
+        _pcalls.append((list(cmd), kw.get("timeout")))
+        return reply
+    return types.SimpleNamespace(run=_run)
+
+
+_svsub = ld.subprocess
+try:
+    ld.subprocess = _probe_sub(_PR(0, "PROBE_OK\r\n"))
+    ck("토큰 단독 줄이면 응답", ld.ld_probe("C:/ld.exe", 1) is True)
+    _cmd, _to = _pcalls[-1]
+    ck("ldconsole adb --index N --command 형태",
+       _cmd[1:] == ["adb", "--index", "1", "--command", "shell echo PROBE_OK"], str(_cmd))
+    ck("PROBE_TIMEOUT 을 건다", _to == ld.PROBE_TIMEOUT, str(_to))
+
+    # 실서버 실측 실패 출력
+    ld.subprocess = _probe_sub(_PR(1, "adb.exe: device 'emulator-5560' not found\r\n"))
+    ck("device not found 는 무응답", ld.ld_probe("C:/ld.exe", 3) is False)
+    ld.subprocess = _probe_sub(_PR(0, "adb.exe: device 'emulator-5560' not found\r\n"))
+    ck("종료코드 0 이어도 토큰 없으면 무응답", ld.ld_probe("C:/ld.exe", 3) is False)
+    # ldconsole 이 명령줄을 되울리는 버전 — 부분일치였다면 오독한다
+    ld.subprocess = _probe_sub(
+        _PR(0, "adb --index 3 --command shell echo PROBE_OK\r\nerror: no devices\r\n"))
+    ck("명령줄 되울림을 응답으로 오독하지 않는다", ld.ld_probe("C:/ld.exe", 3) is False)
+
+    def _boom(*a, **k):
+        raise RuntimeError("timeout")
+    ld.subprocess = types.SimpleNamespace(run=_boom)
+    ck("타임아웃/예외는 무응답", ld.ld_probe("C:/ld.exe", 3) is False)
+finally:
+    ld.subprocess = _svsub
+
+print("=== B4. live_instances — 반환 serial 목록에서 hang 기기를 거른다 ===")
+_seen = []
+
+
+def _fake_adb(adb_bin, serial, *args, timeout=30):
+    _seen.append((serial, args, timeout))
+    if serial == "hang":
+        raise RuntimeError("timeout")
+    return "ok\r\n"
+
+
+_sv = ld._adb
+_svli = ld.list_instances
+ld._adb = _fake_adb
+ld.list_instances = lambda a: ["good", "hang"]
+try:
+    ck("응답하면 True", ld._responsive("adb", "good") is True)
+    ck("무응답이면 False", ld._responsive("adb", "hang") is False)
+    ck("hang serial 은 수확 목록에서 빠진다", ld.live_instances("adb") == ["good"],
+       str(ld.live_instances("adb")))
+finally:
+    ld._adb = _sv
+    ld.list_instances = _svli
+ck("shell echo 로 확인", _seen and _seen[0][1] == ("shell", "echo", "ok"), str(_seen[:1]))
+ck("타임아웃을 건다", _seen and _seen[0][2] == ld.PROBE_TIMEOUT, str(_seen[:1]))
+ck("PROBE_TIMEOUT 은 짧다", 0 < ld.PROBE_TIMEOUT <= 15, str(ld.PROBE_TIMEOUT))
 _seen = []
 
 
