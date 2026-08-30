@@ -678,16 +678,16 @@ _kapi.time.sleep = lambda *a, **k: None      # 등록 간 0.6초 대기는 테�
 tA = _StubAPI(held=["a", "b", "c"], banned={"짝퉁"})
 outT = tA.register_many(["짝퉁"])
 ck("실패 시 account_count 를 보고한다", "account_count" in outT, str(outT))
-ck("보고값이 실제 보유수", outT["account_count"] == len(tA.held) == 3, str(outT))
+ck("보고값이 실제 보유수", outT.get("account_count") == len(tA.held) == 3, str(outT))
 ck("실패해도 목록 조회는 1회뿐", tA.list_calls == 1, str(tA.list_calls))
 
 # 일부 성공 + 한도 초과 실패: existing + added 가 지금 보유수다
 tB = _StubAPI(held=["a", "b", "c"], cap=4)
 outTB = tB.register_many(["새1", "새2"])
-ck("일부 성공 시 보고값 = 기존+추가", outTB["account_count"] == 4, str(outTB))
-ck("보고값이 서버 실제와 일치", outTB["account_count"] == len(tB.held), str(tB.held))
+ck("일부 성공 시 보고값 = 기존+추가", outTB.get("account_count") == 4, str(outTB))
+ck("보고값이 서버 실제와 일치", outTB.get("account_count") == len(tB.held), str(tB.held))
 ck("일부 성공에도 목록 조회 1회", tB.list_calls == 1, str(tB.list_calls))
-ck("added/failed 는 그대로", (outTB["added"], len(outTB["failed"])) == (["새1"], 1),
+ck("added/failed 는 그대로", (outTB.get("added"), len(outTB.get("failed") or [])) == (["새1"], 1),
    str(outTB))
 
 # 성공만 하면 보고할 게 없다(라우터도 안 본다) — 요청도 그대로
@@ -699,7 +699,7 @@ ck("성공 경로 목록 조회 1회", tC.list_calls == 1, str(tC.list_calls))
 # skip_existing=False 면 세어둔 목록이 없으니 그때만 실측한다
 tD = _StubAPI(held=["a", "b"], banned={"짝퉁"})
 outTD = tD.register_many(["짝퉁"], skip_existing=False)
-ck("skip_existing=False 는 실측으로 보고", outTD["account_count"] == 2, str(outTD))
+ck("skip_existing=False 는 실측으로 보고", outTD.get("account_count") == 2, str(outTD))
 ck("skip_existing=False 의 조회는 폴백 1회뿐", tD.list_calls == 1, str(tD.list_calls))
 
 
@@ -737,9 +737,9 @@ mE = _StubMulti([tE1, tE2])
 totalE = _with_stub_apis([tE1, tE2], lambda: mE.register_all(["짝퉁"]))
 ck("register_all 이 observed_count 를 보고한다", "observed_count" in totalE,
    str(totalE))
-ck("observed_count 는 실패 계정 실측의 최댓값", totalE["observed_count"] == 30,
+ck("observed_count 는 실패 계정 실측의 최댓값", totalE.get("observed_count") == 30,
    str(totalE))
-ck("실패 합계는 계정 수만큼", totalE["failed"] == 2, str(totalE))
+ck("실패 합계는 계정 수만큼", totalE.get("failed") == 2, str(totalE))
 
 # 전부 성공하면 observed_count 는 없다
 tF1 = _StubAPI(held=["a"])
@@ -747,7 +747,7 @@ tF2 = _StubAPI(held=["a"])
 mF = _StubMulti([tF1, tF2])
 totalF = _with_stub_apis([tF1, tF2], lambda: mF.register_all(["새"]))
 ck("성공만 하면 observed_count 없음", "observed_count" not in totalF, str(totalF))
-ck("added 는 계정 수만큼", totalF["added"] == 2, str(totalF))
+ck("added 는 계정 수만큼", totalF.get("added") == 2, str(totalF))
 
 # 생산자→소비자 한 바퀴: 진짜 register_all 반환으로 라우터가 수렴한다
 tG = _StubAPI(held=[f"기존{i}" for i in range(20)], cap=20)   # 서버 상한 20, 만원
