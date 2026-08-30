@@ -74,6 +74,35 @@ got2["exclude"].append("오염2")
 ck("oldest 의 exclude 변이가 큐에 안 샘",
    qm.oldest(1)[0]["exclude"] == ["가품"], str(qm.oldest(1)[0]["exclude"]))
 
+# ── touch: 승격 실패한 키워드를 맨 뒤로 보낸다 ──
+import time as _time
+
+pt = os.path.join(d, "touch.json")
+qt = SweepQueue(pt)
+qt.add("짝퉁", at=1000)
+qt.add("구찌", at=2000)
+qt.add("에르메스", at=3000)
+ck("touch 전 순서", qt.keywords() == ["짝퉁", "구찌", "에르메스"], str(qt.keywords()))
+ck("touch 는 True", qt.touch("짝퉁") is True)
+ck("touch 하면 맨 뒤", qt.keywords() == ["구찌", "에르메스", "짝퉁"], str(qt.keywords()))
+ck("touch 가 at 을 지금으로", qt.entries()[-1]["at"] >= int(_time.time()) - 5,
+   str(qt.entries()[-1]))
+ck("없는 키워드 touch 는 False", qt.touch("없음") is False)
+ck("touch 는 항목을 늘리지 않음", len(qt) == 3)
+qt.touch("구찌", at=9999)
+ck("touch(at=) 명시값 적용",
+   qt.keywords() == ["에르메스", "구찌", "짝퉁"], str(qt.keywords()))
+ck("touch 가 파일에 남음",
+   SweepQueue(pt).keywords() == qt.keywords(), str(SweepQueue(pt).keywords()))
+
+pt2 = os.path.join(d, "touch2.json")
+qt2 = SweepQueue(pt2)
+qt2.add("샤넬", 100, 200, ["가품"], at=10)
+qt2.touch("샤넬", at=77)
+e = qt2.entries()[0]
+ck("touch 가 조건을 안 지움",
+   (e["min"], e["max"], e["exclude"], e["at"]) == (100, 200, ["가품"], 77), str(e))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

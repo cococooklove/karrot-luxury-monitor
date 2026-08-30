@@ -174,6 +174,130 @@ ck("빈 키워드는 큐로 안 감", len(qE) == 0)
 ck("빈 키워드는 슬롯 안 먹음", rE.capacity()["used"] == 0, str(rE.capacity()))
 ck("빈 키워드는 register_all 안 부름", len(alertsE.calls) == 0)
 
+# ── L. 승격 실패는 백오프로 묶고, 뒤의 키워드를 막지 않는다 ──
+import json as _json
+import time as _time
+
+
+class PickyFleet:
+    """banned 키워드만 실패시킨다. 호출 수로 실제 요청 횟수를 본다."""
+
+    def __init__(self, banned=()):
+        self.banned = set(banned)
+        self.calls = []
+
+    def register_all(self, keywords, min_price=None, max_price=None,
+                     exclude_keywords=None, log=None, core_only=False):
+        self.calls.append(list(keywords))
+        bad = [k for k in keywords if k in self.banned]
+        if bad:
+            return {"added": 0, "skipped": 0, "failed": len(bad)}
+        return {"added": len(keywords), "skipped": 0, "failed": 0}
+
+
+dL = tempfile.mkdtemp()
+qLp = os.path.join(dL, "q.json")
+rLp = os.path.join(dL, "routes.json")
+qL = SweepQueue(qLp)
+qL.add("짝퉁", at=1000)          # 절대 등록 안 되는 것이 큐 머리
+qL.add("구찌", at=2000)
+qL.add("에르메스", at=3000)
+fL = PickyFleet({"짝퉁"})
+rL = KeywordRouter(fL, qL, slot_cap=1, routes_fp=rLp)
+
+t0 = int(_time.time())
+promoted = rL.rebalance()
+ck("실패한 머리를 건너뛰고 뒤를 승격", [p["keyword"] for p in promoted] == ["구찌"],
+   str(promoted))
+ck("실패 1회 + 성공 1회만 요청", len(fL.calls) == 2, str(fL.calls))
+ck("실패분은 큐 맨 뒤로", qL.keywords() == ["에르메스", "짝퉁"], str(qL.keywords()))
+ck("실패분에 백오프 기록", rL.retry_after("짝퉁") >= t0 + 3600,
+   str(rL.retry_after("짝퉁")))
+ck("첫 백오프는 한 시간대", rL.retry_after("짝퉁") <= t0 + 3600 + 5,
+   str(rL.retry_after("짝퉁") - t0))
+
+# 백오프 중에는 아예 시도하지 않는다 (요청 0)
+rL.remove("구찌"); rL.remove("에르메스")     # 큐엔 짝퉁만, 슬롯은 빈다
+n_before = len(fL.calls)
+ck("백오프 중 승격 없음", rL.rebalance() == [])
+ck("백오프 중 요청 0", len(fL.calls) == n_before, str(fL.calls))
+
+# 재시작해도 백오프가 살아 있다
+fL2 = PickyFleet({"짝퉁"})
+rL2 = KeywordRouter(fL2, SweepQueue(qLp), slot_cap=1, routes_fp=rLp)
+ck("재시작 후 백오프 유지", rL2.retry_after("짝퉁") >= t0 + 3600,
+   str(rL2.retry_after("짝퉁")))
+ck("재시작 후에도 승격 안 함", rL2.rebalance() == [])
+ck("재시작 후에도 요청 0", len(fL2.calls) == 0, str(fL2.calls))
+
+# 백오프가 지나면 딱 한 번 더 시도하고, 다음 백오프는 두 배로 늘어난다
+with open(rLp, encoding="utf-8") as f:
+    _rt = _json.load(f)
+_rt["짝퉁"]["retry_after"] = t0 - 1
+with open(rLp, "w", encoding="utf-8") as f:
+    _json.dump(_rt, f, ensure_ascii=False)
+fL3 = PickyFleet({"짝퉁"})
+rL3 = KeywordRouter(fL3, SweepQueue(qLp), slot_cap=1, routes_fp=rLp)
+t1 = int(_time.time())
+ck("백오프 만료 후 승격 시도", rL3.rebalance() == [])
+ck("만료 후엔 딱 한 번 요청", len(fL3.calls) == 1, str(fL3.calls))
+ck("백오프가 두 배로", t1 + 7200 <= rL3.retry_after("짝퉁") <= t1 + 7200 + 5,
+   str(rL3.retry_after("짝퉁") - t1))
+
+# 슬롯 만원으로 밀린 것은 실패가 아니다 — 백오프를 물리지 않는다
+dL4 = tempfile.mkdtemp()
+qL4 = SweepQueue(os.path.join(dL4, "q.json"))
+rL4 = KeywordRouter(PickyFleet(), qL4, slot_cap=1,
+                    routes_fp=os.path.join(dL4, "routes.json"))
+rL4.add("A"); rL4.add("B")
+ck("만원 폴백엔 백오프 없음", rL4.retry_after("B") == 0, str(rL4.retry_after("B")))
+rL4.remove("A")
+ck("만원 폴백은 곧바로 승격", [p["keyword"] for p in rL4.rebalance()] == ["B"])
+
+# 등록에 성공하면 백오프 기록은 사라진다
+dL5 = tempfile.mkdtemp()
+qL5 = SweepQueue(os.path.join(dL5, "q.json"))
+fL5 = PickyFleet({"흔들"})
+rL5 = KeywordRouter(fL5, qL5, slot_cap=2, routes_fp=os.path.join(dL5, "routes.json"))
+rL5.add("흔들")
+ck("실패 시 백오프 생김", rL5.retry_after("흔들") > 0)
+fL5.banned.clear()
+rL5.add("흔들")
+ck("성공하면 app", rL5.capacity()["used"] == 1, str(rL5.capacity()))
+ck("성공하면 백오프 소멸", rL5.retry_after("흔들") == 0, str(rL5.retry_after("흔들")))
+
+# ── M. 서버에 이미 있는 키워드 씨딩 ──
+dM = tempfile.mkdtemp()
+fpM = os.path.join(dM, "routes.json")
+qM = SweepQueue(os.path.join(dM, "q.json"))
+aM = FakeAlerts()
+rM = KeywordRouter(aM, qM, slot_cap=3, routes_fp=fpM)
+ck("씨딩 전엔 빈 함대", rM.capacity()["used"] == 0, str(rM.capacity()))
+ck("씨딩 건수", rM.seed_from_server(["샤넬", "루이비통", "샤넬", "", None]) == 2)
+ck("씨딩은 app 으로", rM.capacity()["used"] == 2, str(rM.capacity()))
+ck("씨딩은 네트워크 안 씀", len(aM.calls) == 0, str(aM.calls))
+_rowsM = {x["keyword"]: x for x in rM.routes()}
+ck("씨딩 사유 기록", "서버" in _rowsM["샤넬"]["reason"], str(_rowsM["샤넬"]))
+ck("두 번째 씨딩은 무동작", rM.seed_from_server(["에르메스"]) == 0)
+ck("두 번째 씨딩이 덮지 않음", "에르메스" not in {x["keyword"] for x in rM.routes()})
+ck("씨딩 결과 영속",
+   KeywordRouter(FakeAlerts(), SweepQueue(os.path.join(dM, "q.json")),
+                 slot_cap=3, routes_fp=fpM).capacity()["used"] == 2)
+
+# routes 가 이미 있으면 씨딩하지 않는다 — 스윕으로 밀린 기록을 app 으로 뒤집으면 안 된다
+dM2 = tempfile.mkdtemp()
+qM2 = SweepQueue(os.path.join(dM2, "q.json"))
+rM2 = KeywordRouter(FakeAlerts(banned={"짝퉁"}), qM2, slot_cap=3,
+                    routes_fp=os.path.join(dM2, "routes.json"))
+rM2.add("짝퉁")
+ck("기존 라우트가 있으면 씨딩 0", rM2.seed_from_server(["짝퉁", "샤넬"]) == 0)
+ck("스윕 기록이 뒤집히지 않음",
+   {x["keyword"]: x["route"] for x in rM2.routes()} == {"짝퉁": "sweep"},
+   str(rM2.routes()))
+ck("빈 목록 씨딩은 0", KeywordRouter(
+    FakeAlerts(), SweepQueue(os.path.join(dM2, "q2.json")), slot_cap=3,
+    routes_fp=os.path.join(dM2, "r2.json")).seed_from_server([]) == 0)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

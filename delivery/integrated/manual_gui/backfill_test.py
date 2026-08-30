@@ -45,7 +45,19 @@ with open(ms, "w", encoding="utf-8") as f:
 st = aw.WatchStore(os.path.join(d, "watch.db"))
 res = bf.backfill(st, auto, ms, NOW)
 ck("auto_seen 2건 백필", res["from_auto"] == 2, str(res))
-ck("match_seen 은 행 안 만듦", res["from_match"] == 0, str(res))
+# match_seen 은 값이 없어도 id 는 옮겨야 한다 — 안 옮기면 알림만 나갔던 매물이
+# 계정 알림함에서 다시 잡혀 텔레그램·시트로 재발신된다.
+ck("match_seen 남은 id 는 묘비", res["from_match"] == 1, str(res))
+ck("auto_seen 과 겹친 id 는 건너뜀", res["skipped"] == 1, str(res))
+t = st.get("999")
+ck("묘비 행 생김", t is not None, str(t))
+ck("묘비는 dead", t["tier"] == aw.TIER_DEAD, str(t.get("tier")))
+ck("묘비는 제목 없음", t["title"] == "" and t["region"] == "", str(t))
+ck("묘비 출처 표시", t["source"] == "match_seen", str(t.get("source")))
+ck("묘비는 재점검 안 함", t["next_check"] == 0, str(t.get("next_check")))
+ck("묘비는 가격 이력 없음", st.price_history("999") == [],
+   str(st.price_history("999")))
+ck("묘비는 evicted 아님", t["tier"] != aw.TIER_EVICTED, str(t.get("tier")))
 
 r = st.get("101")
 ck("제목 이관", r["title"] == "샤넬 클미", str(r))
@@ -70,11 +82,30 @@ con.commit(); con.close()
 res2 = bf.backfill(st, auto, ms, NOW + 10)
 ck("기존 행 건너뜀", res2["skipped"] >= 1, str(res2))
 ck("기존 행 보존", st.get("103")["title"] == "지키던 행", str(st.get("103")))
+ck("두 번째 실행은 묘비 안 만듦", res2["from_match"] == 0, str(res2))
+ck("묘비 두 번 안 덮음", st.get("999")["first_seen"] == NOW,
+   str(st.get("999")["first_seen"]))
 
 # 파일이 없어도 조용히 0 건
 res3 = bf.backfill(st, os.path.join(d, "없음.db"),
                    os.path.join(d, "없음.json"), NOW)
-ck("없는 파일은 0건", res3["from_auto"] == 0, str(res3))
+ck("없는 파일은 0건", res3["from_auto"] == 0 and res3["from_match"] == 0, str(res3))
+
+# 깨진 match_seen 은 조용히 0 건
+bad = os.path.join(d, "broken.json")
+with open(bad, "w", encoding="utf-8") as f:
+    f.write("{깨진")
+res4 = bf.backfill(st, os.path.join(d, "없음.db"), bad, NOW)
+ck("깨진 match_seen 은 0건", res4["from_match"] == 0, str(res4))
+
+# 안내문은 사실만 말해야 한다 — auto_seen.db 는 AutoMonitor 가 계속 쓴다
+import inspect as _inspect
+
+_msrc = _inspect.getsource(bf.main)
+ck("match_seen 은 지워도 된다고 안내", "match_seen.json 은 이제 지워도" in _msrc)
+ck("auto_seen.db 삭제를 권하지 않음", "지우지 마세요" in _msrc, _msrc)
+ck("auto_seen 지워도 된다는 문구 없음",
+   "auto_seen.db 와 data/match_seen.json 은 이제 지워도 됩니다" not in _msrc)
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

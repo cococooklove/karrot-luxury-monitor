@@ -68,6 +68,20 @@ ck("ended 필터",
 ck("알 수 없는 필터는 전부", len(m.listing_display_rows(mixed, NOW, "??")) == 3)
 ck("빈 입력", m.listing_display_rows([], NOW) == [])
 
+# ── 백필이 세운 중복판정용 묘비(dead + 제목 없음)는 표에 안 나온다 ──
+tomb = row(id="t", title="", region="", tier=aw.TIER_DEAD, price=0,
+           first_price=0, keyword="")
+ck("빈 묘비는 숨김", m.listing_display_rows([tomb], NOW) == [], "")
+ck("빈 묘비는 ended 필터에서도 숨김",
+   m.listing_display_rows([tomb], NOW, "ended") == [])
+ck("제목 있는 dead 는 보인다",
+   [x["id"] for x in m.listing_display_rows([dict(tomb, title="샤넬")], NOW)] == ["t"])
+ck("evicted 는 제목 없어도 안 숨김",
+   [x["id"] for x in m.listing_display_rows(
+       [dict(tomb, tier=aw.TIER_EVICTED)], NOW)] == ["t"])
+ck("묘비를 섞어도 나머지는 그대로",
+   [x["id"] for x in m.listing_display_rows([row(id="a"), tomb], NOW)] == ["a"])
+
 # ── 검색 스윕 결과 정규화 ──
 found = {"id": 555, "region": "분당", "title": "루이비통 알마",
          "price": 1200000, "url": "https://x/555", "image": "",
@@ -223,13 +237,21 @@ if _win is not None:
         def retune(self):
             pass
 
-    def _rig(queue_kws, have, running_supervisor=True):
+    class _FakeAM:
+        def __init__(self, running):
+            self._r = running
+
+        def isRunning(self):
+            return self._r
+
+    def _rig(queue_kws, have, running_supervisor=True, sweep_alive=False):
         """_resync_search_sweep 만 떼어 본다 — 진짜 스레드도 네트워크도 안 쓴다."""
         calls = []
+        _win.alertLog.clear()
         _win._sweep_queue = _FakeQueue(queue_kws)
         _win._supervisor = _FakeSupervisor(running_supervisor)
         _win._sweep_kws = have
-        _win.auto_monitor = None
+        _win.auto_monitor = _FakeAM(sweep_alive) if sweep_alive else None
         _win._start_search_sweep = lambda: calls.append("start")
         _win._stop_search_sweep = lambda: (calls.append("stop"),
                                            setattr(_win, "_sweep_kws", None))[0]
@@ -240,10 +262,22 @@ if _win is not None:
               _win.auto_monitor)
     ck("키워드 늘면 재시작", _rig(["샤넬", "구찌"], {"샤넬"}) == ["stop", "start"])
     ck("승격으로 줄면 재시작", _rig(["샤넬"], {"샤넬", "구찌"}) == ["stop", "start"])
-    ck("같으면 안 건드림", _rig(["샤넬"], {"샤넬"}) == [])
+    ck("같고 살아 있으면 안 건드림",
+       _rig(["샤넬"], {"샤넬"}, sweep_alive=True) == [])
+    # AutoMonitor.run 이 치명오류로 빠지면 _sweep_kws 는 그대로 남는다. running 을
+    # 안 보면 want == have 가 계속 성립해 스윕이 세션 내내 죽은 채 방치된다.
+    ck("같아도 스레드가 죽었으면 되살림", _rig(["샤넬"], {"샤넬"}) == ["stop", "start"])
+    ck("되살림 로그는 재시작과 구분됨",
+       "죽어 있음" in _win.alertLog.toPlainText(), _win.alertLog.toPlainText())
+    _rig(["샤넬", "구찌"], {"샤넬"})
+    ck("키워드 변경 로그는 되살림과 구분됨",
+       "죽어 있음" not in _win.alertLog.toPlainText()
+       and "키워드 변경" in _win.alertLog.toPlainText(),
+       _win.alertLog.toPlainText())
     ck("큐가 비면 정지만", _rig([], {"샤넬"}) == ["stop"])
     ck("안 떠 있고 큐가 차면 시작", _rig(["샤넬"], None) == ["start"])
     ck("안 떠 있고 큐도 비면 무동작", _rig([], None) == [])
+    ck("빈 집합끼리 같으면 죽었어도 무동작", _rig([], set()) == [])
     ck("감시 꺼져 있으면 무동작",
        _rig(["샤넬"], {"구찌"}, running_supervisor=False) == [])
     # 인스턴스 속성으로 덮어쓴 메서드는 지워서 클래스 구현으로 되돌린다.
@@ -284,6 +318,45 @@ if _win is not None:
     ck("대기열도 비면 표를 건드리지 않는다", _kept == 3, f"{_kept}행")
     ck("경로 열 추가", getattr(_win, "alertTable", None) is not None
        and _win.alertTable.columnCount() == 5)
+
+    # ── 첫 실행에서 서버에 이미 있는 키워드를 앱 슬롯으로 인정한다 ──
+    # routes 파일이 없으면 라우터는 used=0 으로 본다. 그대로 두면 이미 꽉 찬
+    # 서버 한도에 계속 등록을 시도하고 전부 스윕으로 밀린다.
+    import tempfile as _tf
+    from daangn_ext.keyword_router import KeywordRouter as _KR
+    from daangn_ext.sweep_queue import SweepQueue as _SQ
+
+    class _NoFleet:
+        def register_all(self, *a, **k):
+            raise AssertionError("씨딩은 네트워크를 쓰면 안 된다")
+
+    _dS = _tf.mkdtemp()
+    _rS = _KR(_NoFleet(), _SQ(os.path.join(_dS, "q.json")), slot_cap=30,
+              routes_fp=os.path.join(_dS, "routes.json"))
+    _svr, _svq = _win._router, _win._sweep_queue
+    _win._router = _rS
+    _win._sweep_queue = _FakeQueue([])
+    _win.alertLog.clear()
+    _win._alert_populate({"user_keywords": [{"keyword": "샤넬", "id": 1},
+                                            {"keyword": "루이비통", "id": 2}]})
+    _cap = _rS.capacity()
+    ck("첫 실행에 서버 등록분을 슬롯으로 인식", _cap["used"] == 2, str(_cap))
+    ck("씨딩 사실을 로그에 남긴다",
+       "앱 슬롯으로 인식" in _win.alertLog.toPlainText(),
+       _win.alertLog.toPlainText().strip()[:100])
+    ck("표의 경로가 '-' 가 아니다",
+       _win.alertTable.item(0, 1).text() != "-",
+       _win.alertTable.item(0, 1).text())
+    # 두 번째 그리기는 씨딩하지 않는다
+    _win.alertLog.clear()
+    _win._alert_populate({"user_keywords": [{"keyword": "에르메스", "id": 3}]})
+    ck("두 번째 그리기는 씨딩 안 함", _rS.capacity()["used"] == 2,
+       str(_rS.capacity()))
+    ck("두 번째는 씨딩 로그 없음",
+       "앱 슬롯으로 인식" not in _win.alertLog.toPlainText())
+    _win._router, _win._sweep_queue = _svr, _svq
+    _win.alertTable.setRowCount(0)
+    _win.alertLog.clear()
     # close() 는 부르지 않는다 — closeEvent 가 모달 확인창을 띄워 offscreen 에서 멈춘다.
 
 # ── 중복 판정(dedupe_new_matches) ──

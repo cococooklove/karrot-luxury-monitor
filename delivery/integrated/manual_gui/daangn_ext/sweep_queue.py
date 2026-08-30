@@ -58,6 +58,20 @@ class SweepQueue:
         self._save()
         return True
 
+    def touch(self, keyword: str, at: int | None = None) -> bool:
+        """대기 시각을 지금으로 밀어 맨 뒤로 보낸다.
+
+        add() 는 이미 있는 키워드에 False 만 돌려주고 at 을 갱신하지 않는다.
+        승격에 실패한 키워드를 그대로 두면 oldest() 머리에 고정돼 뒤의 키워드가
+        승격될 차례를 영영 못 받는다."""
+        keyword = str(keyword)
+        for i in self._items:
+            if i["keyword"] == keyword:
+                i["at"] = int(at if at is not None else time.time())
+                self._save()
+                return True
+        return False
+
     def remove(self, keyword: str) -> bool:
         before = len(self._items)
         self._items = [i for i in self._items if i["keyword"] != str(keyword)]

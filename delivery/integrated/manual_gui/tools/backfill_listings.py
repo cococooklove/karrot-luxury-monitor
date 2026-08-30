@@ -1,7 +1,8 @@
 """auto_seen.db 를 watch 테이블로 한 번 옮긴다.
 
 자동 모니터가 따로 들고 있던 '본 매물' 기록을 매물 표의 단일 진실로 합친다.
-한 번 돌리고 나면 auto_seen.db 와 match_seen.json 은 지워도 된다.
+한 번 돌리고 나면 match_seen.json 은 지워도 된다. auto_seen.db 는 자동
+모니터가 발신 전 중복 판정에 계속 쓰므로 그대로 둔다.
 
     python tools/backfill_listings.py
 """
@@ -66,14 +67,51 @@ def backfill(store, auto_seen_db, match_seen_json, now: int) -> dict:
             store.add_price(aid, now, price)
         out["from_auto"] += 1
 
-    # match_seen.json 은 id 문자열 배열뿐이라 표에 채울 정보가 없다. 행을 만들면
-    # 빈 줄이 생기므로 만들지 않는다 — 중복 알림 방지 역할은 watch 테이블이 한다.
+    # match_seen.json 은 id 배열뿐이라 표에 채울 정보가 없다. 그래도 옮겨야
+    # 한다 — 중복 판정은 컬럼이 아니라 id 만 필요하다. dedupe_new_matches 는
+    # watch 행이 없으면 '처음 보는 매물'로 치므로, 알림만 나가고 행이 없던
+    # 매물(예전 add_from_matches 가 건너뛰던 dead 등급)이 계정 알림함에 남아
+    # 있으면 첫 폴링에 텔레그램·시트로 다시 나간다. 그러고 나서 이 파일을
+    # 지우면 되돌릴 수 없다.
+    #
+    # 값이 없으므로 묘비만 세운다. tier=dead 이고 제목이 비어 있어
+    # listing_display_rows 가 걸러내므로 표에 빈 줄로 뜨지 않는다.
+    ids = []
     if match_seen_json and os.path.exists(match_seen_json):
         try:
             with open(match_seen_json, encoding="utf-8") as f:
-                json.load(f)
+                data = json.load(f)
+            if isinstance(data, dict):
+                data = data.get("seen") or list(data.keys())
+            ids = [str(x) for x in (data or []) if str(x or "").strip()]
         except Exception:
-            pass
+            ids = []
+
+    for aid in ids:
+        if store.get(aid) is not None:
+            out["skipped"] += 1
+            continue
+        store.upsert({
+            "id": aid,
+            "title": "",
+            "region": "",
+            "url": "",
+            "price": 0,
+            "status": aw.STATUS_ONGOING,
+            "republish_count": 0,
+            "published_at": 0,
+            "first_seen": now,
+            "last_check": now,
+            "next_check": 0,
+            "tier": aw.TIER_DEAD,
+            "fail": 0,
+            "keyword": "",
+            "source": "match_seen",
+            "first_price": 0,
+            "last_change": 0,
+            "last_delta": 0,
+        })
+        out["from_match"] += 1
 
     return out
 
@@ -83,8 +121,11 @@ def main() -> int:
     res = backfill(store, "./auto_seen.db", "./data/match_seen.json",
                    int(time.time()))
     print(f"백필 완료: auto_seen {res['from_auto']}건 이관, "
+          f"match_seen {res['from_match']}건 묘비 생성, "
           f"{res['skipped']}건은 이미 있어 건너뜀")
-    print("auto_seen.db 와 data/match_seen.json 은 이제 지워도 됩니다.")
+    print("data/match_seen.json 은 이제 지워도 됩니다.")
+    print("auto_seen.db 는 지우지 마세요 — 자동 모니터가 자기 중복 판정에 "
+          "계속 씁니다(지우면 다시 만들어 채웁니다).")
     store.close()
     return 0
 

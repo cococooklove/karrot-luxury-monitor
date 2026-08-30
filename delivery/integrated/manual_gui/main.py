@@ -122,6 +122,11 @@ def listing_display_rows(rows, now, state_filter="all"):
     from daangn_ext import article_watch as _aw
     out = []
     for r in rows or []:
+        # 중복 판정만을 위한 묘비(백필이 세운 tier=dead·제목 없음)는 보여줄 게
+        # 없다. 걸러내지 않으면 표에 빈 줄로 뜬다. evicted 는 되살아나므로
+        # 여기 해당하지 않는다.
+        if (r.get("tier") or "") == _aw.TIER_DEAD and not (r.get("title") or ""):
+            continue
         state = _aw.state_for(r, now)
         if state_filter in ("new", "down", "ended") and state != state_filter:
             continue
@@ -1876,6 +1881,18 @@ class MainWindow(QMainWindow):
             self.alertLog.append(
                 "[목록] 앱 등록 목록을 못 읽었습니다 — 검색 스윕 대기열만 표시합니다")
         kws = (data or {}).get("user_keywords") or []
+        # 이 브랜치 이전에 일괄등록된 키워드는 routes 파일에 없다. 첫 실행에서
+        # 그걸 인정하지 않으면 라우터는 함대가 비었다고 믿고 이미 꽉 찬 서버
+        # 한도에 계속 등록을 시도한다.
+        if self._router is not None and kws:
+            try:
+                seeded = self._router.seed_from_server(
+                    [k.get("keyword") for k in kws])
+                if seeded:
+                    self.alertLog.append(
+                        f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
+            except Exception as e:
+                self.alertLog.append(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
         routes = self._routes_map()
         self.alertTable.setRowCount(0)
         shown = set()
@@ -2938,10 +2955,17 @@ class MainWindow(QMainWindow):
             if want and not running:
                 self._start_search_sweep()
             return
-        if want == have:
+        if want == have and (running or not want):
             return
-        self.alertLog.append(
-            f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
+        if want == have:
+            # AutoMonitor.run 은 루프 전체를 except 로 감싸므로 치명오류가 나면
+            # 스레드만 조용히 빠진다. _sweep_kws 는 남아 있어 want == have 가
+            # 계속 성립하고, 스윕은 세션 내내 죽은 채로 방치된다.
+            self.alertLog.append(
+                f"[검색스윕] 스레드가 죽어 있음 — 키워드 {len(want)}개로 되살립니다")
+        else:
+            self.alertLog.append(
+                f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
         self._stop_search_sweep()          # _sweep_kws 를 None 으로 되돌린다
         if want:
             self._start_search_sweep()     # 아직 정지 중이면 다음 틱이 이어받는다
