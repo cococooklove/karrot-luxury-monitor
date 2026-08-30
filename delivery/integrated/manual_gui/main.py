@@ -298,6 +298,125 @@ class _AlertWorker(QtCore.QThread):
         except Exception as e:
             self.log.emit(f"[오류] {type(e).__name__}: {e}")
             self.done.emit(None)
+
+
+class _LdListThread(QtCore.QThread):
+    """ldconsole list2 조회 — LDPlayer 가 hang 해도 GUI 가 멈추지 않게 별도 스레드."""
+    rows = QtCore.pyqtSignal(object)
+
+    def __init__(self, console):
+        super().__init__()
+        self._console = console
+
+    def run(self):
+        import ldwin
+        self.rows.emit(ldwin.list_instances(self._console))
+
+
+class _EmbedHost(QtWidgets.QWidget):
+    """LDPlayer 창 하나를 담는 네이티브 호스트 위젯. 크기 변하면 자식 창도 맞춘다."""
+
+    def __init__(self, embedder, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setMinimumSize(360, 480)
+        self._embedder = embedder
+        self.child_hwnd = 0
+
+    def host_hwnd(self):
+        return int(self.winId())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self.child_hwnd:
+            self._embedder.fit(self.child_hwnd, self.width(), self.height())
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if self.child_hwnd:
+            self._embedder.fit(self.child_hwnd, self.width(), self.height())
+
+    def mousePressEvent(self, ev):
+        super().mousePressEvent(ev)
+        if self.child_hwnd:
+            self._embedder.focus(self.child_hwnd)
+
+
+class _ThumbCaptureThread(QtCore.QThread):
+    """인스턴스 창 썸네일 캡처. PrintWindow 는 대상이 hang 하면 같이 멈추므로
+    반드시 워커에서 돌린다(GUI 는 결과가 늦게 올 뿐 얼지 않는다)."""
+    shot = QtCore.pyqtSignal(object)     # (ld index, (w, h, bytes) | None)
+
+    def __init__(self, targets):
+        super().__init__()
+        self._targets = list(targets)    # [(index, hwnd), ...]
+
+    def run(self):
+        import ldwin
+        for idx, hwnd in self._targets:
+            try:
+                self.shot.emit((idx, ldwin.capture(hwnd)))
+            except Exception:
+                self.shot.emit((idx, None))
+
+
+class _InstanceCard(QtWidgets.QFrame):
+    """인스턴스 하나를 나타내는 카드 — 썸네일 + 이름 + 상태. 클릭하면 탭으로 연다."""
+    clicked = QtCore.pyqtSignal(int)
+
+    THUMB_W, THUMB_H = 150, 252
+
+    def __init__(self, index, name, parent=None):
+        super().__init__(parent)
+        self.index = index
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "QFrame { background:#181310; border:1px solid #2A241C; border-radius:10px; }"
+            "QFrame:hover { border:1px solid #F0D48C; }")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(5)
+
+        self.thumb = QtWidgets.QLabel(self)
+        self.thumb.setFixedSize(self.THUMB_W, self.THUMB_H)
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setWordWrap(True)
+        self.thumb.setStyleSheet(
+            "background:#0B0908; border:none; border-radius:6px;"
+            "color:#6E6555; font-size:12px;")
+        self.thumb.setText("화면 불러오는 중…")
+
+        self.title = QtWidgets.QLabel(name, self)
+        self.title.setStyleSheet("border:none; color:#EDE3CE; font-weight:700; font-size:13px;")
+        self.title.setToolTip(f"{name} (index {index})")
+        self.state = QtWidgets.QLabel("", self)
+        self.state.setStyleSheet("border:none; color:#8C8271; font-size:11px;")
+
+        lay.addWidget(self.thumb); lay.addWidget(self.title); lay.addWidget(self.state)
+
+    def set_frame(self, pixmap):
+        if pixmap is None:
+            self.thumb.setText("화면 캡처 불가 — 클릭하면 탭에서 직접 볼 수 있음")
+            return
+        self.thumb.setPixmap(pixmap.scaled(
+            self.THUMB_W, self.THUMB_H,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+    def set_state(self, text, attached):
+        self.state.setText(text)
+        self.state.setStyleSheet(
+            "border:none; font-size:11px; color:%s;" % ("#F0D48C" if attached else "#8C8271"))
+        self.setStyleSheet(
+            "QFrame { background:#181310; border-radius:10px; border:1px solid %s; }"
+            "QFrame:hover { border:1px solid #F0D48C; }"
+            % ("#F0D48C" if attached else "#2A241C"))
+
+    def mouseReleaseEvent(self, ev):
+        super().mouseReleaseEvent(ev)
+        if ev.button() == Qt.MouseButton.LeftButton and self.rect().contains(ev.pos()):
+            self.clicked.emit(self.index)
+
+
 from PyQt6.QtGui import (
     QCloseEvent,
     QFontDatabase,
@@ -316,61 +435,62 @@ from openpyxl import load_workbook
 # base #0E0C0A · surface #1A1613 · input #221C16 · border #2E2720
 # gold #C6A968 (bright #D4B978 / deep #A88C52) · ivory #EDE6D8 · muted #A99D89
 APP_QSS = """
-* { font-family: 'Pretendard', '.AppleSystemUIFont', 'Apple SD Gothic Neo', 'Malgun Gothic', Helvetica; font-size: 13px; color: #C9BFAD; }
+* { font-family: 'Pretendard', '.AppleSystemUIFont', 'Apple SD Gothic Neo', 'Malgun Gothic', Helvetica; font-size: 14px; font-weight: 500; color: #E3DACA; }
 QMainWindow, QWidget { background: #100D0A; }
-QToolTip { background:#221C16; color:#EDE6D8; border:1px solid #4A3F2E; padding:7px 10px; border-radius:8px; }
+QToolTip { background:#221C16; color:#F2ECE0; border:1px solid #5A4E37; padding:7px 10px; border-radius:8px; font-size:14px; }
 
 #brandBar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #17130E, stop:1 #100D0A); border-bottom: 1px solid #3A3225; }
 
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar { qproperty-drawBase: 0; left: 18px; }
-QTabBar::tab { background: transparent; color: #8A7F6C; padding: 11px 20px; margin-right: 4px; margin-top: 8px; border: none; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 700; }
+QTabBar::tab { background: transparent; color: #B3A88F; padding: 11px 20px; margin-right: 4px; margin-top: 8px; border: none; border-bottom: 2px solid transparent; font-size: 16px; font-weight: 700; }
 QTabBar::tab:selected { color: #D4B978; border-bottom: 2px solid #C6A968; }
-QTabBar::tab:hover:!selected { color: #B8AC94; }
+QTabBar::tab:hover:!selected { color: #DCD2BC; }
 
-QLabel { color: #A99D89; background: transparent; }
+QLabel { color: #CFC5B0; background: transparent; }
 
-QLineEdit, QSpinBox, QComboBox { background: #221C16; border: 1.5px solid #2E2720; border-radius: 11px; padding: 8px 13px; color: #EDE6D8; font-size: 14px; min-height: 24px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { background: #2A231B; border: 1.5px solid #C6A968; }
-QLineEdit::placeholder { color: #6E6656; }
-QComboBox QAbstractItemView { background: #221C16; color: #EDE6D8; border: 1px solid #4A3F2E; border-radius: 10px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; outline: none; padding: 4px; }
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #221C16; border: 1.5px solid #3A3225; border-radius: 11px; padding: 8px 13px; color: #F2ECE0; font-size: 15px; min-height: 24px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { background: #2A231B; border: 1.5px solid #C6A968; }
+QLineEdit::placeholder { color: #948B77; }
+QComboBox QAbstractItemView { background: #221C16; color: #F2ECE0; border: 1px solid #5A4E37; border-radius: 10px; font-size: 15px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; outline: none; padding: 4px; }
 QComboBox::drop-down { border: none; width: 22px; }
-QSpinBox::up-button, QSpinBox::down-button { width: 16px; border: none; background: transparent; }
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 16px; border: none; background: transparent; }
 
-QPushButton { background: #221C16; color: #C9BFAD; border: 1px solid #37301F; border-radius: 11px; padding: 9px 15px; font-weight: 700; font-size: 13px; min-height: 22px; }
-QPushButton:hover { background: #2C2519; border-color: #C6A968; color: #EDE6D8; }
+QPushButton { background: #221C16; color: #E8DFCC; border: 1px solid #473E2B; border-radius: 11px; padding: 9px 15px; font-weight: 700; font-size: 14px; min-height: 22px; }
+QPushButton:hover { background: #2C2519; border-color: #C6A968; color: #FAF5EA; }
 QPushButton:pressed { background: #1C1710; }
-QPushButton:disabled { color: #5C5445; border-color: #241E17; background: #17130E; }
-QPushButton#startBtn, QPushButton#autoStartBtn { border: none; color: #1A1409; padding: 10px 24px; font-size: 14px; font-weight: 800;
+QPushButton:disabled { color: #7E7563; border-color: #2A231B; background: #17130E; }
+QPushButton#startBtn, QPushButton#autoStartBtn { border: none; color: #14100A; padding: 10px 24px; font-size: 15px; font-weight: 800;
   background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #D9BE82, stop:1 #C0A05F); }
 QPushButton#startBtn:hover, QPushButton#autoStartBtn:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E6CB8E, stop:1 #CBAB68); }
 QPushButton#startBtn:pressed, QPushButton#autoStartBtn:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #C0A05F, stop:1 #A88C52); }
 
-QCheckBox { color: #A99D89; spacing: 8px; font-size: 14px; min-height: 24px; background: transparent; }
+QCheckBox { color: #CFC5B0; spacing: 8px; font-size: 15px; min-height: 24px; background: transparent; }
 QCheckBox::indicator { width: 19px; height: 19px; border: 1.5px solid #4A3F2E; border-radius: 6px; background: #221C16; }
 QCheckBox::indicator:checked { background: #C6A968; border-color: #C6A968; image: none; }
 QCheckBox::indicator:hover { border-color: #C6A968; }
 
-QGroupBox { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1D1812, stop:1 #17130E); border: 1px solid #2E2720; border-radius: 16px; margin-top: 18px; padding: 22px 18px 16px 18px; font-size: 15px; font-weight: 800; color: #E7C77E; }
+QGroupBox { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1D1812, stop:1 #17130E); border: 1px solid #2E2720; border-radius: 16px; margin-top: 18px; padding: 22px 18px 16px 18px; font-size: 16px; font-weight: 800; color: #F0D48C; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; top: 2px; padding: 0 6px; letter-spacing: 1px; }
 
-QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #14100C; border: 1px solid #2A231B; border-radius: 13px; padding: 4px; font-size: 13px; color: #C9BFAD; }
+QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #14100C; border: 1px solid #2A231B; border-radius: 13px; padding: 4px; font-size: 14px; color: #E3DACA; }
 QTreeWidget::item, QListWidget::item { padding: 6px 4px; border-radius: 8px; }
-QTreeWidget::item:selected, QListWidget::item:selected { background: #2E2417; color: #E7C77E; }
+QTreeWidget::item:selected, QListWidget::item:selected { background: #33291A; color: #F0D48C; }
 QTreeWidget::item:hover, QListWidget::item:hover { background: #1C1710; }
 
 QTableWidget { gridline-color: #241E17; }
-QTableWidget::item { padding: 9px 6px; color: #D6CDBB; }
-QTableWidget::item:selected { background: #2E2417; color: #F5EFE2; }
-QHeaderView::section { background: #14100C; color: #9C8F6E; padding: 11px 8px; border: none; border-bottom: 1.5px solid #C6A968; font-weight: 700; font-size: 11px; letter-spacing: 1px; }
+QTableWidget::item { padding: 9px 6px; color: #E6DDCB; }
+QTableWidget::item:selected { background: #33291A; color: #FAF5EA; }
+QHeaderView::section { background: #14100C; color: #D3C295; padding: 11px 8px; border: none; border-bottom: 1.5px solid #C6A968; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
 QTableCornerButton::section { background: #14100C; border: none; }
 
-QProgressBar { background: #241E17; border: 1px solid #2E2720; border-radius: 7px; min-height: 22px; max-height: 22px; color: #EDE6D8; font-weight: 800; font-size: 11px; letter-spacing: 1px; text-align: center; }
+QProgressBar { background: #241E17; border: 1px solid #2E2720; border-radius: 7px; min-height: 24px; max-height: 24px; color: #F5EFE2; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; text-align: center; }
 QProgressBar::chunk { border-radius: 6px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #A88C52, stop:1 #E6CB8E); }
 
 QScrollArea { border: none; background: transparent; }
 QSplitter::handle { background: transparent; }
-QStatusBar { background: #0C0A08; color: #8A7F6C; border-top: 1px solid #241E17; }
+QStatusBar { background: #0C0A08; color: #BCB19B; border-top: 1px solid #241E17; font-size: 13px; }
 QStatusBar::item { border: none; }
 
 QDialog { background: #14100C; }
@@ -492,15 +612,18 @@ class MainWindow(QMainWindow):
         self.auto_monitor = None
         self.tabs.addTab(self._scroll(self._build_auto_tab()), "자동 모니터")
         self.tabs.addTab(self._scroll(self._build_alert_tab()), "키워드 알림")
+        # 에뮬레이터는 실제 창을 끼워넣으므로 스크롤로 감싸지 않는다(크기 = 탭 영역).
+        self.tabs.addTab(self._build_emul_tab(), "에뮬레이터")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         # 명품 브랜드 헤더(골드 워드마크) + 탭
         central = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(central); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
         header = QtWidgets.QWidget(); header.setObjectName("brandBar")
         hl = QtWidgets.QHBoxLayout(header); hl.setContentsMargins(26, 15, 26, 13); hl.setSpacing(14)
         brand = QtWidgets.QLabel("❖  L U X E")
-        brand.setStyleSheet("color:#E7C77E; font-size:21px; font-weight:800; letter-spacing:5px;")
+        brand.setStyleSheet("color:#F0D48C; font-size:22px; font-weight:800; letter-spacing:5px;")
         sub = QtWidgets.QLabel("명품 실시간 모니터")
-        sub.setStyleSheet("color:#8A7F6C; font-size:12px; letter-spacing:3px; padding-top:6px;")
+        sub.setStyleSheet("color:#B3A88F; font-size:13px; letter-spacing:3px; padding-top:6px;")
         hl.addWidget(brand); hl.addWidget(sub); hl.addStretch(1)
         cl.addWidget(header); cl.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
@@ -525,6 +648,347 @@ class MainWindow(QMainWindow):
         sa.setWidget(inner)
         return sa
 
+    # ── 에뮬레이터 탭 (LDPlayer 인스턴스를 한 화면에서) ────────────────
+    # LDPlayer 는 인스턴스마다 독립 창을 띄우고 탭 UI 가 없다. 계정이 늘면
+    # 창이 화면을 뒤덮는다. 그래서:
+    #   1) 안 보는 인스턴스 창은 화면 밖으로 치워 둔다(프로세스는 계속 동작)
+    #   2) 왼쪽에 인스턴스 썸네일 그리드 — 100개도 한 화면에서 훑는다
+    #   3) 카드를 누른 것만 오른쪽에 탭으로 부착해 직접 조작
+    # 전부 부착하지 않는 이유: 앱이 죽으면 자식 창이 같이 파괴되므로 노출을
+    # 실제로 보고 있는 몇 개로 제한한다.
+    EMUL_MAX_ATTACH = 4          # 동시에 탭으로 여는 최대 인스턴스
+    EMUL_THUMB_BATCH = 6         # 한 틱에 캡처할 인스턴스 수(라운드로빈)
+
+    def _build_emul_tab(self):
+        import ldwin
+        self._ldwin = ldwin
+        self._emul = ldwin.Embedder()
+        self._emul_hosts = {}            # ld index -> _EmbedHost (부착됨)
+        self._emul_cards = {}            # ld index -> _InstanceCard
+        self._emul_live = {}             # ld index -> 마지막 스캔 행
+        self._emul_order = []            # 부착 순서(초과 시 가장 오래된 것부터 뗌)
+        self._emul_thread = None
+        self._emul_thumb_thread = None
+        self._emul_thumb_cursor = 0
+        self._emul_rescued = False
+        self._emul_closing = False
+        self._emul_console = ldwin.find_console()
+
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(12, 10, 12, 10); v.setSpacing(8)
+
+        bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
+        self.emulStatus = QtWidgets.QLabel("확인 중…")
+        self.emulStatus.setStyleSheet("color:#C4B79A; font-size:13px;")
+        self.emulStowChk = QtWidgets.QCheckBox("안 보는 창 치우기", w)
+        self.emulStowChk.setChecked(True)
+        self.emulStowChk.setToolTip(
+            "탭으로 열지 않은 인스턴스 창을 화면 밖으로 보내 작업표시줄에서도 감춘다.\n"
+            "인스턴스는 그대로 돌아가고 썸네일도 계속 갱신된다. 끄면 원래 자리로 복귀.")
+        self.emulStowChk.toggled.connect(self._emul_stow_toggled)
+        self.emulRefreshBtn = QtWidgets.QPushButton("새로고침", w)
+        self.emulRefreshBtn.clicked.connect(lambda: self._emul_scan())
+        self.emulCloseAllBtn = QtWidgets.QPushButton("열린 탭 모두 닫기", w)
+        self.emulCloseAllBtn.clicked.connect(self._emul_detach_all)
+        for b in (self.emulRefreshBtn, self.emulCloseAllBtn):
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
+                            QtWidgets.QSizePolicy.Policy.Fixed)
+        bar.addWidget(self.emulStatus); bar.addStretch(1)
+        bar.addWidget(self.emulStowChk); bar.addWidget(self.emulRefreshBtn)
+        bar.addWidget(self.emulCloseAllBtn)
+        v.addLayout(bar)
+
+        split = QtWidgets.QSplitter(Qt.Orientation.Horizontal, w)
+
+        # 좌: 인스턴스 썸네일 그리드
+        left = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(6)
+        cap = QtWidgets.QLabel("인스턴스 — 클릭하면 오른쪽 탭으로 열림")
+        cap.setStyleSheet("color:#F0D48C; font-weight:800; font-size:14px;")
+        lv.addWidget(cap)
+        gridHost = QtWidgets.QWidget()
+        self.emulGrid = QtWidgets.QGridLayout(gridHost)
+        self.emulGrid.setContentsMargins(0, 0, 0, 0); self.emulGrid.setSpacing(10)
+        self.emulGrid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.emulEmpty = QtWidgets.QLabel(
+            "실행 중인 LDPlayer 인스턴스가 없습니다.\n"
+            "자동 수확/모니터가 인스턴스를 부팅하면 여기 나타납니다.")
+        self.emulEmpty.setWordWrap(True)
+        self.emulEmpty.setStyleSheet("color:#8C8271; font-size:13px;")
+        self.emulGrid.addWidget(self.emulEmpty, 0, 0, 1, 2)
+        sa = QtWidgets.QScrollArea(); sa.setWidgetResizable(True); sa.setWidget(gridHost)
+        sa.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        lv.addWidget(sa, 1)
+        split.addWidget(left)
+
+        # 우: 부착된 인스턴스 탭
+        right = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
+        self.emulTabs = QtWidgets.QTabWidget(right)
+        self.emulTabs.setDocumentMode(True)
+        self.emulTabs.setTabsClosable(True)
+        self.emulTabs.tabCloseRequested.connect(self._emul_tab_closed)
+        self.emulHint = QtWidgets.QLabel(
+            "왼쪽 카드를 클릭하면 그 인스턴스 화면이 여기 탭으로 붙습니다 "
+            f"(동시 최대 {self.EMUL_MAX_ATTACH}개).")
+        self.emulHint.setWordWrap(True)
+        self.emulHint.setStyleSheet("color:#8C8271; font-size:13px;")
+        rv.addWidget(self.emulHint)
+        rv.addWidget(self.emulTabs, 1)
+        split.addWidget(right)
+
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
+        split.setSizes([360, 820])
+        v.addWidget(split, 1)
+
+        # 목록 스캔은 다른 탭에 있어도 계속 — 새로 뜬 창을 바로 치워야 하니까.
+        self._emul_timer = QtCore.QTimer(self)
+        self._emul_timer.setInterval(8000)
+        self._emul_timer.timeout.connect(lambda: self._emul_scan())
+        # 썸네일은 이 탭을 보고 있을 때만.
+        self._emul_thumb_timer = QtCore.QTimer(self)
+        self._emul_thumb_timer.setInterval(3000)
+        self._emul_thumb_timer.timeout.connect(self._emul_thumb_tick)
+
+        if not ldwin.IS_WINDOWS:
+            self.emulStatus.setText("Windows 전용 기능입니다.")
+            for c in (self.emulRefreshBtn, self.emulCloseAllBtn, self.emulStowChk):
+                c.setEnabled(False)
+        elif not self._emul_console:
+            self.emulStatus.setText("ldconsole.exe 를 못 찾음 — LDPlayer 설치경로 확인")
+        else:
+            self._emul_timer.start()
+            QtCore.QTimer.singleShot(0, lambda: self._emul_scan())
+        return w
+
+    def _on_tab_changed(self, i):
+        """에뮬레이터 탭을 보고 있을 때만 썸네일을 캡처한다(불필요한 부하 방지)."""
+        if not hasattr(self, "emulTabs"):
+            return
+        if self.tabs.tabText(i) == "에뮬레이터":
+            self._emul_scan()
+            self._emul_thumb_tick()
+            self._emul_thumb_timer.start()
+        else:
+            self._emul_thumb_timer.stop()
+
+    # -- 스캔 ---------------------------------------------------------------
+    def _emul_scan(self):
+        if not getattr(self, "_emul_console", None) or not self._ldwin.IS_WINDOWS:
+            return
+        if self._emul_thread is not None and self._emul_thread.isRunning():
+            return
+        t = _LdListThread(self._emul_console)
+        t.rows.connect(self._emul_apply)
+        self._emul_thread = t
+        t.start()
+
+    def _emul_apply(self, rows):
+        """스캔 반영 — 카드 동기화, 창 치우기 정책 적용, 죽은 인스턴스 정리."""
+        if getattr(self, "_emul_closing", True):   # 종료 중 도착한 신호는 무시
+            return
+        ld = self._ldwin
+        live = {r["index"]: r for r in rows
+                if r["running"] and r["top_hwnd"] and ld.is_window(r["top_hwnd"])}
+
+        if not self._emul_rescued:
+            # 지난 세션이 크래시로 죽었으면 화면 밖에 창이 남아 있다 — 되살린다.
+            self._emul_rescued = True
+            n = sum(1 for r in live.values() if ld.rescue(r["top_hwnd"]))
+            if n:
+                print(f"[에뮬레이터] 이전 세션이 남긴 창 {n}개 복구")
+        self._emul_live = live
+
+        changed = False
+        for idx, host in list(self._emul_hosts.items()):
+            r = live.get(idx)
+            if r is None or r["top_hwnd"] != host.child_hwnd:
+                self._emul_detach(idx, restow=False)
+        for idx in list(self._emul_cards):
+            if idx not in live:
+                card = self._emul_cards.pop(idx)
+                card.setParent(None); card.deleteLater()
+                changed = True
+        for idx in sorted(live):
+            if idx in self._emul_cards:
+                continue
+            r = live[idx]
+            card = _InstanceCard(idx, r.get("title") or r["name"] or f"인스턴스 {idx}")
+            card.clicked.connect(self._emul_card_clicked)
+            self._emul_cards[idx] = card
+            changed = True
+        if changed:
+            self._emul_relayout()
+
+        if self.emulStowChk.isChecked():
+            for idx, r in live.items():
+                if idx not in self._emul_hosts:
+                    self._emul.stow(r["top_hwnd"])
+        self._emul.prune()
+        self._emul_sync_states()
+
+    def _emul_relayout(self):
+        """카드 그리드 재배치 — 2열 고정(카드 폭이 고정이라 열 수도 고정)."""
+        while self.emulGrid.count():
+            self.emulGrid.takeAt(0)
+        if not self._emul_cards:
+            self.emulEmpty.setVisible(True)
+            self.emulGrid.addWidget(self.emulEmpty, 0, 0, 1, 2)
+            return
+        self.emulEmpty.setVisible(False)
+        for n, idx in enumerate(sorted(self._emul_cards)):
+            card = self._emul_cards[idx]
+            self.emulGrid.addWidget(card, n // 2, n % 2)
+            card.setVisible(True)
+
+    def _emul_sync_states(self):
+        for idx, card in self._emul_cards.items():
+            if idx in self._emul_hosts:
+                card.set_state("탭에서 보는 중", True)
+            elif self.emulStowChk.isChecked():
+                card.set_state("동작 중 · 창 치움", False)
+            else:
+                card.set_state("동작 중", False)
+        self.emulHint.setVisible(not self._emul_hosts)
+        self.emulStatus.setText(
+            f"인스턴스 {len(self._emul_live)}개 · 탭 {len(self._emul_hosts)}"
+            f"/{self.EMUL_MAX_ATTACH}개")
+
+    # -- 부착/분리 -----------------------------------------------------------
+    def _emul_card_clicked(self, idx):
+        host = self._emul_hosts.get(idx)
+        if host is not None:
+            self.emulTabs.setCurrentWidget(host)     # 이미 열려 있으면 그 탭으로
+            return
+        self._emul_attach(idx)
+
+    def _emul_attach(self, idx):
+        r = self._emul_live.get(idx)
+        if r is None:
+            return
+        while len(self._emul_order) >= self.EMUL_MAX_ATTACH:
+            self._emul_detach(self._emul_order[0])    # 가장 오래된 탭부터 정리
+
+        host = _EmbedHost(self._emul, self.emulTabs)
+        pos = self.emulTabs.addTab(host, r.get("title") or r["name"]
+                                   or f"인스턴스 {idx}")
+        host.child_hwnd = r["top_hwnd"]
+        ok = self._emul.embed(r["top_hwnd"], host.host_hwnd(),
+                              max(host.width(), 1), max(host.height(), 1))
+        if not ok:
+            host.child_hwnd = 0
+            self.emulTabs.removeTab(pos)
+            host.deleteLater()
+            self.emulStatus.setText(f"인스턴스 {idx} 화면 부착 실패 — 창이 사라졌을 수 있음")
+            return
+        self._emul_hosts[idx] = host
+        self._emul_order.append(idx)
+        self.emulTabs.setCurrentIndex(pos)
+        self._emul_sync_states()
+
+    def _emul_detach(self, idx, restow=True):
+        """탭을 닫고 창을 원래 top-level 로 복구. 정책이 켜져 있으면 다시 치운다."""
+        host = self._emul_hosts.pop(idx, None)
+        if idx in self._emul_order:
+            self._emul_order.remove(idx)
+        if host is None:
+            return
+        hwnd, host.child_hwnd = host.child_hwnd, 0
+        self._emul.release(hwnd)
+        pos = self.emulTabs.indexOf(host)
+        if pos >= 0:
+            self.emulTabs.removeTab(pos)
+        host.deleteLater()
+        if restow and self.emulStowChk.isChecked():
+            self._emul.stow(hwnd)
+        self._emul_sync_states()
+
+    def _emul_tab_closed(self, pos):
+        w = self.emulTabs.widget(pos)
+        for idx, host in list(self._emul_hosts.items()):
+            if host is w:
+                self._emul_detach(idx)
+                return
+
+    def _emul_detach_all(self):
+        for idx in list(self._emul_order):
+            self._emul_detach(idx)
+
+    def _emul_stow_toggled(self, on):
+        if on:
+            for idx, r in self._emul_live.items():
+                if idx not in self._emul_hosts:
+                    self._emul.stow(r["top_hwnd"])
+        else:
+            self._emul.unstow_all()
+        self._emul_sync_states()
+
+    # -- 썸네일 --------------------------------------------------------------
+    def _emul_thumb_tick(self):
+        """부착 안 된 인스턴스를 라운드로빈으로 캡처. 100개여도 한 틱 부하는 고정."""
+        if self._emul_thumb_thread is not None and self._emul_thumb_thread.isRunning():
+            return
+        pending = [i for i in sorted(self._emul_cards) if i not in self._emul_hosts]
+        if not pending:
+            return
+        n = len(pending)
+        start = self._emul_thumb_cursor % n
+        take = [pending[(start + k) % n] for k in range(min(self.EMUL_THUMB_BATCH, n))]
+        self._emul_thumb_cursor = (start + len(take)) % n
+
+        targets = [(i, self._emul_live[i]["top_hwnd"]) for i in take
+                   if i in self._emul_live]
+        if not targets:
+            return
+        t = _ThumbCaptureThread(targets)
+        t.shot.connect(self._emul_thumb_ready)
+        self._emul_thumb_thread = t
+        t.start()
+
+    def _emul_thumb_ready(self, payload):
+        if self._emul_closing:
+            return
+        idx, shot = payload
+        card = self._emul_cards.get(idx)
+        if card is None:
+            return
+        if not shot:
+            card.set_frame(None)
+            return
+        w, h, raw = shot
+        img = QtGui.QImage(raw, w, h, w * 4,
+                           QtGui.QImage.Format.Format_RGB32).copy()
+        card.set_frame(QtGui.QPixmap.fromImage(img))
+
+    # -- 종료 ---------------------------------------------------------------
+    def _emul_shutdown(self):
+        """붙여둔 창은 원래대로, 치워둔 창은 화면으로. 안 하면 부모와 함께
+        파괴되거나 화면 밖에 남아 사용자가 찾을 수 없게 된다."""
+        self._emul_closing = True        # 늦게 도착하는 워커 신호를 전부 무시
+        for name in ("_emul_timer", "_emul_thumb_timer"):
+            t = getattr(self, name, None)
+            if t is not None:
+                t.stop()
+        # 워커부터 세운 뒤 상태를 비운다(정리된 위젯을 늦은 신호가 건드리지 않게).
+        for name in ("_emul_thread", "_emul_thumb_thread"):
+            t = getattr(self, name, None)
+            if t is not None and t.isRunning() and not t.wait(2000):
+                t.terminate(); t.wait(500)
+        self._emul_hosts = {}
+        self._emul_order = []
+        self._emul_cards = {}
+        self._emul_live = {}
+        emb = getattr(self, "_emul", None)
+        if emb is not None:
+            try:
+                emb.release_all()
+                emb.unstow_all()
+            except Exception as e:
+                print(f"[에뮬레이터] 창 복구 실패: {type(e).__name__}: {e}")
+
     # ── 키워드 알림 탭 ─────────────────────────────────────────────
     def _build_alert_tab(self):
         w = QtWidgets.QWidget()
@@ -539,13 +1003,13 @@ class MainWindow(QMainWindow):
         self.dashHealth = QtWidgets.QLabel("상태 확인 중…")
         self.dashHealth.setWordWrap(True)
         self.dashHealth.setStyleSheet(
-            "font-size:13px; font-weight:600; padding:8px 10px; border-radius:8px;"
-            "background:#221C16; color:#D6CDBB; border:1px solid #2E2720;")
+            "font-size:14px; font-weight:700; padding:8px 10px; border-radius:8px;"
+            "background:#221C16; color:#E6DDCB; border:1px solid #3A3225;")
         self.dashAccounts = QtWidgets.QLabel("계정: - (집계 전)")
         self.dashCoverage = QtWidgets.QLabel("커버리지: - ")
         self.dashBar = QtWidgets.QProgressBar(); self.dashBar.setRange(0, 100); self.dashBar.setValue(0)
         self.dashBar.setFormat("전국 커버 %p%")
-        self.dashBar.setFixedHeight(22)            # 높이 붕괴 방지(라벨 사이 끼임 깨짐 수정)
+        self.dashBar.setFixedHeight(26)            # 높이 붕괴 방지(라벨 사이 끼임 깨짐 수정)
         self.dashBar.setTextVisible(True)
         dl.setSpacing(8)
         self.dashCadence = QtWidgets.QLabel("폴링 주기: -")
@@ -893,8 +1357,8 @@ class MainWindow(QMainWindow):
         self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
         bg = "#3A211C" if not tok_ok else "#221C16"
         self.dashHealth.setStyleSheet(
-            "font-size:13px; font-weight:600; padding:8px 10px; border-radius:8px;"
-            f"background:{bg}; color:#D6CDBB; border:1px solid #2E2720;")
+            "font-size:14px; font-weight:700; padding:8px 10px; border-radius:8px;"
+            f"background:{bg}; color:#E6DDCB; border:1px solid #3A3225;")
         self._refresh_watch_panel()
 
     def _refresh_watch_panel(self):
@@ -919,7 +1383,7 @@ class MainWindow(QMainWindow):
         dlg.resize(760, 560)
         lay = QtWidgets.QVBoxLayout(dlg)
         summ = QtWidgets.QLabel("")
-        summ.setStyleSheet("font-weight:700; padding:6px 4px; color:#E7C77E;")
+        summ.setStyleSheet("font-weight:700; font-size:15px; padding:6px 4px; color:#F0D48C;")
         lay.addWidget(summ)
         cols = ["계정", "동네", "만료(분)", "핵심", "실패", "상태"]
         tbl = QtWidgets.QTableWidget(0, len(cols), dlg)
@@ -1423,7 +1887,7 @@ class MainWindow(QMainWindow):
         if cov is None:
             return
         KOREA_DONG = 3500            # 전국 행정동 대략
-        AVG_RANGE = 39              # 계정당 커버 지역(역삼동 기준)
+        AVG_RANGE = 78              # 계정당 커버 지역(39지역 x 인증동네 2곳)
         codes = {c[0] for c in cov}
         n_acc = len(codes)
         dongs = {(c[0], c[1]) for c in cov}         # 계정×동네
@@ -1633,7 +2097,7 @@ class MainWindow(QMainWindow):
 
         # 상태 + 진행바
         self.autoStatus = QtWidgets.QLabel("대기 중", w)
-        self.autoStatus.setStyleSheet("color:#9C8F6E;")
+        self.autoStatus.setStyleSheet("color:#C4B79A; font-size:14px;")
         self.autoProgress = QtWidgets.QProgressBar(w)
         self.autoProgress.setRange(0, 0); self.autoProgress.setVisible(False)
         self.autoProgress.setMaximumHeight(6); self.autoProgress.setTextVisible(False)
@@ -1652,7 +2116,7 @@ class MainWindow(QMainWindow):
         self.autoTable.itemSelectionChanged.connect(self.on_auto_row_selected)
         self.autoTable.setMinimumHeight(340)
         self._auto_rows = []
-        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#E7C77E; font-size:15px; letter-spacing:1px;")
+        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#F0D48C; font-size:16px; letter-spacing:1px;")
         lay.addWidget(rl0)
         lay.addWidget(self.autoTable, 1)
 
@@ -1741,7 +2205,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QtWidgets.QLabel("신규/가격변동 매물을 텔레그램·구글시트로 알림. 설정은 notify.json 에 저장됩니다.", dlg),
                     0, Qt.AlignmentFlag.AlignLeft)
         result = QtWidgets.QLabel("", dlg); result.setWordWrap(True)
-        result.setStyleSheet("color:#9C8F6E;")
+        result.setStyleSheet("color:#C4B79A; font-size:14px;")
         v.addWidget(result)
 
         bb = QtWidgets.QHBoxLayout()
@@ -1762,7 +2226,7 @@ class MainWindow(QMainWindow):
                 result.setText("⚠️ 텔레그램(토큰+방) 또는 구글시트 주소를 먼저 입력하세요.")
                 return
             test.setEnabled(False); test.setText("보내는 중…")
-            result.setStyleSheet("color:#9C8F6E;")
+            result.setStyleSheet("color:#C4B79A; font-size:14px;")
             result.setText("전송 시도 중…")
             # 부모는 MainWindow — 다이얼로그가 먼저 닫혀도 실행 중 스레드가 삭제되지 않게
             self._notify_test = NotifyTestThread(self, cur)
@@ -1785,7 +2249,7 @@ class MainWindow(QMainWindow):
                     lines.append(("✅ 구글시트: " if res["sheet_ok"] else "❌ 구글시트: ")
                                  + res["sheet_msg"])
                 bad = (cur["tg_token"] and not res["tg_ok"]) or res["sheet_ok"] is False
-                result.setStyleSheet("color:#D98A7A;" if bad else "color:#A9C6A0;")
+                result.setStyleSheet("color:#EFA394;" if bad else "color:#BCDCB2;")
                 result.setText("\n".join(lines) or "테스트할 항목 없음")
                 test.setEnabled(True); test.setText("테스트 발송")
             self._notify_test.result.connect(done)
@@ -2198,9 +2662,9 @@ class MainWindow(QMainWindow):
         """상태바 우측 상시 표시 — 쓸 수 있는 IP 수 + 현재 요청간격(자동감속 반영).
         차단 대응은 전부 자동이라, 사용자에게 필요한 건 설정이 아니라 **지금 상태**다."""
         self.healthLabel = QtWidgets.QLabel("")
-        self.healthLabel.setStyleSheet("color:#9C8F6E; font-size:12px;")
+        self.healthLabel.setStyleSheet("color:#C4B79A; font-size:13px;")
         self.healthBtn = QtWidgets.QPushButton("진단")
-        self.healthBtn.setFixedHeight(24)
+        self.healthBtn.setFixedHeight(28)
         self.healthBtn.setToolTip(
             "프록시를 IP 당 1회씩 찔러 '지금 막힌 건지, 막혔으면 어디가 문제인지' 판정")
         self.healthBtn.clicked.connect(self.on_health_check_clicked)
@@ -2254,7 +2718,7 @@ class MainWindow(QMainWindow):
         dlg.resize(720, 520)
         v = QtWidgets.QVBoxLayout(dlg)
         head = QtWidgets.QLabel(f"판정: {res['verdict']}")
-        head.setStyleSheet("font-weight:800; font-size:15px; color:#E7C77E; letter-spacing:1px;")
+        head.setStyleSheet("font-weight:800; font-size:16px; color:#F0D48C; letter-spacing:1px;")
         act = QtWidgets.QLabel(f"대응: {res['action']}")
         act.setWordWrap(True)
         v.addWidget(head); v.addWidget(act)
@@ -2324,7 +2788,7 @@ class MainWindow(QMainWindow):
         cl.addWidget(fc)
 
         hdr = QtWidgets.QHBoxLayout()
-        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#E7C77E; font-size:15px; letter-spacing:1px;")
+        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#F0D48C; font-size:16px; letter-spacing:1px;")
         hdr.addWidget(rl0); hdr.addStretch(1)
         cl.addLayout(hdr)
         self.ui.itemListView.setMinimumHeight(360)
@@ -3055,6 +3519,9 @@ class MainWindow(QMainWindow):
             ev.ignore()
             return
 
+        # 임베드한 LDPlayer 창부터 떼어낸다(이후 정리에서 지연/예외가 나도 안전하게).
+        self._emul_shutdown()
+
         if running:
             if not self.controller.is_task_stopping():
                 self.controller.stop_task()
@@ -3219,10 +3686,19 @@ def _run_app():
     _chdir_app_dir()
     _setup_logging()
     try:
+        # 고배율(125·150%) 디스플레이에서 글자가 뭉개지지 않게 — 반올림 없이 실제 배율로 렌더
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
         app = QApplication([])
         app.setWindowIcon(app_icon())   # Dock/작업표시줄/팝업 전부 명품 아이콘
         load_bundled_fonts()
+        _f = app.font()                 # 힌팅 최대 — 다크 배경에서 획이 흐려지는 것 방지
+        _f.setHintingPreference(QtGui.QFont.HintingPreference.PreferFullHinting)
+        _f.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
+        app.setFont(_f)
         window = MainWindow()
+        # closeEvent 를 안 거치는 종료(세션 로그아웃 등)에서도 임베드 창은 되돌린다.
+        app.aboutToQuit.connect(window._emul_shutdown)
         window.show()
         raise SystemExit(app.exec())     # 종료코드 전달(워치독이 정상/크래시 구분)
     except SystemExit:
