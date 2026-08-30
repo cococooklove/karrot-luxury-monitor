@@ -342,13 +342,17 @@ class CrawlThread(QThread):
                             # 있어야 한다(A/B 실측: 교체 6/6 성공 vs 고정 4/6, 중앙값 5.5회 vs 23.5회).
                             # 종전에는 적응형에만 풀을 줘서 일반 검색은 한 IP 로 30회를 두드렸다.
                             pool = self.proxy_manager.proxies or None
+                            # 두 함수는 앞 두 인자 순서가 서로 반대다
+                            # (get_products(area_code, area) / get_products_adaptive(area, area_code)).
+                            # 위치인자로 넘기면 적응형에서 둘이 뒤바뀌어 collect_region 이
+                            # regionId 대신 지역 이름("강남구 역삼동")을 받고 0건이 된다 → 이름으로 넘긴다.
                             products = fn(
-                                area_code,
-                                area_name,
-                                task.keyword,
-                                task.only_tradeable,
-                                task.minimum,
-                                task.maximum,
+                                area_code=area_code,
+                                area=area_name,
+                                keyword=task.keyword,
+                                only_tradeable=task.only_tradeable,
+                                minimum_price=task.minimum,
+                                maximum_price=task.maximum,
                                 proxy=proxy,
                                 access_token=task.access_token,
                                 rule=rule,
