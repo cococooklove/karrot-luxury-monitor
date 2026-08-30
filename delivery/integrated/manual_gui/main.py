@@ -1083,6 +1083,10 @@ class MainWindow(QMainWindow):
             dl.addWidget(wdg)
         v.addWidget(dash)
 
+        self._watch_label = QtWidgets.QLabel("추적 중 0건")
+        self._watch_label.setStyleSheet("color:#C4B79A; font-size:13px;")
+        v.addWidget(self._watch_label)
+
         # 등록 폼
         form = QtWidgets.QGroupBox("키워드 등록"); fl = QtWidgets.QVBoxLayout(form)
         r0 = QtWidgets.QHBoxLayout()
@@ -1170,30 +1174,38 @@ class MainWindow(QMainWindow):
         r3b.addStretch(1)
         v.addLayout(r3b)
 
-        self.matchTable = QtWidgets.QTableWidget(0, 7, w)
-        self.matchTable.setHorizontalHeaderLabels(["사진", "시각", "키워드", "제목", "가격", "지역", "계정"])
-        self.matchTable.verticalHeader().setVisible(False)
-        self.matchTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.matchTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.matchTable.horizontalHeader().setSectionResizeMode(
-            3, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.matchTable.setColumnWidth(0, 64)
-        self.matchTable.setIconSize(QtCore.QSize(56, 56))
-        self.matchTable.verticalHeader().setDefaultSectionSize(60)
-        self.matchTable.setMinimumHeight(260)
-        self.matchTable.itemDoubleClicked.connect(self.on_match_open)
-        v.addWidget(self.matchTable, 1)
-        self._thumb_threads = []
+        # ── 매물 (신규·추적을 한 표에) ──
+        fbar = QtWidgets.QHBoxLayout(); fbar.setSpacing(6)
+        self.listingFilter = QtWidgets.QButtonGroup(w)
+        for i, (key, label) in enumerate(
+                (("all", "전체"), ("new", "🆕 신규"),
+                 ("down", "↓ 인하"), ("ended", "✓ 종료"))):
+            b = QtWidgets.QPushButton(label); b.setCheckable(True)
+            b.setChecked(key == "all")
+            b.setProperty("filterKey", key)
+            self.listingFilter.addButton(b, i)
+            fbar.addWidget(b)
+        fbar.addStretch(1)
+        self.listingFilter.setExclusive(True)
+        self.listingFilter.buttonClicked.connect(
+            lambda _b: self._refresh_listing_table())
+        v.addLayout(fbar)
 
-        # ── 가격 추적 현황 ──
-        watch_box = QtWidgets.QGroupBox("가격 추적")
-        watch_v = QtWidgets.QVBoxLayout(watch_box)
-        self._watch_label = QtWidgets.QLabel("추적 중 0건")
-        self._watch_list = QtWidgets.QListWidget()
-        self._watch_list.setMaximumHeight(140)
-        watch_v.addWidget(self._watch_label)
-        watch_v.addWidget(self._watch_list)
-        v.addWidget(watch_box)
+        self.listingTable = QtWidgets.QTableWidget(0, 8, w)
+        self.listingTable.setHorizontalHeaderLabels(
+            ["상태", "키워드", "제목", "지역", "현재가", "Δ최초가",
+             "마지막변동", "최초감지"])
+        self.listingTable.verticalHeader().setVisible(False)
+        self.listingTable.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.listingTable.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.listingTable.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.listingTable.setMinimumHeight(320)
+        self.listingTable.setSortingEnabled(True)
+        self.listingTable.itemDoubleClicked.connect(self.on_listing_open)
+        v.addWidget(self.listingTable, 1)
 
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
         v.addWidget(self.alertLog)
@@ -1733,37 +1745,12 @@ class MainWindow(QMainWindow):
             return
         new = 0
         new_items = []
-        thumb_jobs = []
         for m in matches:
             key = str(m.get("id") or m.get("article_id") or m.get("title"))
             if key in self._match_seen:
                 continue
             self._match_seen.add(key); new += 1
             new_items.append(m)
-            r = self.matchTable.rowCount(); self.matchTable.insertRow(r)
-            try:
-                ts = _t.strftime("%m/%d %H:%M", _t.localtime(int(m.get("time") or 0)))
-            except Exception:
-                ts = ""
-            # 0=사진(아이콘), URL 은 사진셀 UserRole 에 저장(더블클릭 매물열기)
-            photo = QtWidgets.QTableWidgetItem()
-            photo.setData(QtCore.Qt.ItemDataRole.UserRole, m.get("url") or "")
-            self.matchTable.setItem(r, 0, photo)
-            if m.get("image"):
-                thumb_jobs.append((photo, m.get("image")))
-            vals = [ts, m.get("keyword") or "", (m.get("title") or "")[:60],
-                    str(m.get("price") or ""), m.get("region") or "", m.get("_account") or ""]
-            for c, val in enumerate(vals, start=1):
-                cell = QtWidgets.QTableWidgetItem(val)
-                self.matchTable.setItem(r, c, cell)
-            self.matchTable.sortItems(1, QtCore.Qt.SortOrder.DescendingOrder)
-        if thumb_jobs:
-            th = _ThumbThread(thumb_jobs)
-            th.loaded.connect(self._set_thumb)
-            th.finished.connect(lambda t=th: self._thumb_threads.remove(t)
-                                if t in self._thumb_threads else None)
-            self._thumb_threads.append(th)
-            th.start()
         self._last_new = new
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
@@ -1776,6 +1763,7 @@ class MainWindow(QMainWindow):
                     self.alertLog.append(f"[가격추적] {added}건 추적 시작")
             except Exception as e:
                 self.alertLog.append(f"[가격추적] 등록 실패: {str(e)[:80]}")
+            self._refresh_listing_table()
         try:
             self._refresh_alert_health()
         except Exception:
@@ -1837,6 +1825,7 @@ class MainWindow(QMainWindow):
         self._watch_next_due = int(next_due)
         if events:
             self._notify_watch_events(events)
+        self._refresh_listing_table()
 
     def _notify_watch_events(self, events):
         lines = watch_event_lines(events)
@@ -1844,9 +1833,7 @@ class MainWindow(QMainWindow):
             return
         for line in lines:
             self.alertLog.append(f"[가격추적] {line}")
-            self._watch_list.insertItem(0, line)
-        while self._watch_list.count() > 20:
-            self._watch_list.takeItem(self._watch_list.count() - 1)
+        self._refresh_listing_table()
         nt = getattr(self, "_notify", {}) or {}
         if not ((nt.get("tg_token") and nt.get("tg_chat")) or nt.get("sheet_url")):
             return
@@ -1856,6 +1843,65 @@ class MainWindow(QMainWindow):
                             if t in self._watch_threads else None)
         self._watch_threads.append(th)
         th.start()
+
+    def _listing_filter_key(self):
+        b = self.listingFilter.checkedButton()
+        return b.property("filterKey") if b else "all"
+
+    def _refresh_listing_table(self):
+        """저장소에서 읽어 표를 다시 그린다. 행 수가 수백 단위라 전면 갱신으로 족하다."""
+        if not getattr(self, "_watch_store", None):
+            return
+        import time as _t
+        try:
+            rows = listing_display_rows(self._watch_store.listing_rows(),
+                                        int(_t.time()), self._listing_filter_key())
+        except Exception as e:
+            self.alertLog.append(f"[매물표] 갱신 실패: {str(e)[:80]}")
+            return
+        self.listingTable.setSortingEnabled(False)
+        self.listingTable.setRowCount(0)
+        for r in rows:
+            i = self.listingTable.rowCount()
+            self.listingTable.insertRow(i)
+            vals = [r["icon"], r["keyword"], r["title"], r["region"],
+                    f"{r['price']:,}" if r["price"] else "-",
+                    r["delta_text"], r["last_change_text"], r["first_seen_text"]]
+            for c, val in enumerate(vals):
+                cell = QtWidgets.QTableWidgetItem(val)
+                if c == 0:
+                    cell.setData(QtCore.Qt.ItemDataRole.UserRole, r["url"])
+                    cell.setData(QtCore.Qt.ItemDataRole.UserRole + 1, r["id"])
+                self.listingTable.setItem(i, c, cell)
+        self.listingTable.setSortingEnabled(True)
+
+    def on_listing_open(self, item):
+        """더블클릭 → 가격 이력 + 매물 링크."""
+        cell0 = self.listingTable.item(item.row(), 0)
+        if cell0 is None:
+            return
+        url = cell0.data(QtCore.Qt.ItemDataRole.UserRole) or ""
+        aid = cell0.data(QtCore.Qt.ItemDataRole.UserRole + 1) or ""
+        hist = []
+        try:
+            hist = self._watch_store.price_history(str(aid))
+        except Exception:
+            pass
+        import time as _t
+        lines = [f"{_t.strftime('%m/%d %H:%M', _t.localtime(h['ts']))}  "
+                 f"{h['price']:,}원" for h in hist] or ["가격 이력 없음"]
+        dlg = QtWidgets.QMessageBox(self)
+        dlg.setWindowTitle("가격 이력")
+        dlg.setText("\n".join(lines))
+        if url:
+            open_btn = dlg.addButton("매물 열기",
+                                     QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        else:
+            open_btn = None
+        dlg.addButton(QtWidgets.QMessageBox.StandardButton.Close)
+        dlg.exec()
+        if open_btn is not None and dlg.clickedButton() is open_btn:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
     def _set_thumb(self, item, data):
         """다운로드된 썸네일 바이트 → 아이콘(메인스레드서 안전하게 setIcon)."""
@@ -1868,14 +1914,6 @@ class MainWindow(QMainWindow):
                     QtCore.Qt.TransformationMode.SmoothTransformation)))
         except Exception:
             pass
-
-    def on_match_open(self, item):
-        cell0 = self.matchTable.item(item.row(), 0)   # URL 은 사진셀(col0) UserRole
-        url = cell0.data(QtCore.Qt.ItemDataRole.UserRole) if cell0 else ""
-        if url:
-            from PyQt6.QtGui import QDesktopServices
-            from PyQt6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl(url))
 
     # ── 전국(전 계정) 멀티계정 ──
     def _multi(self, harvest=False):
