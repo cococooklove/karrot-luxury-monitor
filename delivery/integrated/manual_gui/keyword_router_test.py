@@ -8,7 +8,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from daangn_ext.keyword_router import KeywordRouter, DEFAULT_SLOT_CAP
+from daangn_ext.keyword_router import KeywordRouter, DEFAULT_SLOT_CAP, _CAP_META_KEY
 from daangn_ext.sweep_queue import SweepQueue
 
 R = []
@@ -297,6 +297,128 @@ ck("스윕 기록이 뒤집히지 않음",
 ck("빈 목록 씨딩은 0", KeywordRouter(
     FakeAlerts(), SweepQueue(os.path.join(dM2, "q2.json")), slot_cap=3,
     routes_fp=os.path.join(dM2, "r2.json")).seed_from_server([]) == 0)
+
+# ── N. 상한 관측(observed cap) ──
+class CapAwareFleet:
+    """fleet_full 신호를 명시적으로 보내는 가짜 alerts.
+    banned: 신호 없이 그냥 실패(예: 차단 키워드) — 상한과 무관해야 한다.
+    limited: 실패하되 fleet_full=True(서버가 함대 한도 도달을 알려줌)."""
+
+    def __init__(self, banned=(), limited=()):
+        self.banned = set(banned)
+        self.limited = set(limited)
+        self.calls = []
+
+    def register_all(self, keywords, min_price=None, max_price=None,
+                     exclude_keywords=None, log=None, core_only=False):
+        self.calls.append(list(keywords))
+        kw = keywords[0]
+        if kw in self.limited:
+            return {"added": 0, "skipped": 0, "failed": 1, "fleet_full": True}
+        if kw in self.banned:
+            return {"added": 0, "skipped": 0, "failed": 1}
+        return {"added": 1, "skipped": 0, "failed": 0}
+
+
+dN = tempfile.mkdtemp()
+fpN = os.path.join(dN, "routes.json")
+qN = SweepQueue(os.path.join(dN, "q.json"))
+fN = CapAwareFleet(limited={"신상1"})
+rN = KeywordRouter(fN, qN, slot_cap=5, routes_fp=fpN)
+rN.add("A"); rN.add("B")               # used=2, 둘 다 app 성공
+res = rN.add("신상1")                   # fleet_full 신호 → 관측
+ck("fleet_full 신호로 sweep", res["route"] == "sweep", str(res))
+ck("관측 상한이 used(2) 로 낮아짐", rN.capacity()["cap"] == 2, str(rN.capacity()))
+ck("capacity free 도 관측치 반영", rN.capacity()["free"] == 0, str(rN.capacity()))
+
+# 밴 키워드(신호 없음)는 상한을 낮추지 않는다 — 오탐 방지가 핵심
+dN2 = tempfile.mkdtemp()
+qN2 = SweepQueue(os.path.join(dN2, "q.json"))
+fN2 = CapAwareFleet(banned={"짝퉁2"})
+rN2 = KeywordRouter(fN2, qN2, slot_cap=5, routes_fp=os.path.join(dN2, "routes.json"))
+rN2.add("A")                            # used=1
+rN2.add("짝퉁2")                        # 신호 없는 실패
+ck("밴 실패는 관측 안 함(cap 그대로)", rN2.capacity()["cap"] == 5, str(rN2.capacity()))
+
+# failed=0(유효 계정 없음) 이면 fleet_full 이 켜져 있어도 관측 안 함
+class WeirdFleet:
+    def register_all(self, keywords, min_price=None, max_price=None,
+                     exclude_keywords=None, log=None, core_only=False):
+        return {"added": 0, "skipped": 0, "failed": 0, "fleet_full": True}
+
+
+dQ = tempfile.mkdtemp()
+rQ = KeywordRouter(WeirdFleet(), SweepQueue(os.path.join(dQ, "q.json")),
+                   slot_cap=6, routes_fp=os.path.join(dQ, "routes.json"))
+rQ.add("샤넬")
+ck("failed=0 이면 fleet_full 있어도 관측 안 함",
+   rQ.capacity()["cap"] == 6, str(rQ.capacity()))
+
+# 관측은 재시작해도 유지된다
+rN3 = KeywordRouter(CapAwareFleet(limited={"신상2"}),
+                    SweepQueue(os.path.join(dN, "q3.json")),
+                    slot_cap=5, routes_fp=fpN)
+ck("재시작 후에도 관측 상한 유지", rN3.capacity()["cap"] == 2, str(rN3.capacity()))
+
+# 상한은 스스로 오르지 않는다: used 가 줄어도 cap 은 그대로다
+rN3.remove("A")
+ck("used 가 줄어도 관측 상한은 그대로(오직 하강만)",
+   rN3.capacity()["cap"] == 2, str(rN3.capacity()))
+
+# 더 낮은 used 에서 다시 fleet_full 신호가 오면 추가 하강은 허용된다
+rN3.add("신상2")
+ck("더 낮은 used 로 재관측 가능(추가 하강)", rN3.capacity()["cap"] == 1, str(rN3.capacity()))
+
+# ── O. 관측치가 깨져도 기본 상한으로 안전하게 저하 ──
+dO = tempfile.mkdtemp()
+fpO = os.path.join(dO, "routes.json")
+with open(fpO, "w", encoding="utf-8") as f:
+    _json.dump({"A": {"route": "app", "reason": "x", "at": 1},
+               _CAP_META_KEY: "이것도 저것도 아님"}, f, ensure_ascii=False)
+rO = KeywordRouter(FakeAlerts(), SweepQueue(os.path.join(dO, "q.json")),
+                   slot_cap=7, routes_fp=fpO)
+ck("깨진 관측치는 기본 상한으로", rO.capacity()["cap"] == 7, str(rO.capacity()))
+ck("깨진 관측치여도 라우트는 정상 로드", rO.capacity()["used"] == 1, str(rO.capacity()))
+
+dO2 = tempfile.mkdtemp()
+fpO2 = os.path.join(dO2, "routes.json")
+with open(fpO2, "w", encoding="utf-8") as f:
+    _json.dump({_CAP_META_KEY: {"observed": "abc"}}, f, ensure_ascii=False)
+rO2 = KeywordRouter(FakeAlerts(), SweepQueue(os.path.join(dO2, "q.json")),
+                    slot_cap=9, routes_fp=fpO2)
+ck("observed 가 숫자 아니면 기본 상한", rO2.capacity()["cap"] == 9, str(rO2.capacity()))
+
+# ── P. 관측치를 되돌리는 두 경로: 명시적 reset, seed_from_server ──
+dP = tempfile.mkdtemp()
+fpP = os.path.join(dP, "routes.json")
+qP = SweepQueue(os.path.join(dP, "q.json"))
+fP = CapAwareFleet(limited={"한도"})
+rP = KeywordRouter(fP, qP, slot_cap=4, routes_fp=fpP)
+rP.add("X")                  # used=1
+rP.add("한도")               # fleet_full → 관측 1
+ck("사전조건: 관측됨", rP.capacity()["cap"] == 1, str(rP.capacity()))
+ck("reset 은 True 반환", rP.reset_observed_cap() is True)
+ck("reset 후 기본 상한으로", rP.capacity()["cap"] == 4, str(rP.capacity()))
+ck("이미 초기화된 상태에서 reset 은 False", rP.reset_observed_cap() is False)
+rP2 = KeywordRouter(CapAwareFleet(), SweepQueue(os.path.join(dP, "q2.json")),
+                    slot_cap=4, routes_fp=fpP)
+ck("reset 은 영속됨(재시작 후에도 기본 상한)", rP2.capacity()["cap"] == 4, str(rP2.capacity()))
+
+dP3 = tempfile.mkdtemp()
+fpP3 = os.path.join(dP3, "routes.json")
+qP3 = SweepQueue(os.path.join(dP3, "q.json"))
+fP3 = CapAwareFleet(limited={"한도3"})
+rP3 = KeywordRouter(fP3, qP3, slot_cap=4, routes_fp=fpP3)
+rP3.add("Y")                 # used=1
+rP3.add("한도3")             # fleet_full at used=1 → 관측 1
+ck("사전조건: 관측됨(seed 케이스)", rP3.capacity()["cap"] == 1, str(rP3.capacity()))
+rP3.remove("Y"); rP3.remove("한도3")
+ck("routes 다 지워짐", rP3.routes() == [])
+ck("routes 지운다고 관측치가 저절로 안 지워짐",
+   rP3.capacity()["cap"] == 1, str(rP3.capacity()))
+n = rP3.seed_from_server(["Z"])
+ck("씨딩 성공", n == 1)
+ck("씨딩이 관측치를 씻어냄", rP3.capacity()["cap"] == 4, str(rP3.capacity()))
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

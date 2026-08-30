@@ -6,6 +6,15 @@
 슬롯 계산: register_all 은 같은 키워드를 모든 유효 계정에 등록한다. 계정을
 늘려도 등록 가능한 키워드 '종류'는 늘지 않는다 — 함대 전체 한도가 곧 계정당
 상한이다. 그래서 used 는 앱으로 배정된 키워드 수이고 네트워크 조회가 없다.
+
+상한은 하드코딩이 아니라 관측값이다: 서버 상한이 설정값(기본 30)보다 낮으면
+등록이 매번 실패하는데도 라우터는 계속 여유가 있다고 믿고 재시도한다.
+register_all 의 반환에 "fleet_full"(그 실패가 차단 키워드가 아니라 함대
+한도에 부딪힌 것이라는 신호)이 있으면, 그 시점의 used 를 유효 상한으로
+낮춰 캐시한다. 이 신호가 없으면(현재 실제 구현은 아직 보내지 않는다) 절대
+낮추지 않는다 — 차단 키워드 실패를 한도 축소로 오인하면 실제로 있는 슬롯을
+스윕으로 묶어버리기 때문이다. 관측값은 절대 스스로 오르지 않고,
+reset_observed_cap() 으로만 되돌린다.
 """
 from __future__ import annotations
 
@@ -17,6 +26,11 @@ DEFAULT_SLOT_CAP = 30
 
 ROUTE_APP = "app"
 ROUTE_SWEEP = "sweep"
+
+# routes 파일에 라우트 항목과 함께 저장되는 예약 키(상한 관측치). 실제
+# 키워드는 절대 이 문자열과 같을 수 없다 — add() 의 keyword.strip() 을
+# 거치므로 공백을 포함한 이 값은 사용자가 입력할 수 없다.
+_CAP_META_KEY = "  __cap__"
 
 # 등록이 실패한 키워드는 지수 백오프로만 다시 시도한다. 재시도 한 번이
 # '전 계정 × (목록조회 + 차단조회 + 등록)' 이라 계정 12개면 수십 요청이다.
@@ -33,19 +47,30 @@ class KeywordRouter:
         self.queue = queue
         self.slot_cap = int(slot_cap)
         self.routes_fp = routes_fp
-        self._routes = self._load()
+        self._routes, self._observed_cap = self._load()
 
     # ── 영속 ──
-    def _load(self) -> dict:
+    def _load(self) -> tuple[dict, int | None]:
         try:
             with open(self.routes_fp, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            return {}
+            return {}, None
         if not isinstance(data, dict):
-            return {}
+            return {}, None
+        observed = None
+        meta = data.get(_CAP_META_KEY)
+        if isinstance(meta, dict):
+            try:
+                v = int(meta.get("observed"))
+                if v > 0:
+                    observed = v
+            except Exception:
+                observed = None
         out = {}
         for k, v in data.items():
+            if k == _CAP_META_KEY:
+                continue
             if isinstance(v, dict) and v.get("route") in (ROUTE_APP, ROUTE_SWEEP):
                 e = {"route": v["route"],
                      "reason": str(v.get("reason") or ""),
@@ -63,23 +88,54 @@ class KeywordRouter:
                     except Exception:
                         e["retry_n"] = 1
                 out[str(k)] = e
-        return out
+        return out, observed
 
     def _save(self) -> None:
         try:
             d = os.path.dirname(self.routes_fp)
             if d:
                 os.makedirs(d, exist_ok=True)
+            payload = dict(self._routes)
+            if self._observed_cap is not None:
+                payload[_CAP_META_KEY] = {"observed": self._observed_cap}
             with open(self.routes_fp, "w", encoding="utf-8") as f:
-                json.dump(self._routes, f, ensure_ascii=False)
+                json.dump(payload, f, ensure_ascii=False)
         except Exception:
             pass
 
     # ── 조회 ──
     def capacity(self) -> dict:
         used = sum(1 for v in self._routes.values() if v["route"] == ROUTE_APP)
-        return {"cap": self.slot_cap, "used": used,
-                "free": max(0, self.slot_cap - used)}
+        cap = self.slot_cap
+        if self._observed_cap is not None and self._observed_cap < cap:
+            cap = self._observed_cap
+        return {"cap": cap, "used": used, "free": max(0, cap - used)}
+
+    def _observe_cap_full(self, log) -> None:
+        """등록 실패가 '함대 한도 도달' 신호일 때만 호출된다(add 참고).
+        그 시점에 이미 app 배정된 키워드 수가 곧 진짜 상한이다 — 그보다
+        낮게 다시 관측되지 않는 한 갱신하지 않는다(오직 하강만)."""
+        used = self.capacity()["used"]
+        if self._observed_cap is not None and self._observed_cap <= used:
+            return
+        prev = self._observed_cap if self._observed_cap is not None else self.slot_cap
+        self._observed_cap = used
+        self._save()
+        log(f"  ⚠ 앱 슬롯 상한 관측치 하향: {prev} → {used}"
+            f"(서버가 등록을 거부함 — reset_observed_cap() 으로 되돌릴 수 있음)")
+
+    def reset_observed_cap(self, log=None) -> bool:
+        """관측으로 낮아진 유효 상한을 되돌린다 — 일시적 서버 오류·오탐으로
+        낮아진 경우 운영자가 빠져나갈 구멍. seed_from_server 는 routes 가
+        비어 있을 때만 동작해 관측치가 있는 상태에선 거의 열리지 않으므로,
+        평시 탈출 경로는 이 메서드다."""
+        if self._observed_cap is None:
+            return False
+        self._observed_cap = None
+        self._save()
+        if log:
+            log("  앱 슬롯 상한 관측치 초기화")
+        return True
 
     def routes(self) -> list[dict]:
         return [dict(v, keyword=k) for k, v in
@@ -108,6 +164,10 @@ class KeywordRouter:
                                 "at": now}
             n += 1
         if n:
+            # routes 가 비어 씨딩이 열렸다는 것 자체가 서버 상태를 다시
+            # 믿기로 한 것이다 — 남아 있던 관측 상한(예: 예전에 다 지워진
+            # 뒤에도 파일에 남았던 값)도 같이 씻어낸다.
+            self._observed_cap = None
             self._save()
         return n
 
@@ -120,9 +180,10 @@ class KeywordRouter:
         if not keyword:
             return {"keyword": keyword, "route": None, "reason": "빈 키워드"}
 
-        if self.capacity()["free"] <= 0:
+        cap_now = self.capacity()
+        if cap_now["free"] <= 0:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
-                                  f"앱 슬롯 만원({self.slot_cap})", log)
+                                  f"앱 슬롯 만원({cap_now['cap']})", log)
         try:
             res = self.alerts.register_all(
                 [keyword], min_price, max_price, exclude,
@@ -135,6 +196,12 @@ class KeywordRouter:
         # 없었다는 뜻인데, 이때 app 으로 표시하면 슬롯만 먹고 아무데서도 감시되지
         # 않는다 — 느리더라도 스윕이 낫다.
         if not (res.get("added") or res.get("skipped")):
+            # fleet_full 은 alerts 가 "이 실패는 차단 키워드가 아니라 함대
+            # 한도 때문"이라고 명시했을 때만 켜진다. 신호가 없으면(현재의
+            # 실제 구현이 그렇다) 관측하지 않는다 — 차단 키워드 실패를
+            # 한도로 오인하면 멀쩡한 슬롯을 스윕에 묶어버린다.
+            if res.get("failed") and res.get("fleet_full"):
+                self._observe_cap_full(log)
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
                                   "앱 등록 실패(차단 키워드·유효 계정 없음)", log,
                                   failed=True)
