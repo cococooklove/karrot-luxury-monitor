@@ -13,6 +13,15 @@ $log = "C:\karrot\ldboot.log"
 function W($m) { "$([DateTime]::Now.ToString('HH:mm:ss')) $m" | Out-File $log -Append -Encoding UTF8 }
 
 function DevCount { (& $adb devices | Select-String "device$").Count }
+
+# 인덱스 하나가 실제로 응답하는지 본다. 전체 기기 수 증가로 판정하면 안 된다 —
+# 이미 떠 있는 상태에서 이 스크립트를 다시 돌리면 수가 안 늘어 전부 '기동 실패'가
+# 되고, 재시도 단계가 멀쩡히 돌던 인스턴스를 taskkill 해 함대를 되레 무너뜨린다.
+# (androidStarted=1 인데 게스트가 hang 한 인스턴스도 이 프로브로만 걸러진다.)
+function Probe($i) {
+    $o = & $console adb --index $i --command "shell echo PROBE_OK" 2>&1
+    return (($o -join " ") -match "PROBE_OK")
+}
 W "=== ldboot 시작 ==="
 
 # 부팅 직후 시스템 안정화 대기
@@ -113,7 +122,7 @@ if ($ld) {
     $retry = 1          # 실패시 재기동 횟수
 
     foreach ($i in $indexes) {
-        $before = DevCount
+        if (Probe $i) { W "index $i 이미 살아 있음 - 건너뜀"; Start-Sleep 2; continue }
         $ok = $false
         for ($a = 0; $a -le $retry -and -not $ok; $a++) {
             if ($a -gt 0) {
@@ -127,7 +136,7 @@ if ($ld) {
             $waited = 0
             while ($waited -lt $bootWait) {
                 Start-Sleep 5; $waited += 5
-                if ((DevCount) -gt $before) { $ok = $true; W "index $i 기동 완료 (${waited}s)"; break }
+                if (Probe $i) { $ok = $true; W "index $i 기동 완료 (${waited}s)"; break }
             }
         }
         if (-not $ok) { W "index $i 기동 실패 - 건너뜀" }
