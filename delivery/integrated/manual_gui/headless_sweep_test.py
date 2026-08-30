@@ -150,7 +150,9 @@ ck("conditions 채움", len(cfg["conditions"]) == 2)
 ck("기본 휴식 30~90", (cfg["rest_min"], cfg["rest_max"]) == (30, 90), str(cfg["rest_min"]))
 ck("기본 지역간격 0.4~1.2",
    (cfg["gap_min"], cfg["gap_max"]) == (0.4, 1.2), str(cfg["gap_min"]))
-ck("지역 미지정 → 전국", cfg["scope"] == "nationwide", cfg["scope"])
+ck("지역 미지정이어도 전국이 아니다", cfg["scope"] == "regions", cfg["scope"])
+ck("지역 미지정 → 기본 지역",
+   cfg["regions"] == m.default_sweep_regions("./OUT.json"), str(len(cfg["regions"])))
 ck("db/out 경로는 GUI 와 같음",
    cfg["db_path"] == "./auto_seen.db" and cfg["out_json"] == "./OUT.json")
 ck("token_provider 없으면 stabilize off", cfg["stabilize"] is False)
@@ -338,10 +340,11 @@ ck("종료 시 stop", "stop" in inner)
 ck("--register 가 라우터를 지난다", "add_many" in inner)
 ck("--register 가 register_all 을 직접 부르지 않는다", "register_all" not in inner)
 ck("add_from_matches 로 워치 등록", "add_from_matches" in inner)
-ck("source='sweep' 로 등록",
-   "sweep" in m._run_headless.__code__.co_consts
-   or any("sweep" in (c.co_consts or ()) for c in consts),
-   "")
+# 스윕 결과 등록은 인계 큐를 통해 폴링 스레드가 한다 — source='sweep' 는
+# 그쪽(drain_sweep_finds)에 있다.
+_drain_consts = m.drain_sweep_finds.__code__.co_consts
+ck("source='sweep' 로 등록", "sweep" in _drain_consts, str(_drain_consts))
+ck("헤드리스가 인계 큐를 드레인", "drain_sweep_finds" in inner)
 
 print("=== M. 진짜 스레드로 — Qt 이벤트 루프 없이 돈다 ===")
 import time as _t
@@ -392,6 +395,202 @@ ck("데몬 스레드(프로세스 종료를 안 막음)", r5.thread.daemon is Tr
 r5.stop(join=5)
 ck("join 뒤 스레드 종료", r5.running() is False)
 ck("엔진 run 정상 탈출", eng5["e"].left is True)
+
+print("=== N. 기본 스윕 범위 — 새 설치가 전국을 훑지 않는다 ===")
+_dflt = m.default_sweep_regions("./OUT.json")
+ck("기본 지역이 비어 있지 않다", len(_dflt) > 0, str(len(_dflt)))
+ck("기본 지역은 동 코드(이름-ID)", all("-" in r for r in _dflt), str(_dflt[:2]))
+ck("기본 지역에 중복 없음", len(set(_dflt)) == len(_dflt))
+try:
+    from daangn_ext.adaptive import load_dong_regions as _ldr
+    _nation = len(_ldr("./OUT.json"))
+except Exception:
+    _nation = 0
+ck("전국 동 수를 읽었다", _nation > 1000, str(_nation))
+# 21배(6537 / daily_cap 300)가 문제였다 — 기본값은 전국의 극히 일부여야 한다.
+ck("기본 지역은 전국의 1/10 미만",
+   _nation and len(_dflt) * 10 < _nation, f"{len(_dflt)} vs {_nation}")
+ck("OUT.json 이 없으면 빈 목록(전국 아님)",
+   m.default_sweep_regions("./__없는파일__.json") == [])
+
+ck("고른 지역이 있으면 그 지역",
+   m.sweep_scope_for(["가-1"], False) == {"scope": "regions", "regions": ["가-1"]})
+ck("전국은 명시적으로 켤 때만",
+   m.sweep_scope_for([], True) == {"scope": "nationwide"})
+ck("고른 지역이 전국 플래그를 이긴다",
+   m.sweep_scope_for(["가-1"], True)["scope"] == "regions")
+_sc = m.sweep_scope_for([], False)
+ck("둘 다 아니면 기본 지역", _sc["scope"] == "regions" and _sc["regions"] == _dflt,
+   _sc["scope"])
+_scl = []
+m.sweep_scope_for([], False, log=_scl.append)
+ck("기본으로 떨어지면 로그로 알린다",
+   _scl and "기본 지역" in _scl[0], str(_scl))
+ck("OUT.json 도 없으면 빈 지역(전국으로 안 떨어짐)",
+   m.sweep_scope_for([], False, out_json="./__없는파일__.json")
+   == {"scope": "regions", "regions": []})
+ck("빈 문자열 지역은 무시", m.sweep_scope_for(["", None], True)["scope"] == "nationwide")
+
+ck("헤드리스: 전국 키를 켜면 전국",
+   m.headless_sweep_cfg({m.SWEEP_NATIONWIDE_KEY: True}, E, {})["scope"] == "nationwide")
+ck("헤드리스: 전국 키가 꺼져 있으면 기본 지역",
+   m.headless_sweep_cfg({m.SWEEP_NATIONWIDE_KEY: False}, E, {})["regions"] == _dflt)
+ck("헤드리스: 지역 지정이 전국 키를 이긴다",
+   m.headless_sweep_cfg({"sweep_regions": ["가-1"], m.SWEEP_NATIONWIDE_KEY: True},
+                        E, {})["regions"] == ["가-1"])
+ck("전국 설정 키 이름", m.SWEEP_NATIONWIDE_KEY == "sweep_nationwide")
+_cfgl = []
+m.headless_sweep_cfg({}, E, {}, log=_cfgl.append)
+ck("헤드리스도 기본 범위를 로그로 알린다", any("기본 지역" in x for x in _cfgl),
+   str(_cfgl))
+# 범위 판정은 GUI 와 한 함수여야 한다 — 갈라지면 서버가 다른 범위를 돈다.
+ck("GUI cfg 가 공용 범위 판정 사용",
+   "sweep_scope_for" in m.MainWindow._auto_cfg_base.__code__.co_names)
+ck("헤드리스 cfg 가 공용 범위 판정 사용",
+   "sweep_scope_for" in m.headless_sweep_cfg.__code__.co_names)
+ck("헤드리스에 '미선택=전국' 분기가 남아 있지 않다",
+   "nationwide" not in (m.headless_sweep_cfg.__code__.co_consts or ()),
+   str(m.headless_sweep_cfg.__code__.co_consts))
+
+print("=== O. 되살리기 상한은 두 런타임이 같은 함수로 센다 ===")
+_ok, _n, _msg = m.sweep_revive_step(0, 3)
+ck("첫 되살림 허용", _ok is True and _n == 1, f"{_ok} {_n}")
+ck("되살림 로그에 진행도", f"(1/{m.SWEEP_REVIVE_MAX})" in _msg, _msg)
+ck("되살림 로그에 키워드 수", "키워드 3개" in _msg, _msg)
+_ok, _n, _msg = m.sweep_revive_step(m.SWEEP_REVIVE_MAX - 1, 1)
+ck("마지막 한 번은 허용", _ok is True and _n == m.SWEEP_REVIVE_MAX)
+_ok, _n, _msg = m.sweep_revive_step(m.SWEEP_REVIVE_MAX, 1)
+ck("상한에 닿으면 거절", _ok is False)
+ck("포기 로그는 상한에서 한 번", "포기합니다" in _msg, _msg)
+ck("포기 뒤 카운터는 상한+1", _n == m.SWEEP_REVIVE_MAX + 1, str(_n))
+_ok, _n, _msg = m.sweep_revive_step(m.SWEEP_REVIVE_MAX + 1, 1)
+ck("그 뒤로는 조용히 거절", _ok is False and _msg == "" and _n == m.SWEEP_REVIVE_MAX + 1)
+ck("헤드리스 resync 가 공용 카운터 사용",
+   "sweep_revive_step" in m.HeadlessSweepRunner.resync.__code__.co_names)
+ck("GUI resync 도 공용 카운터 사용",
+   "sweep_revive_step" in m.MainWindow._resync_search_sweep.__code__.co_names)
+
+print("=== P. 스윕 결과 인계 — sqlite 는 폴링 스레드 하나만 만진다 ===")
+import queue as _pyq
+import threading as _th
+import tempfile as _tf
+import shutil as _sh
+from daangn_ext import article_watch as _aw
+
+ck("인계 큐 상한 정의", isinstance(m.SWEEP_FIND_QUEUE_MAX, int)
+   and m.SWEEP_FIND_QUEUE_MAX > 0, str(m.SWEEP_FIND_QUEUE_MAX))
+# 헤드리스의 on_found 는 스윕 스레드에서 불린다 — 거기서 저장소를 만지면 안 된다.
+_hsrc = _inspect.getsource(m._run_headless) if "_inspect" in dir() else ""
+if not _hsrc:
+    import inspect as _inspect
+    _hsrc = _inspect.getsource(m._run_headless)
+_found_src = _hsrc.split("def _sweep_found(")[1].split("def _sweep_cfg_builder")[0]
+ck("_sweep_found 는 큐에 넣기만 한다", "put_nowait" in _found_src, _found_src[:80])
+ck("_sweep_found 는 저장소를 안 만진다",
+   "add_from_matches" not in _found_src and "watch_tracker" not in _found_src,
+   _found_src[:120])
+ck("인계 큐는 상한이 있다", "maxsize=SWEEP_FIND_QUEUE_MAX" in _hsrc)
+
+
+class ThreadWitness:
+    """WatchStore 를 감싸 '어느 스레드가 만졌는지' 기록한다."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.idents = set()
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def wrapped(*a, **k):
+            self.idents.add(_th.get_ident())
+            return attr(*a, **k)
+        return wrapped
+
+
+_tmpdir = _tf.mkdtemp(prefix="sweepq_")
+_store7 = _aw.WatchStore(os.path.join(_tmpdir, "watch.db"))
+_wit = ThreadWitness(_store7)
+_tracker7 = _aw.WatchTracker(_wit)
+_q7 = _pyq.Queue(maxsize=m.SWEEP_FIND_QUEUE_MAX)
+_drop7 = [0]
+_logs7 = []
+_sweep_ident = {}
+N_FIND = 400
+
+
+def _on_found7(payload):
+    """스윕 스레드에서 불리는 그 콜백과 같은 모양."""
+    try:
+        _q7.put_nowait(payload)
+    except _pyq.Full:
+        _drop7[0] += 1
+
+
+def _sweep_body():
+    _sweep_ident["id"] = _th.get_ident()
+    for i in range(N_FIND):
+        _on_found7({"id": f"S{i}", "title": "샤넬 가방", "price": "100,000원"})
+
+
+_thr7 = _th.Thread(target=_sweep_body, name="sweep-test")
+_polling_ident = _th.get_ident()
+_thr7.start()
+_added7 = 0
+for _ in range(4000):
+    # 폴링 스레드가 하는 일: 드레인 + 상한 강제 + 카운트(읽기-수정-쓰기 3종)
+    _added7 += m.drain_sweep_finds(_q7, _tracker7, lambda: ["샤넬"], _logs7.append)
+    _tracker7.enforce_cap()
+    _wit.active_count()
+    if not _thr7.is_alive() and _q7.empty():
+        break
+_thr7.join(10)
+_added7 += m.drain_sweep_finds(_q7, _tracker7, lambda: ["샤넬"], _logs7.append)
+ck("스윕 스레드가 실제로 돌았다", _sweep_ident.get("id") not in (None, _polling_ident),
+   str(_sweep_ident))
+ck("인계된 매물이 전부 등록됐다", _added7 == N_FIND, f"{_added7}/{N_FIND}")
+ck("큐 상한에 안 걸렸다(버린 것 없음)", _drop7[0] == 0, str(_drop7[0]))
+ck("저장소를 만진 스레드는 하나뿐", _wit.idents == {_polling_ident}, str(_wit.idents))
+ck("만진 스레드에 스윕 스레드가 없다", _sweep_ident.get("id") not in _wit.idents)
+ck("상한 강제가 실제로 돌았다(활성 <= ACTIVE_CAP)",
+   _store7.active_count() <= _aw.ACTIVE_CAP, str(_store7.active_count()))
+ck("등록 로그는 폴링 스레드가 남긴다", any("신규 매물 추적" in x for x in _logs7),
+   str(_logs7[:2]))
+ck("source 는 sweep",
+   (_store7.get("S0") or {}).get("source") == "sweep", str(_store7.get("S0")))
+
+# 큐가 차면 막히는 대신 버린다 — 스윕 스레드는 절대 폴링에 붙잡히지 않는다.
+_qsmall = _pyq.Queue(maxsize=2)
+_dropped_small = 0
+for i in range(5):
+    try:
+        _qsmall.put_nowait({"id": str(i)})
+    except _pyq.Full:
+        _dropped_small += 1
+ck("큐가 차면 put_nowait 이 버린다(블록 아님)", _dropped_small == 3,
+   str(_dropped_small))
+
+ck("tracker 가 없으면 큐만 비운다",
+   m.drain_sweep_finds(_q7, None, lambda: [], _logs7.append) == 0)
+ck("빈 큐 드레인은 0", m.drain_sweep_finds(_q7, _tracker7, lambda: [], _logs7.append) == 0)
+ck("큐가 None 이어도 안 죽음",
+   m.drain_sweep_finds(None, _tracker7, lambda: [], _logs7.append) == 0)
+_store7.close()
+_sh.rmtree(_tmpdir, ignore_errors=True)
+
+print("=== Q. 관측 상한 탈출구가 두 런타임에서 닿는다 ===")
+ck("헤드리스에 --reset-cap 이 있다", "--reset-cap" in _hsrc)
+ck("--reset-cap 이 reset_observed_cap 을 부른다",
+   "reset_observed_cap" in inner)
+ck("GUI 에 초기화 핸들러", callable(getattr(m.MainWindow, "on_reset_cap_clicked", None)))
+ck("GUI 핸들러가 reset_observed_cap 을 부른다",
+   "reset_observed_cap" in m.MainWindow.on_reset_cap_clicked.__code__.co_names)
+from daangn_ext import keyword_router as _kr
+_capsrc = _inspect.getsource(_kr.KeywordRouter._observe_cap_full)
+ck("하향 로그가 실제 조작법을 알려준다",
+   "슬롯 상한 초기화" in _capsrc and "--reset-cap" in _capsrc, _capsrc[-160:])
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

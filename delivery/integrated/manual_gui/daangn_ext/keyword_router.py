@@ -39,7 +39,9 @@ register_all 이 명시적으로 "fleet_full"(그 실패가 차단이 아니라 
 한도 때문이라는 신호)을 보낼 수도 있다 — 지금의 실제 구현은 보내지
 않지만, 더 나은 증거가 생기면 그대로 쓸 자리를 남겨둔다.
 
-관측값은 절대 스스로 오르지 않고, reset_observed_cap() 으로만 되돌린다.
+관측값은 절대 스스로 오르지 않는다. 되돌리는 길은 reset_observed_cap() 하나이고,
+운영자에게는 그것이 GUI 고급 패널의 [슬롯 상한 초기화] 버튼과 헤드리스의
+--reset-cap 플래그로 나 있다.
 """
 from __future__ import annotations
 
@@ -151,7 +153,8 @@ class KeywordRouter:
         self._observed_cap = used
         self._save()
         log(f"  ⚠ 앱 슬롯 상한 관측치 하향: {prev} → {used}"
-            f"({why} — reset_observed_cap() 으로 되돌릴 수 있음)")
+            f"({why} — 잘못 내려갔으면 고급 패널 [슬롯 상한 초기화],"
+            " 서버는 --reset-cap 으로 되돌릴 것)")
 
     def _observe_measured_full(self, count, used_before: int, log) -> None:
         """실측값(register_all 의 observed_count)이 '함대 한도 도달'의
@@ -191,7 +194,10 @@ class KeywordRouter:
         """관측으로 낮아진 유효 상한을 되돌린다 — 일시적 서버 오류·오탐으로
         낮아진 경우 운영자가 빠져나갈 구멍. seed_from_server 는 routes 가
         비어 있을 때만 동작해 관측치가 있는 상태에선 거의 열리지 않으므로,
-        평시 탈출 경로는 이 메서드다."""
+        평시 탈출 경로는 이 메서드다.
+
+        운영자가 닿는 문은 둘이다: GUI 고급 패널의 [슬롯 상한 초기화] 버튼
+        (MainWindow.on_reset_cap_clicked)과 헤드리스의 --reset-cap 플래그."""
         if self._observed_cap is None:
             return False
         self._observed_cap = None

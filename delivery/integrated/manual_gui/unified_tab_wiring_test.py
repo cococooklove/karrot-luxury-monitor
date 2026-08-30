@@ -552,6 +552,239 @@ ck("GUI 에 match_seen 파일 코드 없음",
    not any(hasattr(m.MainWindow, n) for n in
            ("_MATCH_SEEN_FILE", "_load_match_seen", "_save_match_seen")))
 
+if _win is not None:
+    print("=== 스윕 설정 영속화 — GUI 에서 고른 값이 곧 서버 설정이다 ===")
+    import json as _json2
+    import tempfile as _tf2
+    import shutil as _sh2
+    _Qt2 = m.Qt
+
+    ck("전국 훑기 체크박스 존재", hasattr(_win, "autoNationwide"))
+    ck("전국 훑기는 기본 꺼짐", _win.autoNationwide.isChecked() is False)
+    ck("전국 훑기도 고급 패널 안",
+       _win.autoNationwide in _win.advancedBox.findChildren(_QW.QWidget))
+    ck("저장 배선 존재", callable(getattr(_win, "_sweep_settings_patch", None))
+       and callable(getattr(_win, "_save_sweep_settings", None))
+       and callable(getattr(_win, "_restore_sweep_settings", None)))
+    ck("저장은 디바운스된다(트리 체크 폭주 대비)",
+       isinstance(getattr(_win, "_sweep_save_timer", None), QtCore_QTimer := __import__(
+           "PyQt6.QtCore", fromlist=["QTimer"]).QTimer))
+
+    _tmp2 = _tf2.mkdtemp(prefix="alertcfg_")
+    _cfg_fp = os.path.join(_tmp2, "data", "alert_settings.json")
+    _win._ALERT_SETTINGS_FILE = _cfg_fp        # 인스턴스 속성이 클래스 값을 가린다
+
+    # 1) 새 설치(설정 파일 없음) — 전국이 아니라 기본 지역으로 떨어져야 한다.
+    for _l in _win.auto_area_leaves:
+        if _l.checkState(0) == _Qt2.CheckState.Checked:
+            _l.setCheckState(0, _Qt2.CheckState.Unchecked)
+    _win.autoNationwide.setChecked(False)
+    _fresh = _win._auto_cfg_base()
+    ck("새 설치 GUI 범위는 전국이 아니다", _fresh["scope"] == "regions", _fresh["scope"])
+    ck("새 설치 GUI 범위 = 기본 지역",
+       _fresh["regions"] == m.default_sweep_regions("./OUT.json"),
+       str(len(_fresh["regions"])))
+    ck("새 설치 헤드리스도 같은 범위",
+       m.headless_sweep_cfg({}, [], {})["regions"] == _fresh["regions"])
+
+    # 2) 위젯 값을 바꾸고 저장 → 헤드리스가 같은 키로 읽어 같은 cfg 를 만든다.
+    _win.autoRestMax.setValue(140); _win.autoRestMin.setValue(55)
+    _win.autoGapMax.setValue(2.5); _win.autoGapMin.setValue(0.9)
+    _win.autoLanes.setValue(4); _win.autoDays.setValue(3)
+    _win.autoExtra.setText("빈티지")
+    _win.autoExclude.setText("레플, 미러")
+    _win.autoMin.setText("100000"); _win.autoMax.setText("3000000")
+    _picked = []
+    for _l in _win.auto_area_leaves[:3]:
+        _l.setCheckState(0, _Qt2.CheckState.Checked)
+        _picked.append(_l.data(0, _Qt2.ItemDataRole.UserRole))
+    _win._save_sweep_settings()
+    ck("설정 파일이 쓰였다", os.path.exists(_cfg_fp), _cfg_fp)
+    with open(_cfg_fp, encoding="utf-8") as _f2:
+        _saved = _json2.load(_f2)
+    for _k in ("sweep_regions", "sweep_rest_min", "sweep_rest_max", "sweep_gap_min",
+               "sweep_gap_max", "sweep_lanes", "sweep_extra", "sweep_exclude",
+               "sweep_min", "sweep_max", "sweep_days", m.SWEEP_NATIONWIDE_KEY):
+        ck(f"저장 키: {_k}", _k in _saved, str(sorted(_saved)))
+    _entries = [{"keyword": "샤넬", "min": None, "max": None, "exclude": []}]
+    _hcfg = m.headless_sweep_cfg(_saved, _entries, {})
+    _gcfg = dict(_win._auto_cfg_base())
+    _gcfg["conditions"] = m.sweep_conditions(
+        _entries, extra=_win._splt(_win.autoExtra.text()),
+        exclude=_win._splt(_win.autoExclude.text()),
+        min_price=_win._num(_win.autoMin.text()),
+        max_price=_win._num(_win.autoMax.text()),
+        days=_win.autoDays.value() or None)
+    for _k in ("rest_min", "rest_max", "gap_min", "gap_max", "lanes",
+               "scope", "regions"):
+        ck(f"서버가 GUI 값을 그대로 읽는다: {_k}", _hcfg[_k] == _gcfg[_k],
+           f"{_hcfg[_k]!r} vs {_gcfg[_k]!r}")
+    ck("저장된 지역이 고른 지역", _hcfg["regions"] == _picked, str(_hcfg["regions"]))
+    ck("서버 조건이 GUI 조건과 같다", _hcfg["conditions"] == _gcfg["conditions"],
+       str(_hcfg["conditions"]))
+    ck("서버가 읽은 휴식값", (_hcfg["rest_min"], _hcfg["rest_max"]) == (55, 140),
+       str((_hcfg["rest_min"], _hcfg["rest_max"])))
+    ck("서버가 읽은 끌올일수", _hcfg["conditions"][0]["days"] == 3)
+    ck("서버가 읽은 제외", _hcfg["conditions"][0]["exclude"] == ["레플", "미러"],
+       str(_hcfg["conditions"][0]["exclude"]))
+
+    # 3) 되돌리기 — 위젯을 흩뜨린 뒤 복원하면 저장값으로 돌아온다.
+    _win.autoRestMax.setValue(300); _win.autoRestMin.setValue(200)
+    _win.autoLanes.setValue(0); _win.autoExtra.setText("")
+    for _l in _win.auto_area_leaves[:3]:
+        _l.setCheckState(0, _Qt2.CheckState.Unchecked)
+    _win._restore_sweep_settings()
+    ck("복원: 휴식", (_win.autoRestMin.value(), _win.autoRestMax.value()) == (55, 140),
+       str((_win.autoRestMin.value(), _win.autoRestMax.value())))
+    ck("복원: 레인", _win.autoLanes.value() == 4, str(_win.autoLanes.value()))
+    ck("복원: 추가 키워드", _win.autoExtra.text() == "빈티지", _win.autoExtra.text())
+    ck("복원: 지역 체크", _win._selected_auto_regions() == _picked,
+       str(_win._selected_auto_regions()))
+
+    # 4) 전국은 체크박스로만 켜지고, 그 선택도 저장된다.
+    for _l in _win.auto_area_leaves[:3]:
+        _l.setCheckState(0, _Qt2.CheckState.Unchecked)
+    _win.autoNationwide.setChecked(True)
+    ck("전국 체크 시 GUI 범위 전국", _win._auto_cfg_base()["scope"] == "nationwide")
+    _win._save_sweep_settings()
+    with open(_cfg_fp, encoding="utf-8") as _f2:
+        _saved2 = _json2.load(_f2)
+    ck("전국 선택이 저장된다", _saved2.get(m.SWEEP_NATIONWIDE_KEY) is True)
+    ck("서버도 전국으로 읽는다",
+       m.headless_sweep_cfg(_saved2, _entries, {})["scope"] == "nationwide")
+    _win.autoNationwide.setChecked(False)
+    _win.__dict__.pop("_ALERT_SETTINGS_FILE", None)
+    _sh2.rmtree(_tmp2, ignore_errors=True)
+
+    print("=== GUI 스윕 되살리기 — 상한이 있고 죽은 엔진을 버린다 ===")
+    import daangn.auto_monitor as _am_mod
+    _real_AM = _am_mod.AutoMonitor
+
+    class _FakeSig:
+        def __init__(self):
+            self.n = 0
+
+        def connect(self, *_a, **_k):
+            self.n += 1
+
+        def disconnect(self, *_a, **_k):
+            if self.n <= 0:
+                raise TypeError("no connection")   # Qt 와 같은 예외
+            self.n = 0
+
+    _made_am, _deleted_am = [], []
+
+    class _FakeMonitor:
+        """뜨자마자 죽는 엔진 — run() 안 치명오류로 스레드가 빠지는 그 상황."""
+
+        def __init__(self, parent, cfg):
+            self.cfg = cfg
+            self.log = _FakeSig()
+            self.found = _FakeSig()
+            _made_am.append(self)
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def deleteLater(self):
+            _deleted_am.append(self)
+
+    class _FakeSup:
+        def is_running(self):
+            return True
+
+    class _FakeQ2:
+        def __init__(self, kws):
+            self._k = list(kws)
+
+        def keywords(self):
+            return list(self._k)
+
+    _sv3 = (_win._supervisor, _win._sweep_queue, _win.auto_monitor,
+            getattr(_win, "_sweep_kws", None))
+    _am_mod.AutoMonitor = _FakeMonitor
+    _fq = _FakeQ2(["샤넬"])
+    _win._supervisor = _FakeSup()
+    _win._sweep_queue = _fq
+    _win.auto_monitor = None
+    _win._sweep_kws = None
+    _win._sweep_revives = 0
+    _win._sweep_cfg = lambda: {"conditions": [{"keyword": "샤넬"}],
+                               "out_json": "./OUT.json"}
+    _win.alertLog.clear()
+    for _ in range(m.SWEEP_REVIVE_MAX + 6):
+        _win._resync_search_sweep()
+    _txt = _win.alertLog.toPlainText()
+    ck("되살리기는 상한까지만",
+       len(_made_am) == 1 + m.SWEEP_REVIVE_MAX, str(len(_made_am)))
+    ck("죽은 모니터를 전부 버린다",
+       _deleted_am == _made_am[:-1], f"{len(_deleted_am)}/{len(_made_am) - 1}")
+    ck("살아 있는 마지막 하나는 안 버린다", _made_am[-1] not in _deleted_am)
+    ck("버릴 때 시그널을 끊는다",
+       all(x.log.n == 0 and x.found.n == 0 for x in _deleted_am))
+    ck("포기 로그는 한 번만", _txt.count("포기합니다") == 1, str(_txt.count("포기합니다")))
+    ck("되살림 로그에 진행도", f"(1/{m.SWEEP_REVIVE_MAX})" in _txt)
+    _before_am = len(_made_am)
+    _fq._k = ["샤넬", "구찌"]                 # 대기열이 바뀌면 상한이 풀린다
+    _win._resync_search_sweep()
+    ck("대기열 변경은 상한을 푼다", len(_made_am) == _before_am + 1,
+       str(len(_made_am)))
+    ck("변경 재시작도 옛 모니터를 버린다", len(_deleted_am) == _before_am,
+       str(len(_deleted_am)))
+    _am_mod.AutoMonitor = _real_AM
+    _win.__dict__.pop("_sweep_cfg", None)
+    _win.auto_monitor = None
+    (_win._supervisor, _win._sweep_queue, _win.auto_monitor,
+     _win._sweep_kws) = _sv3
+    _win._sweep_revives = 0
+    _win.alertLog.clear()
+
+    print("=== 관측 상한 초기화 — GUI 에서 닿는다 ===")
+    ck("초기화 버튼 존재", hasattr(_win, "alertResetCapBtn"))
+    ck("초기화 버튼은 고급 패널 안",
+       _win.alertResetCapBtn in _win.advancedBox.findChildren(_QW.QWidget))
+    ck("툴팁이 서버 플래그도 알려준다",
+       "--reset-cap" in _win.alertResetCapBtn.toolTip(),
+       _win.alertResetCapBtn.toolTip())
+
+    class _CapRouter:
+        def __init__(self, has):
+            self.has = has
+            self.calls = 0
+
+        def reset_observed_cap(self, log=None):
+            self.calls += 1
+            if not self.has:
+                return False
+            self.has = False
+            return True
+
+    _sv4 = _win._router
+    _win._router = _CapRouter(True)
+    _win.alertLog.clear()
+    ck("버튼이 관측치를 되돌린다", _win.on_reset_cap_clicked() is True)
+    ck("되돌림 로그", "초기화" in _win.alertLog.toPlainText(),
+       _win.alertLog.toPlainText().strip()[:80])
+    _win.alertLog.clear()
+    ck("되돌릴 게 없으면 False", _win.on_reset_cap_clicked() is False)
+    ck("되돌릴 게 없다는 로그", "이미 비어" in _win.alertLog.toPlainText(),
+       _win.alertLog.toPlainText().strip()[:80])
+    ck("라우터를 실제로 불렀다", _win._router.calls == 2, str(_win._router.calls))
+    # 고급 패널이 접혀 있으면 자식이 '비활성'이라 click() 이 먹지 않는다.
+    _win.advancedBox.setChecked(True)
+    _win.alertResetCapBtn.click()
+    ck("클릭 시그널이 핸들러에 연결돼 있다", _win._router.calls == 3,
+       str(_win._router.calls))
+    _win.advancedBox.setChecked(False)
+    _win._router = _sv4
+    _win.alertLog.clear()
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

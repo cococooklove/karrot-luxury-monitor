@@ -200,6 +200,73 @@ def sweep_conditions(entries, extra=None, exclude=None,
     return out
 
 
+# 스윕 지역 설정 키 — GUI 위젯 값이 이 이름으로 alert_settings.json 에 저장되고
+# 헤드리스가 같은 이름으로 읽는다. 이름이 갈리면 서버는 GUI 설정을 못 본다.
+SWEEP_NATIONWIDE_KEY = "sweep_nationwide"
+
+# 지역을 아무도 고르지 않았을 때 쓸 기본 지역: 명품 밀집 5개 구(약 166동).
+DEFAULT_SWEEP_SIDO = "서울특별시"
+DEFAULT_SWEEP_GU = ("용산구", "성동구", "서초구", "강남구", "송파구")
+
+
+def default_sweep_regions(out_json="./OUT.json"):
+    """지역 설정이 아예 없을 때 훑을 기본 동 목록.
+
+    전국은 동 6537곳이다. 스윕 한 사이클은 (지역 × 키워드) 요청이라 키워드가
+    하나뿐이어도 6537 요청 — 계정 하루 상한(daily_cap=300)의 21배다. 그래서
+    '아무 설정도 없는 새 설치'가 전국을 고르면 첫 사이클에 함대 예산이 통째로
+    마르고, 남은 하루는 엔진이 '전 계정 캡/쿨다운 도달' no-op 으로만 돈다.
+    운영자에게 레버가 없는 상태에서 그건 기본값이 될 수 없다.
+
+    그래서 기본값은 넓히기 쉬운 쪽으로 좁게 잡는다. 넓히는 건 지역 트리에서
+    체크하거나 '전국 훑기'를 켜는 두 번의 의식적인 동작이다.
+
+    OUT.json 이 없거나 이름이 달라져 하나도 못 고르면 빈 목록을 돌려준다 —
+    그 경우에도 전국으로 떨어뜨리지 않는다. 커버리지 0 은 로그로 보이지만
+    예산 고갈은 안 보인다."""
+    import json as _json
+    try:
+        with open(out_json, encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception:
+        return []
+    out, seen = [], set()
+    for block in data or []:
+        if block.get("name1") != DEFAULT_SWEEP_SIDO:
+            continue
+        if block.get("name2") not in DEFAULT_SWEEP_GU:
+            continue
+        for loc in block.get("locations") or []:
+            code = f"{loc.get('name')}-{loc.get('id')}"
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append(code)
+    return out
+
+
+def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None):
+    """지역 설정 → cfg 의 scope/regions. GUI(_auto_cfg_base)·헤드리스 공용.
+
+    셋 중 하나다:
+      고른 지역이 있다      → 그 지역만.
+      '전국 훑기'가 켜졌다  → 전국(동 6537곳). **명시적으로 켜야만** 여기 온다.
+      둘 다 아니다          → default_sweep_regions().
+
+    옛 규칙('지역 미선택 = 전국')을 버린 이유는 default_sweep_regions 참고.
+    두 런타임이 같은 규칙을 써야 GUI 에서 본 범위가 서버에서 그대로 돈다."""
+    regions = [r for r in (regions or []) if r]
+    if regions:
+        return {"scope": "regions", "regions": regions}
+    if nationwide:
+        return {"scope": "nationwide"}
+    dflt = default_sweep_regions(out_json)
+    if log:
+        log(f"[검색스윕] 지역 미지정 — 기본 지역 {len(dflt)}곳으로 제한합니다"
+            " (전국을 훑으려면 '전국 훑기'를 켜세요)")
+    return {"scope": "regions", "regions": dflt}
+
+
 # 죽은 스윕 되살리기 상한. 엔진이 뜨자마자 죽는 상황(토큰 없음·프록시 전멸)에서
 # 틱마다 무한히 다시 띄우면 그때마다 실계정 요청을 태운다 — 몇 번 해보고 포기한다.
 SWEEP_REVIVE_MAX = 5
@@ -229,6 +296,84 @@ def sweep_resync_action(want, have, running):
         # 스윕은 세션 내내 죽은 채로 방치된다.
         return "revive"
     return "restart"
+
+
+# 스윕 스레드 → 폴링 스레드 인계 큐의 상한. 폴링이 멈춰도 메모리가 무한히
+# 자라지 않게 한다. 넘치면 버리고 센다(로그로 보인다).
+SWEEP_FIND_QUEUE_MAX = 2000
+
+
+def drain_sweep_finds(q, tracker, keywords_fn, log, limit=SWEEP_FIND_QUEUE_MAX):
+    """스윕이 찾은 payload 를 **폴링 스레드에서** 워치리스트에 넣는다.
+
+    SweepEngine 의 on_found 는 스윕 스레드에서 동기로 불린다(notify →
+    _dedup_notify). 거기서 WatchStore 를 바로 만지면 폴링 루프와 같은 sqlite
+    커넥션(check_same_thread=False, 락 없음)을 두 스레드가 나눠 쓰게 된다 —
+    커넥션이 하나뿐이라 한쪽의 commit() 이 다른 쪽의 읽기-수정-쓰기를 중간에
+    커밋하고, enforce_cap 의 active_count→oldest_active→mark 사이로 insert 가
+    끼어든다.
+
+    GUI 에는 이 위험이 없다: AutoMonitor.found 가 pyqtSignal 이라 큐 연결로
+    GUI 스레드에 배달된다. 헤드리스도 같은 모양으로 맞춘 것이 이 함수다 —
+    스윕 스레드는 큐에 넣기만 하고(put_nowait 는 절대 안 막힌다), sqlite 는
+    폴링 스레드 하나만 만진다. 락 대신 큐를 고른 이유: 락은 '앞으로 추가될
+    mutator 마다 잊지 말고 걸기'에 기대지만, 큐는 sqlite 를 단일 스레드로
+    묶어 구조로 보장한다. 그리고 스윕 스레드가 폴링 루프의 긴 네트워크 스윕에
+    한 순간도 붙잡히지 않는다.
+
+    payload 정규화까지 여기서 한다 — sweep_queue 파일 읽기(keywords_fn)도
+    스윕 스레드에 남기지 않기 위해서다."""
+    import queue as _q
+    payloads = []
+    if q is not None:
+        while len(payloads) < int(limit):
+            try:
+                payloads.append(q.get_nowait())
+            except _q.Empty:
+                break
+    if not payloads or tracker is None:
+        return 0
+    try:
+        kws = list(keywords_fn() or [])
+    except Exception:
+        kws = []
+    norms = []
+    for p in payloads:
+        norm = sweep_found_to_match(p, sweep_keyword_for(p, kws))
+        if norm:
+            norms.append(norm)
+    if not norms:
+        return 0
+    try:
+        added = tracker.add_from_matches(norms, source="sweep")
+    except Exception as e:
+        log(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
+        return 0
+    if added:
+        log(f"[검색스윕] 신규 매물 추적 {added}건")
+    return added
+
+
+def sweep_revive_step(revives, want_n):
+    """되살리기 한 번을 허락할지 판정 — GUI·헤드리스 공용 순수 함수.
+
+    sweep_resync_action 과 같은 이유로 여기 있다: 상한이 한쪽 런타임에만
+    있으면 다른 쪽은 틱마다 영원히 엔진을 다시 띄운다(GUI 가 그랬다). 로그
+    문구까지 같이 돌려주는 건, 세는 곳과 말하는 곳이 갈라지면 숫자와 문구가
+    또 어긋나기 때문이다.
+
+    반환 (허락?, 다음 revives, 로그 문구). 로그가 빈 문자열이면 조용히 넘어간다
+    (포기 로그는 상한에 처음 닿았을 때 한 번만 나온다)."""
+    n = int(revives or 0)
+    if n >= SWEEP_REVIVE_MAX:
+        if n == SWEEP_REVIVE_MAX:
+            return False, n + 1, (
+                f"[검색스윕] {SWEEP_REVIVE_MAX}회 되살렸지만 계속 죽습니다"
+                " — 포기합니다(대기열이 바뀌면 다시 시도)")
+        return False, n, ""
+    n += 1
+    return True, n, (f"[검색스윕] 스레드가 죽어 있음 — 키워드 {int(want_n)}개로"
+                     f" 되살립니다 ({n}/{SWEEP_REVIVE_MAX})")
 
 
 def seed_router_from_server(router, list_fn, log, state):
@@ -325,13 +470,17 @@ def headless_proxies(settings_path="./settings.txt",
 
 
 def headless_sweep_cfg(settings, entries, notify, proxies=None,
-                       proxy_provider=None, token_provider=None):
+                       proxy_provider=None, token_provider=None, log=None):
     """헤드리스 검색 스윕 cfg — GUI _auto_cfg_base + _sweep_cfg 와 같은 키를 만든다.
 
     이 한 겹만 따로 두는 이유: GUI 의 값 출처는 고급 패널 **위젯**이라 위젯이
-    없는 런타임에서 그대로 부를 수 없다. 조건 조립(sweep_conditions)은 공유한다.
-    기본값은 GUI 위젯 초기값과 같게 맞췄다(휴식 30~90초, 지역간 0.4~1.2초,
-    레인 자동, 끌올 7일)."""
+    없는 런타임에서 그대로 부를 수 없다. 조건 조립(sweep_conditions)과 범위
+    판정(sweep_scope_for)은 공유한다. 기본값은 GUI 위젯 초기값과 같게 맞췄다
+    (휴식 30~90초, 지역간 0.4~1.2초, 레인 자동, 끌올 7일).
+
+    여기서 읽는 sweep_* 키는 GUI 의 _sweep_settings_patch 가 쓴다 — 그래서
+    GUI 에서 스윕을 설정하면 서버도 같은 범위로 돈다. 아무도 쓴 적이 없으면
+    sweep_scope_for 의 기본 지역으로 떨어진다(전국이 아니다)."""
     s = settings or {}
 
     def _num(key, dflt):
@@ -364,12 +513,9 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
         "out_json": "./OUT.json",
         "db_path": "./auto_seen.db",
     }
-    regions = [r for r in (s.get("sweep_regions") or []) if r]
-    if regions:
-        cfg["scope"] = "regions"
-        cfg["regions"] = regions
-    else:
-        cfg["scope"] = "nationwide"
+    cfg.update(sweep_scope_for(s.get("sweep_regions"),
+                               s.get(SWEEP_NATIONWIDE_KEY),
+                               out_json=cfg["out_json"], log=log))
     cfg["conditions"] = sweep_conditions(
         entries,
         extra=[x for x in (s.get("sweep_extra") or []) if x],
@@ -480,15 +626,11 @@ class HeadlessSweepRunner:
             self.start()
             return
         if act == "revive":
-            if self.revives >= SWEEP_REVIVE_MAX:
-                if self.revives == SWEEP_REVIVE_MAX:
-                    self.revives += 1       # 포기 로그는 한 번만
-                    self.log(f"[검색스윕] {SWEEP_REVIVE_MAX}회 되살렸지만 계속 죽습니다"
-                             " — 포기합니다(대기열이 바뀌면 다시 시도)")
+            ok, self.revives, msg = sweep_revive_step(self.revives, len(want))
+            if msg:
+                self.log(msg)
+            if not ok:
                 return
-            self.revives += 1
-            self.log(f"[검색스윕] 스레드가 죽어 있음 — 키워드 {len(want)}개로 되살립니다"
-                     f" ({self.revives}/{SWEEP_REVIVE_MAX})")
         else:
             self.revives = 0
             self.log(f"[검색스윕] 키워드 변경 {len(self.kws)}개 → {len(want)}개 — 재시작")
@@ -1587,6 +1729,16 @@ class MainWindow(QMainWindow):
             "24시간 무인운영 시 야간 과다요청 억제.")
         self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
         self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
+        # 관측 상한 탈출구. 서버 등록이 한 번 실패하면 라우터는 유효 상한을
+        # 그 시점 used 로 내리고 스스로 올리지 않는다 — 일시적 오류였다면
+        # 이 버튼(서버는 --reset-cap)이 유일한 복구 경로다.
+        self.alertResetCapBtn = QtWidgets.QPushButton("슬롯 상한 초기화")
+        self.alertResetCapBtn.setToolTip(
+            "앱 알림 슬롯 상한의 '관측치'를 지운다.\n"
+            "서버가 등록을 거부하면 라우터는 유효 상한을 그때의 등록 수로 내리고\n"
+            "스스로 올리지 않는다 — 일시적 서버 오류로 내려갔다면 여기서 되돌린다.\n"
+            "서버(헤드리스)에서는 --reset-cap 플래그가 같은 일을 한다.")
+        self.alertResetCapBtn.clicked.connect(self.on_reset_cap_clicked)
         # ── 고급 (접힘) ──
         # 평소엔 토글 하나면 된다. 진단·튜닝이 필요할 때만 편다.
         self.advancedBox = QtWidgets.QGroupBox("고급")
@@ -1598,7 +1750,8 @@ class MainWindow(QMainWindow):
         a1 = QtWidgets.QHBoxLayout()
         a1.addWidget(self.alertPollBtn); a1.addWidget(self.alertPollAllBtn)
         a1.addWidget(self.alertCoverageBtn); a1.addWidget(self.alertFleetBtn)
-        a1.addWidget(self.alertTgTestBtn); a1.addStretch(1)
+        a1.addWidget(self.alertTgTestBtn); a1.addWidget(self.alertResetCapBtn)
+        a1.addStretch(1)
         av.addLayout(a1)
 
         a2 = QtWidgets.QHBoxLayout()
@@ -2827,11 +2980,29 @@ class MainWindow(QMainWindow):
         gv.addWidget(QtWidgets.QLabel(
             "앱 알림 슬롯이 찼을 때 이 조건으로 지역을 훑어 커버한다."))
 
-        # 지역 — 미선택이면 전국(동 단위)
+        # 지역 — 미선택이면 기본 지역(명품 밀집 5개 구). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
         area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
         area.setMaximumHeight(280)
         gv.addWidget(area)
+
+        # 전국은 의식적으로 켜야 한다 — 동 6537곳 × 키워드가 한 사이클이라
+        # 계정 하루 상한(300)의 수십 배다. 미선택이 곧 전국이던 옛 규칙은
+        # 서버에서 '아무 설정 없음 = 전국'이 되어 첫 사이클에 예산을 말렸다.
+        self.autoNationwide = QtWidgets.QCheckBox("전국 훑기", box)
+        self.autoNationwide.setChecked(False)
+        _dflt_n = len(default_sweep_regions("./OUT.json"))
+        self.autoNationwide.setToolTip(
+            "체크하면 전국 동 단위(약 6537곳)를 훑는다. 한 사이클 요청 =\n"
+            "지역 수 × 키워드 수라 계정 하루 상한(300)을 금방 넘긴다 —\n"
+            f"끄면 위에서 고른 지역만, 아무것도 안 고르면 기본 {_dflt_n}동"
+            "(용산·성동·서초·강남·송파)만 훑는다.")
+        _nw = QtWidgets.QHBoxLayout(); _nw.setSpacing(8)
+        _nw.addWidget(self.autoNationwide)
+        _nw.addWidget(QtWidgets.QLabel(
+            f"미선택 시 기본 {_dflt_n}동만 훑습니다(전국 아님)"))
+        _nw.addStretch(1)
+        gv.addLayout(_nw)
 
         self.autoExtra = QtWidgets.QLineEdit(box); self.autoExtra.setPlaceholderText("추가 키워드")
         self.autoExclude = QtWidgets.QLineEdit(box); self.autoExclude.setPlaceholderText("제외 키워드")
@@ -2912,7 +3083,125 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.autoAccountsBtn); bar.addWidget(self.autoProxyViewBtn)
         bar.addStretch(1)
         gv.addLayout(bar)
+
+        # 복원이 먼저, 배선이 나중이다 — 순서가 바뀌면 복원값이 저장을 유발해
+        # 첫 실행에서 '기본값을 사용자가 고른 값'으로 굳혀 버린다.
+        self._restore_sweep_settings()
+        self._wire_sweep_settings(box)
         return box
+
+    # ── 스윕 설정 영속화 ──
+    # 이 값들은 GUI 위젯에만 있었고 alert_settings.json 에는 한 번도 쓰이지
+    # 않았다. 그래서 서버(headless_sweep_cfg)는 늘 빈 설정을 읽어 전국으로
+    # 떨어졌고, 운영자에게는 좁힐 레버가 아예 없었다. 여기서 위젯 값을
+    # headless_sweep_cfg 가 읽는 바로 그 키로 저장한다.
+    def _sweep_settings_patch(self):
+        return {
+            "sweep_regions": self._selected_auto_regions(),
+            SWEEP_NATIONWIDE_KEY: bool(self.autoNationwide.isChecked()),
+            "sweep_extra": self._splt(self.autoExtra.text()),
+            "sweep_exclude": self._splt(self.autoExclude.text()),
+            "sweep_min": self._num(self.autoMin.text()),
+            "sweep_max": self._num(self.autoMax.text()),
+            "sweep_days": int(self.autoDays.value()),
+            "sweep_rest_min": int(self.autoRestMin.value()),
+            "sweep_rest_max": int(self.autoRestMax.value()),
+            "sweep_gap_min": float(self.autoGapMin.value()),
+            "sweep_gap_max": float(self.autoGapMax.value()),
+            "sweep_lanes": int(self.autoLanes.value()),
+        }
+
+    def _restore_sweep_settings(self):
+        """저장된 값을 위젯에 되돌린다. 없으면 위젯 초기값 그대로 둔다."""
+        s = self._load_alert_settings()
+        if not isinstance(s, dict):
+            return
+
+        def _txt(widget, key):
+            v = s.get(key)
+            if isinstance(v, (list, tuple)):
+                v = ", ".join(str(x) for x in v)
+            if v is not None:
+                widget.setText(str(v))
+
+        def _spin(widget, key):
+            v = s.get(key)
+            if v is None:
+                return
+            try:
+                widget.setValue(type(widget.value())(v))
+            except (TypeError, ValueError):
+                pass
+
+        def _spin_range(lo, hi, lo_key, hi_key):
+            """min<=max 커플링을 잠시 풀고 두 값을 되돌린 뒤 다시 건다.
+
+            커플링(lo.valueChanged→hi.setMinimum, hi.valueChanged→lo.setMaximum)이
+            걸린 채로 복원하면 지금 위젯에 들어 있는 값이 저장값을 잘라낸다.
+            어느 쪽을 먼저 넣어도 마찬가지라 순서로는 못 피한다 — 현재 하한이
+            200 이면 상한 140 은 200 으로 잘리고, 그 반대도 같다.
+            커플링이 건드리지 않는 lo.minimum()/hi.maximum() 이 원래 한계다."""
+            floor, ceil = lo.minimum(), hi.maximum()
+            lo.setMaximum(ceil)
+            hi.setMinimum(floor)
+            _spin(lo, lo_key)
+            _spin(hi, hi_key)
+            hi.setMinimum(lo.value())
+            lo.setMaximum(hi.value())
+        try:
+            _txt(self.autoExtra, "sweep_extra")
+            _txt(self.autoExclude, "sweep_exclude")
+            _txt(self.autoMin, "sweep_min")
+            _txt(self.autoMax, "sweep_max")
+            _spin(self.autoDays, "sweep_days")
+            _spin_range(self.autoRestMin, self.autoRestMax,
+                        "sweep_rest_min", "sweep_rest_max")
+            _spin_range(self.autoGapMin, self.autoGapMax,
+                        "sweep_gap_min", "sweep_gap_max")
+            _spin(self.autoLanes, "sweep_lanes")
+            self.autoNationwide.setChecked(bool(s.get(SWEEP_NATIONWIDE_KEY)))
+            want = {str(r) for r in (s.get("sweep_regions") or []) if r}
+            if want:
+                for leaf in getattr(self, "auto_area_leaves", []):
+                    if leaf.data(0, Qt.ItemDataRole.UserRole) in want:
+                        leaf.setCheckState(0, Qt.CheckState.Checked)
+        except Exception as e:
+            print(f"[스윕설정 복원 실패] {type(e).__name__}: {e}")
+
+    def _wire_sweep_settings(self, parent):
+        """위젯 변경 → alert_settings.json 저장. 디바운스 필수 —
+        시도/구를 한 번 체크하면 itemChanged 가 수백 발 나온다."""
+        self._sweep_save_timer = QtCore.QTimer(parent)
+        self._sweep_save_timer.setSingleShot(True)
+        self._sweep_save_timer.setInterval(300)
+        self._sweep_save_timer.timeout.connect(self._save_sweep_settings)
+        kick = self._sweep_save_timer.start
+        self.autoAreaTree.itemChanged.connect(lambda *_: kick())
+        self.autoNationwide.toggled.connect(lambda *_: kick())
+        for w in (self.autoExtra, self.autoExclude, self.autoMin, self.autoMax):
+            w.textChanged.connect(lambda *_: kick())
+        for w in (self.autoDays, self.autoRestMin, self.autoRestMax,
+                  self.autoGapMin, self.autoGapMax, self.autoLanes):
+            w.valueChanged.connect(lambda *_: kick())
+
+    def _save_sweep_settings(self):
+        self._save_alert_settings(self._sweep_settings_patch())
+
+    def on_reset_cap_clicked(self):
+        """앱 슬롯 상한 관측치 초기화 — 헤드리스의 --reset-cap 과 같은 동작.
+
+        관측 상한은 하강만 한다(스스로 회복하지 않는다). 등록 엔드포인트의
+        일시적 오류 하나로 내려앉으면 여기 말고는 routes 파일을 손으로 고치는
+        길뿐이었다."""
+        if not self._router:
+            self.alert("라우터가 없습니다 — 로그를 확인하세요")
+            return False
+        if self._router.reset_observed_cap():
+            self.alertLog.append("[라우터] 앱 슬롯 상한 관측치 초기화 —"
+                                 " 다음 등록부터 설정 상한을 다시 씁니다")
+            return True
+        self.alertLog.append("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
+        return False
 
 
     # ── 알림 설정 저장/불러오기 ──
@@ -3333,11 +3622,12 @@ class MainWindow(QMainWindow):
             "out_json": "./OUT.json",
             "db_path": "./auto_seen.db",
         }
-        sel = self._selected_auto_regions()
-        if sel:
-            cfg["scope"] = "regions"; cfg["regions"] = sel
-        else:
-            cfg["scope"] = "nationwide"
+        # 범위 판정은 헤드리스(headless_sweep_cfg)와 같은 함수를 쓴다 —
+        # 여기서만 '미선택=전국'이면 GUI 에서 본 범위와 서버가 도는 범위가 갈린다.
+        cfg.update(sweep_scope_for(self._selected_auto_regions(),
+                                   self.autoNationwide.isChecked(),
+                                   out_json=cfg["out_json"],
+                                   log=self.alertLog.append))
         return cfg
 
     @staticmethod
@@ -3368,6 +3658,26 @@ class MainWindow(QMainWindow):
         cfg["conditions"] = conditions
         return cfg
 
+    def _dispose_auto_monitor(self):
+        """다 쓴 AutoMonitor 를 놓아준다 — 시그널을 끊고 Qt 에 반납한다.
+
+        돌고 있는 스레드는 건드리지 않는다(호출자가 이미 정지시킨 뒤에 부른다).
+        반환값은 실제로 버렸는지 — 테스트가 누수 여부를 이걸로 본다."""
+        am = self.auto_monitor
+        self.auto_monitor = None
+        if am is None:
+            return False
+        for sig in ("log", "found"):
+            try:
+                getattr(am, sig).disconnect()
+            except (TypeError, RuntimeError, AttributeError):
+                pass                    # 연결이 없으면 disconnect 가 TypeError
+        try:
+            am.deleteLater()
+        except (RuntimeError, AttributeError):
+            pass
+        return True
+
     def _start_search_sweep(self):
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
             # stop() 은 비동기다(최대 8초). 그 안에 다시 켜면 여기서 조용히 막혔다 —
@@ -3383,6 +3693,10 @@ class MainWindow(QMainWindow):
                 self.alertLog.append("[검색스윕] 대기열이 비어 시작하지 않습니다")
                 return
             from daangn.auto_monitor import AutoMonitor
+            # 죽은 모니터를 버리고 간다. 안 버리면 되살릴 때마다 MainWindow 에
+            # 매달린 QThread 가 한 개씩 쌓이고(수명이 창과 같다), 끊지 않은
+            # log/found 시그널은 죽은 객체에서도 계속 슬롯을 때린다.
+            self._dispose_auto_monitor()
             self.auto_monitor = AutoMonitor(self, cfg)
             self.auto_monitor.log.connect(self.alertLog.append)
             self.auto_monitor.found.connect(self._on_sweep_found)
@@ -3424,14 +3738,24 @@ class MainWindow(QMainWindow):
         # 따로 두면 서버에서만 나는 버그가 생긴다.
         act = sweep_resync_action(want, have, running)
         if not act:
+            self._sweep_revives = 0
             return
         if act == "start":
+            self._sweep_revives = 0
             self._start_search_sweep()
             return
         if act == "revive":
-            self.alertLog.append(
-                f"[검색스윕] 스레드가 죽어 있음 — 키워드 {len(want)}개로 되살립니다")
+            # 상한 계산도 헤드리스와 같은 함수를 쓴다. 예전엔 여기에 상한이
+            # 아예 없어서, 뜨자마자 죽는 엔진을 틱마다 영원히 다시 띄우고
+            # 죽은 AutoMonitor 를 창에 쌓았다.
+            ok, self._sweep_revives, msg = sweep_revive_step(
+                getattr(self, "_sweep_revives", 0), len(want))
+            if msg:
+                self.alertLog.append(msg)
+            if not ok:
+                return
         else:
+            self._sweep_revives = 0
             self.alertLog.append(
                 f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
         self._stop_search_sweep()          # _sweep_kws 를 None 으로 되돌린다
@@ -4649,6 +4973,10 @@ def _run_headless():
     # 이게 없으면 앱 슬롯 상한을 넘긴 키워드는 서버에서 아무도 안 본다.
     router = sweep_queue = sweep_runner = None
     seed_state = {}
+    # 스윕 스레드가 찾은 매물은 여기로만 건너온다 — sqlite 는 폴링 스레드 소유다.
+    import queue as _queue
+    sweep_found_q = _queue.Queue(maxsize=SWEEP_FIND_QUEUE_MAX)
+    sweep_found_dropped = [0]
 
     def _server_keyword_list(core_only=False):
         """서버에 이미 등록된 키워드 목록(첫 유효 계정 기준).
@@ -4677,21 +5005,15 @@ def _run_headless():
         router = KeywordRouter(m, sweep_queue, slot_cap=_cap)
 
         def _sweep_found(payload):
-            """스윕이 찾은 매물도 앱 알림과 같은 문으로 워치리스트에 들어간다."""
-            if watch_tracker is None:
-                return
+            """**스윕 스레드**에서 불린다 — 큐에 넣기만 하고 아무것도 안 만진다.
+
+            여기서 WatchStore 를 건드리면 폴링 루프와 sqlite 커넥션 하나를
+            두 스레드가 나눠 쓴다(drain_sweep_finds 참고). put_nowait 는
+            절대 막히지 않으므로 스윕 스레드가 폴링에 붙잡히지 않는다."""
             try:
-                kw = sweep_keyword_for(payload, sweep_queue.keywords())
-            except Exception:
-                kw = ""
-            norm = sweep_found_to_match(payload, kw)
-            if not norm:
-                return
-            try:
-                if watch_tracker.add_from_matches([norm], source="sweep"):
-                    log(f"[검색스윕] 신규 매물 추적: {(norm.get('title') or '')[:40]}")
-            except Exception as e:
-                log(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
+                sweep_found_q.put_nowait(payload)
+            except _queue.Full:
+                sweep_found_dropped[0] += 1
 
         def _sweep_cfg_builder():
             return headless_sweep_cfg(
@@ -4711,6 +5033,18 @@ def _run_headless():
     except Exception as e:
         log("[검색스윕] 초기화 실패 — 앱 슬롯 밖 키워드는 커버되지 않습니다: "
             f"{str(e)[:120]}")
+
+    # 관측 상한 되돌리기 — 등록 엔드포인트의 일시적 오류 하나로 유효 상한이
+    # 잘못 내려앉았을 때의 탈출구. 이 플래그가 생기기 전에는 서버에서
+    # data/keyword_routes.json 을 손으로 고치는 것 말고 방법이 없었다.
+    if "--reset-cap" in argv:
+        if router is None:
+            log("[라우터] 초기화 실패 — 상한 관측치를 되돌릴 수 없습니다")
+        elif router.reset_observed_cap():
+            log("[라우터] 앱 슬롯 상한 관측치 초기화 —"
+                " 다음 등록부터 설정 상한을 다시 씁니다")
+        else:
+            log("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
 
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
     if "--register" in argv:
@@ -4763,6 +5097,13 @@ def _run_headless():
                     log(f"[라우터] 승격 실패: {str(e)[:80]}")
             if sweep_runner is not None:
                 sweep_runner.resync()
+            # 스윕 스레드가 넘긴 매물을 여기(폴링 스레드)서 워치리스트에 넣는다.
+            if sweep_found_dropped[0]:
+                log(f"[검색스윕] 인계 큐가 차서 {sweep_found_dropped[0]}건 버림")
+                sweep_found_dropped[0] = 0
+            drain_sweep_finds(sweep_found_q, watch_tracker,
+                              (sweep_queue.keywords if sweep_queue is not None
+                               else list), log)
             # 유효 토큰 현황
             try:
                 valid = len(m._valid(core_only))
