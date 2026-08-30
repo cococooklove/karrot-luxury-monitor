@@ -35,11 +35,13 @@ if (-not (Test-Path $icon)) { $icon = $py }
 $desktop = [Environment]::GetFolderPath("Desktop")
 $ws = New-Object -ComObject WScript.Shell
 
-function New-Shortcut($name, $exe, $args, $desc) {
+# $args 를 파라미터 이름으로 쓰면 안 된다 — PowerShell 자동 변수라 언바운드
+# 인자 배열(Object[])로 덮여서 $sc.Arguments 에 넣을 때 형변환이 터진다.
+function New-Shortcut($name, $exe, $argline, $desc) {
     $path = Join-Path $desktop ($name + ".lnk")
     $sc = $ws.CreateShortcut($path)
     $sc.TargetPath = $exe
-    $sc.Arguments = $args
+    $sc.Arguments = [string]$argline
     $sc.WorkingDirectory = $AppDir     # OUT.json 이 cwd 상대경로다 — 반드시 필요
     $sc.IconLocation = $icon
     $sc.Description = $desc
