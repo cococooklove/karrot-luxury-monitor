@@ -96,6 +96,66 @@ ck("dead 는 최근 변동보다 우선",
    aw.state_for(row(tier="dead", last_change=NOW - 10,
                     last_delta=-20), NOW) == aw.STATE_ENDED)
 
+# ── F. 추적 등록과 이력 기록 ──
+import httpx
+
+
+class FakeAPI:
+    """지정한 응답을 순서대로 돌려준다."""
+
+    def __init__(self, seq):
+        self.seq = list(seq)
+
+    def fetch(self, article_id):
+        return self.seq.pop(0)
+
+    def close(self):
+        pass
+
+
+d2 = tempfile.mkdtemp()
+st2 = aw.WatchStore(os.path.join(d2, "w.db"))
+tr2 = aw.WatchTracker(st2)
+
+M = [{"article_id": "77", "title": "샤넬 클미", "price": "285만원",
+      "region": "압구정", "url": "u77", "time": NOW - 3600, "keyword": "샤넬"}]
+ck("매치 1건 등록", tr2.add_from_matches(M, now=NOW) == 1)
+r77 = st2.get("77")
+ck("keyword 저장", r77["keyword"] == "샤넬", str(r77.get("keyword")))
+ck("source 기본 app", r77["source"] == "app", str(r77.get("source")))
+ck("first_price = 파싱가", r77["first_price"] == 2850000, str(r77.get("first_price")))
+ck("last_change 없음", not r77["last_change"])
+ck("기준선 이력 1건", st2.price_history("77") == [{"ts": NOW, "price": 2850000}],
+   str(st2.price_history("77")))
+
+st3 = aw.WatchStore(os.path.join(d2, "w3.db"))
+tr3 = aw.WatchTracker(st3)
+tr3.add_from_matches([dict(M[0], article_id="88")], now=NOW, source="sweep")
+ck("source 지정", st3.get("88")["source"] == "sweep")
+
+# 첫 조회는 기준선 확보라 이벤트를 안 낸다. 두 번째 조회에서 인하가 잡힌다.
+BASE = {"id": "77", "gone": False, "title": "샤넬 클미", "price": 2850000,
+        "status": "ongoing", "status_name": "", "region": "압구정", "url": "u77",
+        "published_at": NOW - 3600, "updated_at": NOW, "republish_count": 0,
+        "watches_count": 0, "chat_rooms_count": 0, "reads_count": 0}
+ev = tr2.check_one("77", FakeAPI([dict(BASE)]), now=NOW + 10)
+ck("첫 조회는 조용", ev == [], str(ev))
+ev = tr2.check_one("77", FakeAPI([dict(BASE, price=2600000)]), now=NOW + 20)
+ck("두 번째 조회에서 인하 감지",
+   [e["kind"] for e in ev] == ["price_down"], str(ev))
+r77 = st2.get("77")
+ck("last_change 갱신", r77["last_change"] == NOW + 20, str(r77.get("last_change")))
+ck("last_delta 음수", r77["last_delta"] == -250000, str(r77.get("last_delta")))
+ck("first_price 불변", r77["first_price"] == 2850000, str(r77.get("first_price")))
+ck("이력 2건", len(st2.price_history("77")) == 2,
+   str(st2.price_history("77")))
+ck("state 는 down", aw.state_for(r77, NOW + 30) == aw.STATE_DOWN)
+
+# 가격이 그대로면 이력이 늘지 않는다.
+tr2.check_one("77", FakeAPI([dict(BASE, price=2600000)]), now=NOW + 30)
+ck("무변동은 이력 안 늘림", len(st2.price_history("77")) == 2,
+   str(st2.price_history("77")))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

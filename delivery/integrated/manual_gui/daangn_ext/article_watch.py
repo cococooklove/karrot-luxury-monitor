@@ -383,7 +383,7 @@ class WatchTracker:
     def _now(self, now=None) -> int:
         return int(now if now is not None else self._now_fn())
 
-    def add_from_matches(self, matches, now=None) -> int:
+    def add_from_matches(self, matches, now=None, source="app") -> int:
         now = self._now(now)
         added = 0
         for m in matches or []:
@@ -403,12 +403,13 @@ class WatchTracker:
             tier = tier_for(published, now)
             if tier == TIER_DEAD:
                 continue
+            price = parse_price_text(m.get("price"))
             self.store.upsert({
                 "id": aid,
                 "title": m.get("title") or "",
                 "region": m.get("region") or "",
                 "url": m.get("url") or "",
-                "price": parse_price_text(m.get("price")),
+                "price": price,
                 "status": STATUS_ONGOING,
                 "republish_count": 0,
                 "published_at": published,
@@ -417,7 +418,16 @@ class WatchTracker:
                 "next_check": now + interval_for(tier),
                 "tier": tier,
                 "fail": 0,
+                "keyword": m.get("keyword") or "",
+                "source": source,
+                # 씨앗 가격은 알림 표시 문자열에서 왔다. Δ 의 기준선으로 쓰되,
+                # 첫 실측 조회가 이 값을 덮어쓰지 않게 price 와 따로 둔다.
+                "first_price": price,
+                "last_change": 0,
+                "last_delta": 0,
             })
+            if price:
+                self.store.add_price(aid, now, price)
             added += 1
         return added
 
@@ -470,13 +480,17 @@ class WatchTracker:
         tier = tier_for(new.get("published_at") or old.get("published_at") or 0, now)
         if new.get("status") == STATUS_CLOSED:
             tier = TIER_DEAD
+        price = new.get("price") if isinstance(new.get("price"), int) \
+            else old.get("price")
+        old_price = old.get("price")
+        changed = (isinstance(price, int) and isinstance(old_price, int)
+                   and price != old_price and not seeding)
         self.store.upsert({
             "id": str(article_id),
             "title": new.get("title") or old.get("title"),
             "region": new.get("region") or old.get("region"),
             "url": new.get("url") or old.get("url"),
-            "price": new.get("price") if isinstance(new.get("price"), int)
-                     else old.get("price"),
+            "price": price,
             "status": new.get("status"),
             "republish_count": new.get("republish_count") or 0,
             "published_at": new.get("published_at") or old.get("published_at") or 0,
@@ -485,7 +499,16 @@ class WatchTracker:
             "next_check": now + interval_for(tier),
             "tier": tier,
             "fail": 0,
+            "keyword": old.get("keyword") or "",
+            "source": old.get("source") or "app",
+            # 씨앗 단계에서 first_price 가 비어 있으면(구버전 행) 첫 실측을 기준선으로 삼는다.
+            "first_price": old.get("first_price") or price,
+            "last_change": now if changed else (old.get("last_change") or 0),
+            "last_delta": (price - old_price) if changed
+                          else (old.get("last_delta") or 0),
         })
+        if changed:
+            self.store.add_price(str(article_id), now, price)
         return events
 
     def _note_failure(self, old, article_id, now) -> list[dict]:
