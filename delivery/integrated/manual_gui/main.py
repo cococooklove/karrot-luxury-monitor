@@ -122,10 +122,11 @@ def listing_display_rows(rows, now, state_filter="all"):
     from daangn_ext import article_watch as _aw
     out = []
     for r in rows or []:
-        # 중복 판정만을 위한 묘비(백필이 세운 tier=dead·제목 없음)는 보여줄 게
-        # 없다. 걸러내지 않으면 표에 빈 줄로 뜬다. evicted 는 되살아나므로
-        # 여기 해당하지 않는다.
-        if (r.get("tier") or "") == _aw.TIER_DEAD and not (r.get("title") or ""):
+        # 중복 판정만을 위한 묘비(백필이 match_seen.json 에서 옮긴 행)는 보여줄
+        # 게 없다. 걸러내지 않으면 표에 빈 줄로 뜬다. 판정 기준은 '제목이 비었다'
+        # 가 아니라 출처다 — 제목 없이 들어온 실제 매물이 종료되는 순간 표에서
+        # 조용히 사라지면 사용자는 이유를 알 수 없다.
+        if (r.get("source") or "") == _aw.SOURCE_MATCH_SEEN:
             continue
         state = _aw.state_for(r, now)
         if state_filter in ("new", "down", "ended") and state != state_filter:
@@ -169,6 +170,482 @@ def sweep_found_to_match(payload, keyword):
             "keyword": keyword or ""}
 
 
+def sweep_keyword_for(payload, keywords):
+    """스윕이 찾은 매물에 붙일 키워드 — 제목에 들어 있는 대기열 키워드 우선.
+
+    GUI(_on_sweep_found)와 헤드리스가 같은 규칙을 써야 매물 표의 키워드 열이
+    런타임마다 갈라지지 않는다."""
+    kws = [k for k in (keywords or []) if k]
+    title = (payload or {}).get("title") or ""
+    return next((k for k in kws if k in title), kws[0] if kws else "")
+
+
+def sweep_conditions(entries, extra=None, exclude=None,
+                     min_price=None, max_price=None, days=None):
+    """스윕 대기열 엔트리 → SweepEngine cfg["conditions"].
+
+    가격·제외는 등록 당시 사용자가 넣은 값(엔트리)을 우선한다 — 넘어온 값은
+    엔트리에 없을 때의 기본값이다. 기본값의 **출처**만 런타임마다 다르고
+    (GUI=고급 패널 위젯, 헤드리스=alert_settings.json) 조립 규칙은 하나다."""
+    out = []
+    for e in entries or []:
+        out.append({
+            "keyword": e["keyword"],
+            "extra": list(extra or []),
+            "exclude": list(e.get("exclude") or []) or list(exclude or []),
+            "min": e.get("min") if e.get("min") is not None else min_price,
+            "max": e.get("max") if e.get("max") is not None else max_price,
+            "days": days,
+        })
+    return out
+
+
+# 스윕 지역 설정 키 — GUI 위젯 값이 이 이름으로 alert_settings.json 에 저장되고
+# 헤드리스가 같은 이름으로 읽는다. 이름이 갈리면 서버는 GUI 설정을 못 본다.
+SWEEP_NATIONWIDE_KEY = "sweep_nationwide"
+
+# 지역을 아무도 고르지 않았을 때 쓸 기본 지역: 명품 밀집 5개 구(약 166동).
+DEFAULT_SWEEP_SIDO = "서울특별시"
+DEFAULT_SWEEP_GU = ("용산구", "성동구", "서초구", "강남구", "송파구")
+
+
+def default_sweep_regions(out_json="./OUT.json"):
+    """지역 설정이 아예 없을 때 훑을 기본 동 목록.
+
+    전국은 동 6537곳이다. 스윕 한 사이클은 (지역 × 키워드) 요청이라 키워드가
+    하나뿐이어도 6537 요청 — 계정 하루 상한(daily_cap=300)의 21배다. 그래서
+    '아무 설정도 없는 새 설치'가 전국을 고르면 첫 사이클에 함대 예산이 통째로
+    마르고, 남은 하루는 엔진이 '전 계정 캡/쿨다운 도달' no-op 으로만 돈다.
+    운영자에게 레버가 없는 상태에서 그건 기본값이 될 수 없다.
+
+    그래서 기본값은 넓히기 쉬운 쪽으로 좁게 잡는다. 넓히는 건 지역 트리에서
+    체크하거나 '전국 훑기'를 켜는 두 번의 의식적인 동작이다.
+
+    OUT.json 이 없거나 이름이 달라져 하나도 못 고르면 빈 목록을 돌려준다 —
+    그 경우에도 전국으로 떨어뜨리지 않는다. 커버리지 0 은 로그로 보이지만
+    예산 고갈은 안 보인다."""
+    import json as _json
+    try:
+        with open(out_json, encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception:
+        return []
+    out, seen = [], set()
+    for block in data or []:
+        if block.get("name1") != DEFAULT_SWEEP_SIDO:
+            continue
+        if block.get("name2") not in DEFAULT_SWEEP_GU:
+            continue
+        for loc in block.get("locations") or []:
+            code = f"{loc.get('name')}-{loc.get('id')}"
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append(code)
+    return out
+
+
+def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None):
+    """지역 설정 → cfg 의 scope/regions. GUI(_auto_cfg_base)·헤드리스 공용.
+
+    셋 중 하나다:
+      고른 지역이 있다      → 그 지역만.
+      '전국 훑기'가 켜졌다  → 전국(동 6537곳). **명시적으로 켜야만** 여기 온다.
+      둘 다 아니다          → default_sweep_regions().
+
+    옛 규칙('지역 미선택 = 전국')을 버린 이유는 default_sweep_regions 참고.
+    두 런타임이 같은 규칙을 써야 GUI 에서 본 범위가 서버에서 그대로 돈다."""
+    regions = [r for r in (regions or []) if r]
+    if regions:
+        return {"scope": "regions", "regions": regions}
+    if nationwide:
+        return {"scope": "nationwide"}
+    dflt = default_sweep_regions(out_json)
+    if log:
+        log(f"[검색스윕] 지역 미지정 — 기본 지역 {len(dflt)}곳으로 제한합니다"
+            " (전국을 훑으려면 '전국 훑기'를 켜세요)")
+    return {"scope": "regions", "regions": dflt}
+
+
+# 죽은 스윕 되살리기 상한. 엔진이 뜨자마자 죽는 상황(토큰 없음·프록시 전멸)에서
+# 틱마다 무한히 다시 띄우면 그때마다 실계정 요청을 태운다 — 몇 번 해보고 포기한다.
+SWEEP_REVIVE_MAX = 5
+
+# 서버 목록 씨딩 시도 상한. 첫 실행에만 필요한 조회라 실패가 이어져도 매 틱
+# 요청을 새로 쓰지 않는다.
+SEED_ATTEMPT_MAX = 3
+
+
+def sweep_resync_action(want, have, running):
+    """돌고 있는 스윕이 낡았는지 판정 — GUI·헤드리스 공용 순수 함수.
+
+    want=대기열 키워드 집합, have=지금 도는 스윕이 떠 있는 집합(None=안 떠 있음),
+    running=스레드가 살아 있는지.
+
+    반환: "" 무동작 / "start" 시작 / "revive" 죽은 스레드 되살리기 /
+          "restart" 키워드가 바뀌어 갈아끼우기(want 가 비면 정지만)."""
+    want = set(want or [])
+    if have is None:
+        # 아직 안 떴거나 정지 요청 뒤 — 큐가 찼고 스레드가 빠졌으면 띄운다.
+        return "start" if (want and not running) else ""
+    if want == have and (running or not want):
+        return ""
+    if want == have:
+        # 엔진 run() 은 루프 전체를 except 로 감싸므로 치명오류가 나면 스레드만
+        # 조용히 빠진다. have 는 남아 있어 want == have 가 계속 성립하고,
+        # 스윕은 세션 내내 죽은 채로 방치된다.
+        return "revive"
+    return "restart"
+
+
+# 스윕 스레드 → 폴링 스레드 인계 큐의 상한. 폴링이 멈춰도 메모리가 무한히
+# 자라지 않게 한다. 넘치면 버리고 센다(로그로 보인다).
+SWEEP_FIND_QUEUE_MAX = 2000
+
+
+def drain_sweep_finds(q, tracker, keywords_fn, log, limit=SWEEP_FIND_QUEUE_MAX):
+    """스윕이 찾은 payload 를 **폴링 스레드에서** 워치리스트에 넣는다.
+
+    SweepEngine 의 on_found 는 스윕 스레드에서 동기로 불린다(notify →
+    _dedup_notify). 거기서 WatchStore 를 바로 만지면 폴링 루프와 같은 sqlite
+    커넥션(check_same_thread=False, 락 없음)을 두 스레드가 나눠 쓰게 된다 —
+    커넥션이 하나뿐이라 한쪽의 commit() 이 다른 쪽의 읽기-수정-쓰기를 중간에
+    커밋하고, enforce_cap 의 active_count→oldest_active→mark 사이로 insert 가
+    끼어든다.
+
+    GUI 에는 이 위험이 없다: AutoMonitor.found 가 pyqtSignal 이라 큐 연결로
+    GUI 스레드에 배달된다. 헤드리스도 같은 모양으로 맞춘 것이 이 함수다 —
+    스윕 스레드는 큐에 넣기만 하고(put_nowait 는 절대 안 막힌다), sqlite 는
+    폴링 스레드 하나만 만진다. 락 대신 큐를 고른 이유: 락은 '앞으로 추가될
+    mutator 마다 잊지 말고 걸기'에 기대지만, 큐는 sqlite 를 단일 스레드로
+    묶어 구조로 보장한다. 그리고 스윕 스레드가 폴링 루프의 긴 네트워크 스윕에
+    한 순간도 붙잡히지 않는다.
+
+    payload 정규화까지 여기서 한다 — sweep_queue 파일 읽기(keywords_fn)도
+    스윕 스레드에 남기지 않기 위해서다."""
+    import queue as _q
+    # 추적기가 없으면(watch.db 열기 실패) 큐를 비우지 않는다 — 꺼내고 버리면
+    # 저장소가 살아난 뒤에도 그 사이 찾은 매물이 조용히 사라진다.
+    if q is None or tracker is None:
+        return 0
+    payloads = []
+    while len(payloads) < int(limit):
+        try:
+            payloads.append(q.get_nowait())
+        except _q.Empty:
+            break
+    if not payloads:
+        return 0
+    try:
+        kws = list(keywords_fn() or [])
+    except Exception:
+        kws = []
+    norms = []
+    for p in payloads:
+        norm = sweep_found_to_match(p, sweep_keyword_for(p, kws))
+        if norm:
+            norms.append(norm)
+    if not norms:
+        return 0
+    try:
+        added = tracker.add_from_matches(norms, source="sweep")
+    except Exception as e:
+        log(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
+        return 0
+    if added:
+        log(f"[검색스윕] 신규 매물 추적 {added}건")
+    return added
+
+
+def sweep_revive_step(revives, want_n):
+    """되살리기 한 번을 허락할지 판정 — GUI·헤드리스 공용 순수 함수.
+
+    sweep_resync_action 과 같은 이유로 여기 있다: 상한이 한쪽 런타임에만
+    있으면 다른 쪽은 틱마다 영원히 엔진을 다시 띄운다(GUI 가 그랬다). 로그
+    문구까지 같이 돌려주는 건, 세는 곳과 말하는 곳이 갈라지면 숫자와 문구가
+    또 어긋나기 때문이다.
+
+    반환 (허락?, 다음 revives, 로그 문구). 로그가 빈 문자열이면 조용히 넘어간다
+    (포기 로그는 상한에 처음 닿았을 때 한 번만 나온다)."""
+    n = int(revives or 0)
+    if n >= SWEEP_REVIVE_MAX:
+        if n == SWEEP_REVIVE_MAX:
+            return False, n + 1, (
+                f"[검색스윕] {SWEEP_REVIVE_MAX}회 되살렸지만 계속 죽습니다"
+                " — 포기합니다(대기열이 바뀌면 다시 시도)")
+        return False, n, ""
+    n += 1
+    return True, n, (f"[검색스윕] 스레드가 죽어 있음 — 키워드 {int(want_n)}개로"
+                     f" 되살립니다 ({n}/{SWEEP_REVIVE_MAX})")
+
+
+def seed_router_from_server(router, list_fn, log, state):
+    """routes 파일이 비어 있을 때만 서버 등록 목록을 읽어 라우터에 인정시킨다.
+
+    자동 시작(GUI 8초 지연·헤드리스 부팅)은 등록 화면을 거치지 않고 바로 폴링
+    틱으로 들어간다. 그 경로가 씨딩을 안 하면 라우터는 함대가 비었다고 믿고
+    이미 꽉 찬 서버 한도에 등록을 시도해 전부 실패시킨 뒤 모든 키워드를 스윕으로
+    민다 — 무인 첫 실행이 통째로 앱 알림을 잃는다.
+
+    routes 가 이미 차 있으면 목록 조회조차 하지 않으므로 첫 실행 뒤에는 공짜다.
+    반대로 토큰이 없어 목록이 계속 비면 씨딩은 영원히 안 끝나므로, 시도 자체를
+    state(호출자가 들고 있는 dict)로 SEED_ATTEMPT_MAX 회까지만 허용한다."""
+    if router is None:
+        return 0
+    try:
+        if router.routes():
+            return 0
+    except Exception:
+        return 0
+    n = int(state.get("n") or 0)
+    if n >= SEED_ATTEMPT_MAX:
+        return 0
+    state["n"] = n + 1
+    try:
+        data = list_fn() or {}
+        kws = [k.get("keyword") for k in (data.get("user_keywords") or [])]
+        seeded = router.seed_from_server(kws) if kws else 0
+        if seeded:
+            log(f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
+        elif state["n"] >= SEED_ATTEMPT_MAX:
+            log("[라우터] 서버 목록을 못 읽어 기존 등록 인식을 포기합니다"
+                " — 등록 목록 새로고침 시 다시 시도됩니다")
+        return seeded
+    except Exception as e:
+        log(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
+        return 0
+
+
+def read_token_quiet(accounts_path="./accounts.json"):
+    """accounts.json 에서 가장 늦게 만료되는 access 를 읽는다 — 수확은 하지 않는다.
+
+    수확을 소유하지 **않는** 쪽(검색 스윕)이 쓰는 provider. 스윕에 필요한 건
+    '수확'이 아니라 '신선한 토큰'이고, 토큰을 신선하게 유지하는 일은 폴링 루프가
+    이미 주기적으로 한다. 여기서 또 함대를 깨우면 두 스레드가 같은 LDPlayer 를
+    동시에 흔들며 accounts.json 을 동시에 쓴다."""
+    import json as _json
+    try:
+        from daangn_ext.token_manager import token_exp
+        best = None
+        with open(accounts_path, encoding="utf-8") as _f:
+            _accs = _json.load(_f)
+        for a in _accs:
+            acc = a.get("access") or ""
+            if acc and (best is None or token_exp(acc) > token_exp(best)):
+                best = acc
+        return best
+    except Exception:
+        return None
+
+
+def harvest_token_quiet(accounts_path="./accounts.json", log=None):
+    """함대 수확 후 최신 access. 수확을 **소유한** 쪽만 부른다.
+
+    주기적 소유자는 런타임마다 하나뿐이다: GUI 는 _HarvestThread(20분),
+    헤드리스는 폴링 루프(20분). 스윕은 어느 쪽에서도 수확하지 않고
+    read_token_quiet 로 파일만 읽는다. 여기를 부르는 나머지 한 곳은
+    사용자가 직접 누른 _multi(harvest=True) 뿐이다.
+
+    log 를 넘기면 병합 락 경고까지 보인다 — 안 넘기면 'accounts.json 을
+    다른 프로세스가 잡고 있어 수확분이 덮일 수 있다'는 경고가 삼켜진다."""
+    try:
+        import ld_autoharvest
+        ld_autoharvest.harvest_all(accounts_path, nudge=True, log=log)
+    except Exception:
+        pass
+    return read_token_quiet(accounts_path)
+
+
+def headless_proxies(settings_path="./settings.txt",
+                     accounts_path="./accounts.json"):
+    """settings.txt + accounts.json 프록시 — GUI _collect_proxies 의 파일 버전.
+
+    GUI 는 컨트롤러가 이미 읽어 둔 목록을 쓰지만 헤드리스에는 컨트롤러가 없다.
+    settings.txt 형식(1줄 간격, 2줄 동시요청, 3줄~ 프록시)은 controller 와 같다."""
+    out = []
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            out += [ln.strip() for ln in f.read().splitlines()[2:]]
+    except Exception:
+        pass
+    try:
+        from daangn_ext import AccountStore
+        out += AccountStore(accounts_path).proxies()
+    except Exception:
+        pass
+    return [p for p in dict.fromkeys(out) if p]
+
+
+def headless_sweep_cfg(settings, entries, notify, proxies=None,
+                       proxy_provider=None, token_provider=None, log=None):
+    """헤드리스 검색 스윕 cfg — GUI _auto_cfg_base + _sweep_cfg 와 같은 키를 만든다.
+
+    이 한 겹만 따로 두는 이유: GUI 의 값 출처는 고급 패널 **위젯**이라 위젯이
+    없는 런타임에서 그대로 부를 수 없다. 조건 조립(sweep_conditions)과 범위
+    판정(sweep_scope_for)은 공유한다. 기본값은 GUI 위젯 초기값과 같게 맞췄다
+    (휴식 30~90초, 지역간 0.4~1.2초, 레인 자동, 끌올 7일).
+
+    여기서 읽는 sweep_* 키는 GUI 의 _sweep_settings_patch 가 쓴다 — 그래서
+    GUI 에서 스윕을 설정하면 서버도 같은 범위로 돈다. 아무도 쓴 적이 없으면
+    sweep_scope_for 의 기본 지역으로 떨어진다(전국이 아니다)."""
+    s = settings or {}
+
+    def _num(key, dflt):
+        v = s.get(key)
+        if v is None:
+            return dflt
+        try:
+            return type(dflt)(v)
+        except (TypeError, ValueError):
+            return dflt
+
+    cfg = {
+        "rest_min": _num("sweep_rest_min", 30),
+        "rest_max": _num("sweep_rest_max", 90),
+        "gap_min": _num("sweep_gap_min", 0.4),
+        "gap_max": _num("sweep_gap_max", 1.2),
+        "lanes": _num("sweep_lanes", 0),          # 0 = 자동(프록시 수 기준)
+        "tg_token": (notify or {}).get("tg_token") or None,
+        "tg_chat": (notify or {}).get("tg_chat") or None,
+        "sheet_url": (notify or {}).get("sheet_url") or None,
+        "sheet_cred": (notify or {}).get("sheet_cred") or "./credentials.json",
+        "proxies": list(proxies or []),
+        "proxy_provider": proxy_provider,
+        "access_token": None,
+        "token_provider": token_provider,
+        "stabilize": bool(token_provider),
+        "accounts_fp": "./accounts.json",
+        "daily_cap": 300,
+        "warmup_days": 3,
+        "out_json": "./OUT.json",
+        "db_path": "./auto_seen.db",
+    }
+    cfg.update(sweep_scope_for(s.get("sweep_regions"),
+                               s.get(SWEEP_NATIONWIDE_KEY),
+                               out_json=cfg["out_json"], log=log))
+    cfg["conditions"] = sweep_conditions(
+        entries,
+        extra=[x for x in (s.get("sweep_extra") or []) if x],
+        exclude=[x for x in (s.get("sweep_exclude") or []) if x],
+        min_price=s.get("sweep_min"), max_price=s.get("sweep_max"),
+        days=_num("sweep_days", 7) or None)
+    return cfg
+
+
+class HeadlessSweepRunner:
+    """헤드리스 런타임의 검색 스윕 수명 — GUI 의 _start/_stop/_resync 를 옮긴 것.
+
+    GUI 는 AutoMonitor(QThread)를 쓰지만 헤드리스에는 Qt 이벤트 루프가 없다.
+    SweepEngine 은 순수 파이썬이므로 plain threading.Thread 로 그대로 돈다.
+    '언제 갈아끼우나' 판정은 GUI 와 같은 sweep_resync_action 을 쓴다 —
+    두 런타임이 다르게 판단하면 서버에서만 나는 버그가 생긴다.
+
+    engine_factory/thread_factory 는 테스트가 진짜 스레드·네트워크 없이
+    수명만 확인하려고 갈아끼우는 자리다."""
+
+    def __init__(self, queue, cfg_builder, log, on_found,
+                 engine_factory=None, thread_factory=None):
+        self.queue = queue
+        self.cfg_builder = cfg_builder
+        self.log = log
+        self.on_found = on_found
+        self._engine_factory = engine_factory
+        self._thread_factory = thread_factory
+        self.engine = None
+        self.thread = None
+        self.kws = None            # 지금 도는 스윕이 떠 있는 키워드 집합
+        self.revives = 0
+
+    def _make_engine(self, cfg):
+        if self._engine_factory is not None:
+            return self._engine_factory(cfg, self.log, self.on_found)
+        from daangn.sweep_engine import SweepEngine
+        return SweepEngine(cfg, on_log=self.log, on_found=self.on_found)
+
+    def _make_thread(self, target):
+        if self._thread_factory is not None:
+            return self._thread_factory(target)
+        import threading
+        # daemon: 되살리기 상한에 걸려 포기한 스레드가 프로세스 종료를 막으면
+        # 서버 재시작이 통째로 걸린다.
+        return threading.Thread(target=target, name="sweep", daemon=True)
+
+    def running(self):
+        t = self.thread
+        return t is not None and bool(t.is_alive())
+
+    def start(self):
+        if self.running():
+            # stop() 은 비동기다. 그 안에 다시 켜면 조용히 막혀 재시작이 통째로
+            # 사라진 것처럼 보이므로 로그를 남긴다(GUI 와 같은 문구).
+            self.log("[검색스윕] 아직 정지 중 — 이번 시작 요청은 건너뜁니다(다음 틱 재시도)")
+            return False
+        try:
+            cfg = self.cfg_builder()
+            if not cfg.get("conditions"):
+                # conditions 가 비면 엔진이 cfg["keyword"] 로 떨어져 KeyError.
+                self.log("[검색스윕] 대기열이 비어 시작하지 않습니다")
+                return False
+            self.engine = self._make_engine(cfg)
+            self.thread = self._make_thread(self.engine.run)
+            self.thread.start()
+            self.kws = {c["keyword"] for c in cfg["conditions"]}
+            self.log(f"[검색스윕] 시작 — 키워드 {len(self.kws)}개")
+            return True
+        except Exception as e:
+            self.log(f"[검색스윕] 시작 실패: {str(e)[:120]}")
+            return False
+
+    def stop(self, join=0):
+        """정지 요청. join 초를 주면 그만큼 기다린다(프로세스 종료 직전용)."""
+        self.kws = None
+        eng, t = self.engine, self.thread
+        if eng is None or not self.running():
+            return
+        try:
+            eng.stop()
+        except Exception:
+            pass
+        self.log("[검색스윕] 정지 요청")
+        if join:
+            try:
+                t.join(join)
+            except Exception:
+                pass
+            if t.is_alive():
+                self.log("[검색스윕] 정지 대기 초과 — 데몬 스레드로 두고 종료합니다")
+
+    def resync(self):
+        """대기열과 도는 스윕이 어긋났으면 갈아끼운다. 루프 1회에 한 번만 부른다 —
+        등록이 몰아쳐도 재시작이 폴링 주기당 한 번을 넘지 않는다."""
+        if self.queue is None:
+            return
+        try:
+            want = set(self.queue.keywords())
+        except Exception:
+            return
+        act = sweep_resync_action(want, self.kws, self.running())
+        if not act:
+            self.revives = 0
+            return
+        if act == "start":
+            self.revives = 0
+            self.start()
+            return
+        if act == "revive":
+            ok, self.revives, msg = sweep_revive_step(self.revives, len(want))
+            if msg:
+                self.log(msg)
+            if not ok:
+                return
+        else:
+            self.revives = 0
+            self.log(f"[검색스윕] 키워드 변경 {len(self.kws)}개 → {len(want)}개 — 재시작")
+        self.stop()
+        if want:
+            self.start()
+
+
 def dedupe_new_matches(matches, watch_store, fallback):
     """폴링 결과에서 아직 안 본 매치만 고른다 → (fresh, dropped).
 
@@ -176,14 +653,19 @@ def dedupe_new_matches(matches, watch_store, fallback):
     삭제된 매물이 다시 떠도 재알림하지 않는다.
 
     다만 watch 는 article_id 로만 키를 잡는다(add_from_matches). 그래서
-    article_id 가 없는 매치(알림 인박스 id 만 있는 payload)나 저장소를 못 연
-    경우는 저장소에 물어봐야 영원히 None 이 돌아온다 — 폴링마다 재알림이다.
-    그 두 경우만 프로세스 안의 fallback 집합으로 막는다. GUI·헤드리스가 같은
-    문을 쓰게 한 곳에 둔다(따로 두면 한쪽만 고쳐진다).
+    article_id 가 없는 매치(광고 등 알림 인박스 id 만 있는 payload)는 저장소에
+    물어봐야 영원히 None 이 돌아온다 — 폴링마다 재알림이다. 그 키는 같은 DB 의
+    seen_key 테이블이 받는다(watch 행이 아니다 — 매물이 아니므로 표에도 안 뜨고
+    조회 대상도 아니다). 재시작해도 남는다.
+
+    프로세스 안의 fallback 집합은 저장소를 아예 못 연 경우의 마지막 방어선으로만
+    남는다(그때는 어차피 남길 곳이 없다). GUI·헤드리스가 같은 문을 쓰게 한 곳에
+    둔다(따로 두면 한쪽만 고쳐진다).
 
     fallback 은 이 함수가 갱신한다. dropped 는 키가 아예 없어 버린 건수다.
     """
     fresh, dropped = [], 0
+    durable = getattr(watch_store, "seen_key_add", None) if watch_store else None
     for m in matches or []:
         art = str((m or {}).get("article_id") or "")
         key = art or str((m or {}).get("id") or "")
@@ -192,6 +674,9 @@ def dedupe_new_matches(matches, watch_store, fallback):
             continue
         if art and watch_store is not None:
             if watch_store.get(art) is not None:
+                continue
+        elif durable is not None:
+            if not durable(key):        # 이미 기록된 키 — 재알림 금지
                 continue
         elif key in fallback:
             continue
@@ -226,7 +711,8 @@ class _HarvestThread(QtCore.QThread):
         while not self._stop:
             try:
                 import ld_autoharvest
-                u, i, t, h = ld_autoharvest.harvest_all(self.accounts, nudge=True)
+                u, i, t, h = ld_autoharvest.harvest_all(
+                    self.accounts, nudge=True, log=self.tick.emit)
                 self.tick.emit(f"[자동수확] {h}계정 갱신 · 총 {t}계정" if h
                                else "[자동수확] 대상 없음(LDPlayer/폰 확인)")
             except Exception as e:
@@ -1110,6 +1596,18 @@ class MainWindow(QMainWindow):
                 print(f"[에뮬레이터] 창 복구 실패: {type(e).__name__}: {e}")
 
     # ── 키워드 알림 탭 ─────────────────────────────────────────────
+    # ── 상태칩 → 고급 패널 항목 ──
+    # 칩은 값을 보여줄 뿐 조절은 고급 패널이 한다. 사용자가 "커버리지 78%" 를
+    # 보고 그 설정으로 가는 길이 없으면 칩은 죽은 글자다(설계 §1: 칩 클릭은 해당
+    # 고급 패널 항목으로 스크롤한다). 대응 항목이 없는 칩은 여기 넣지 않는다 —
+    # 없는 목적지를 지어내면 사용자가 엉뚱한 곳으로 간다.
+    CHIP_TARGETS = {
+        "token": "alertFleetBtn",       # 토큰 유효/만료 → 계정별 만료 현황
+        "accounts": "alertFleetBtn",    # 계정 수 → 같은 팜 현황 다이얼로그
+        "coverage": "alertCoverMode",   # 커버리지 → 전국/핵심 커버 모드
+        "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
+    }
+
     def _build_alert_tab(self):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
@@ -1150,6 +1648,22 @@ class MainWindow(QMainWindow):
         self.watchToggleBtn.setCheckable(True)
         self.watchToggleBtn.clicked.connect(self.on_watch_toggle)
         top.addWidget(self.watchToggleBtn)
+        # 칩 — 읽기 전용 상태 표시지만 죽은 글자는 아니다. 누르면 그 값을 조절하는
+        # 고급 패널 항목까지 펼쳐서 데려간다.
+        self._chips = {}
+        for key, text in (("token", "토큰 -"), ("accounts", "계정 -"),
+                          ("coverage", "커버리지 -"), ("poll", "다음폴링 -")):
+            chip = QtWidgets.QPushButton(text)
+            chip.setObjectName("statChip")
+            chip.setFlat(True)
+            chip.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            chip.setToolTip("누르면 고급 패널의 해당 설정으로 이동합니다")
+            chip.clicked.connect(lambda _c=False, k=key: self.on_chip_clicked(k))
+            self._chips[key] = chip
+            self._style_chip(key, "ok")
+            top.addWidget(chip)
+        # 추적중 칩은 고급 패널에 대응 항목이 없다(스윕 주기는 정책 상수다).
+        # 목적지 없는 칩은 누르지 않는 편이 낫다 — 라벨로 둔다.
         top.addWidget(self._watch_label, 1)
         v.addLayout(top)
 
@@ -1223,6 +1737,16 @@ class MainWindow(QMainWindow):
             "24시간 무인운영 시 야간 과다요청 억제.")
         self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
         self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
+        # 관측 상한 탈출구. 서버 등록이 한 번 실패하면 라우터는 유효 상한을
+        # 그 시점 used 로 내리고 스스로 올리지 않는다 — 일시적 오류였다면
+        # 이 버튼(서버는 --reset-cap)이 유일한 복구 경로다.
+        self.alertResetCapBtn = QtWidgets.QPushButton("슬롯 상한 초기화")
+        self.alertResetCapBtn.setToolTip(
+            "앱 알림 슬롯 상한의 '관측치'를 지운다.\n"
+            "서버가 등록을 거부하면 라우터는 유효 상한을 그때의 등록 수로 내리고\n"
+            "스스로 올리지 않는다 — 일시적 서버 오류로 내려갔다면 여기서 되돌린다.\n"
+            "서버(헤드리스)에서는 --reset-cap 플래그가 같은 일을 한다.")
+        self.alertResetCapBtn.clicked.connect(self.on_reset_cap_clicked)
         # ── 고급 (접힘) ──
         # 평소엔 토글 하나면 된다. 진단·튜닝이 필요할 때만 편다.
         self.advancedBox = QtWidgets.QGroupBox("고급")
@@ -1234,7 +1758,8 @@ class MainWindow(QMainWindow):
         a1 = QtWidgets.QHBoxLayout()
         a1.addWidget(self.alertPollBtn); a1.addWidget(self.alertPollAllBtn)
         a1.addWidget(self.alertCoverageBtn); a1.addWidget(self.alertFleetBtn)
-        a1.addWidget(self.alertTgTestBtn); a1.addStretch(1)
+        a1.addWidget(self.alertTgTestBtn); a1.addWidget(self.alertResetCapBtn)
+        a1.addStretch(1)
         av.addLayout(a1)
 
         a2 = QtWidgets.QHBoxLayout()
@@ -1308,8 +1833,8 @@ class MainWindow(QMainWindow):
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
         # ── 워치리스트(가격변동 추적) ──
-        # 중복 판정은 watch 테이블이 한다. 저장소를 못 열었거나 article_id 가
-        # 없는 매치는 테이블에 행이 생길 수 없으므로 이 집합으로만 막는다.
+        # 중복 판정은 watch(article_id) + seen_key(인박스 id) 테이블이 한다.
+        # 이 집합은 저장소를 아예 못 열었을 때만 쓰는 마지막 방어선이다.
         self._match_seen_fallback = set()
         self._watch_store = None
         self._watch_tracker = None
@@ -1407,6 +1932,64 @@ class MainWindow(QMainWindow):
             QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
         return w
+
+    _CHIP_COLORS = {"ok": ("#221C16", "#E6DDCB", "#3A3225"),
+                    "warn": ("#332616", "#F0C87C", "#5A4626"),
+                    "bad": ("#3A211C", "#F0A79C", "#6A342C"),
+                    "off": ("#1C1A17", "#8C8478", "#2E2A24")}
+
+    def _style_chip(self, key, level="ok"):
+        chip = getattr(self, "_chips", {}).get(key)
+        if chip is None:
+            return
+        bg, fg, br = self._CHIP_COLORS.get(level, self._CHIP_COLORS["ok"])
+        chip.setStyleSheet(
+            "QPushButton#statChip{padding:4px 10px; border-radius:11px; font-size:12px;"
+            f"background:{bg}; color:{fg}; border:1px solid {br};}}"
+            f"QPushButton#statChip:hover{{border:1px solid #F0D48C;}}")
+
+    def _set_chip(self, key, text, level="ok"):
+        chip = getattr(self, "_chips", {}).get(key)
+        if chip is None:
+            return
+        chip.setText(text)
+        self._style_chip(key, level)
+
+    @staticmethod
+    def _enclosing_scroll(widget):
+        """위젯을 담고 있는 QScrollArea. 탭은 _scroll() 로 감싸여 있다."""
+        p = widget.parentWidget() if widget is not None else None
+        while p is not None:
+            if isinstance(p, QtWidgets.QScrollArea):
+                return p
+            p = p.parentWidget()
+        return None
+
+    def on_chip_clicked(self, key):
+        """상태칩 → 고급 패널을 펼치고 대응 항목으로 스크롤. 목적지 없으면 무시.
+
+        반환값은 실제로 데려갔는지다(테스트가 확인한다)."""
+        target = getattr(self, self.CHIP_TARGETS.get(key) or "", None)
+        if target is None:
+            return False
+        if not self.advancedBox.isChecked():
+            self.advancedBox.setChecked(True)       # toggled → 자식 표시
+        # 방금 펼친 위젯은 아직 좌표가 없다 — 레이아웃을 먼저 확정시켜야
+        # ensureWidgetVisible 이 옛 자리로 스크롤하지 않는다.
+        parent_layout = self.advancedBox.parentWidget().layout() \
+            if self.advancedBox.parentWidget() else None
+        if parent_layout is not None:
+            parent_layout.activate()
+        area = self._enclosing_scroll(target)
+
+        def _reveal():
+            if area is not None:
+                area.ensureWidgetVisible(target, 0, 60)
+            target.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+
+        _reveal()
+        QtCore.QTimer.singleShot(0, _reveal)   # 애니메이션/지연 레이아웃 뒤 한 번 더
+        return True
 
     def _sync_advanced_visible(self, on):
         """체크형 QGroupBox 는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨긴다.
@@ -1554,6 +2137,22 @@ class MainWindow(QMainWindow):
         tg = "🟢 텔레그램 연결" if (nt.get("tg_token") and nt.get("tg_chat")) else "⚪ 텔레그램 미설정"
         if nt.get("sheet_url"):
             tg += " · 🟢 시트"
+        # 컨트롤 바 칩 — 같은 값을 한 줄 요약으로. 누르면 해당 설정으로 간다.
+        self._set_chip("token", f"토큰 {alive}", "ok" if tok_ok else "bad")
+        n_acc = alive + expired
+        self._set_chip("accounts", f"계정 {n_acc}",
+                       "ok" if n_acc else "warn")
+        try:
+            pct = int(self.dashBar.value())
+        except Exception:
+            pct = 0
+        self._set_chip("coverage", f"커버리지 {pct}%" if pct else "커버리지 -",
+                       "ok" if pct else "warn")
+        if self._alert_poll_timer.isActive():
+            rem = max(0, self._alert_poll_timer.remainingTime()) // 1000
+            self._set_chip("poll", f"다음폴링 {rem // 60}:{rem % 60:02d}", "ok")
+        else:
+            self._set_chip("poll", "폴링 OFF", "off")
         self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
         bg = "#3A211C" if not tok_ok else "#221C16"
         self.dashHealth.setStyleSheet(
@@ -1728,6 +2327,27 @@ class MainWindow(QMainWindow):
         if not token:
             raise RuntimeError("유효 토큰 없음 — LDPlayer/폰 수확 확인")
         return KeywordAlertAPI(token)
+
+    def _quiet_keyword_list(self, core_only=False):
+        """서버에 이미 등록된 키워드 목록 — 수확 없이 accounts.json 토큰만 쓴다.
+
+        씨딩 전용. _alert_api() 를 쓰면 안 된다: 그쪽은 조회 전에 LDPlayer 부팅 +
+        함대 전체 수확을 먼저 돌리므로, 첫 실행 씨딩 한 번에 에뮬레이터 팜이 뜬다.
+        헤드리스 _server_keyword_list 와 같은 문이다 — 등록은 전 계정에 같은
+        키워드를 쓰므로 유효한 계정 하나만 봐도 함대 상태를 안다."""
+        from daangn_ext.keyword_alert_api import KeywordAlertAPI
+        valid = self._multi()._valid(core_only)
+        if not valid:
+            return {}
+        _code, access, proxy = valid[0]
+        api = KeywordAlertAPI(access, "./data/config.json", proxy=proxy)
+        try:
+            return api.list()
+        finally:
+            try:
+                api.close()
+            except Exception:
+                pass
 
     def _alert_run(self, fn, on_done=None):
         if self._alert_worker and self._alert_worker.isRunning():
@@ -2132,7 +2752,9 @@ class MainWindow(QMainWindow):
         if harvest:
             try:
                 import ld_autoharvest
-                ld_autoharvest.harvest_all("./accounts.json", nudge=True)
+                ld_autoharvest.harvest_all(
+                    "./accounts.json", nudge=True,
+                    log=lambda m: self.sb.showMessage(m, 4000))
             except Exception:
                 pass
         return MultiAccountAlerts("./accounts.json", "./data/config.json")
@@ -2204,19 +2826,33 @@ class MainWindow(QMainWindow):
         이전 폴링이 아직 진행 중이면 조용히 스킵(무인: 모달 팝업 금지)."""
         if self._supervisor:
             self._supervisor.retune()
-        if self._router:
-            try:
-                promoted = self._router.rebalance(core_only=self._core_only(),
-                                                  log=self.alertLog.append)
-                for p in promoted:
-                    self.alertLog.append(f"[라우터] {p['keyword']} → 앱 알림 승격")
-            except Exception as e:
-                self.alertLog.append(f"[라우터] 승격 실패: {str(e)[:80]}")
+        # 스윕 재동기화만 GUI 스레드에 남는다 — QThread 를 만들고 세우는 일이라
+        # 워커로 못 옮긴다. 대신 네트워크를 타지 않는다.
         self._resync_search_sweep()
         if self._alert_worker and self._alert_worker.isRunning():
             self.alertLog.append("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
             return
-        self.on_alert_poll_all()
+        co = self._core_only()
+        state = self.__dict__.setdefault("_seed_state", {})
+
+        def job(log):
+            # 씨딩·승격은 **워커 안에서** 돈다. 씨딩은 20초 타임아웃짜리 HTTP
+            # 조회라 타이머 콜백(=GUI 스레드)에서 하면 창이 그대로 멈춘다.
+            # 자동 시작은 등록 화면(_alert_populate)을 거치지 않으므로 여기서
+            # 씨딩하지 않으면 무인 첫 실행이 함대가 빈 줄 알고 꽉 찬 서버 한도에
+            # 등록을 시도해 전부 스윕으로 민다. routes 가 차 있으면 조회조차 안 한다.
+            # 승격은 씨딩 결과에 기대므로 반드시 뒤에 온다.
+            seed_router_from_server(
+                self._router, lambda: self._quiet_keyword_list(co), log, state)
+            if self._router:
+                try:
+                    for p in self._router.rebalance(core_only=co, log=log):
+                        log(f"[라우터] {p['keyword']} → 앱 알림 승격")
+                except Exception as e:
+                    log(f"[라우터] 승격 실패: {str(e)[:80]}")
+            return self._alert_fleet().poll_all(log=log, core_only=co)
+
+        self._alert_run(job, self._match_populate)
 
     def on_alert_poll_all(self):
         co = self._core_only()
@@ -2354,11 +2990,29 @@ class MainWindow(QMainWindow):
         gv.addWidget(QtWidgets.QLabel(
             "앱 알림 슬롯이 찼을 때 이 조건으로 지역을 훑어 커버한다."))
 
-        # 지역 — 미선택이면 전국(동 단위)
+        # 지역 — 미선택이면 기본 지역(명품 밀집 5개 구). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
         area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
         area.setMaximumHeight(280)
         gv.addWidget(area)
+
+        # 전국은 의식적으로 켜야 한다 — 동 6537곳 × 키워드가 한 사이클이라
+        # 계정 하루 상한(300)의 수십 배다. 미선택이 곧 전국이던 옛 규칙은
+        # 서버에서 '아무 설정 없음 = 전국'이 되어 첫 사이클에 예산을 말렸다.
+        self.autoNationwide = QtWidgets.QCheckBox("전국 훑기", box)
+        self.autoNationwide.setChecked(False)
+        _dflt_n = len(default_sweep_regions("./OUT.json"))
+        self.autoNationwide.setToolTip(
+            "체크하면 전국 동 단위(약 6537곳)를 훑는다. 한 사이클 요청 =\n"
+            "지역 수 × 키워드 수라 계정 하루 상한(300)을 금방 넘긴다 —\n"
+            f"끄면 위에서 고른 지역만, 아무것도 안 고르면 기본 {_dflt_n}동"
+            "(용산·성동·서초·강남·송파)만 훑는다.")
+        _nw = QtWidgets.QHBoxLayout(); _nw.setSpacing(8)
+        _nw.addWidget(self.autoNationwide)
+        _nw.addWidget(QtWidgets.QLabel(
+            f"미선택 시 기본 {_dflt_n}동만 훑습니다(전국 아님)"))
+        _nw.addStretch(1)
+        gv.addLayout(_nw)
 
         self.autoExtra = QtWidgets.QLineEdit(box); self.autoExtra.setPlaceholderText("추가 키워드")
         self.autoExclude = QtWidgets.QLineEdit(box); self.autoExclude.setPlaceholderText("제외 키워드")
@@ -2439,7 +3093,125 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.autoAccountsBtn); bar.addWidget(self.autoProxyViewBtn)
         bar.addStretch(1)
         gv.addLayout(bar)
+
+        # 복원이 먼저, 배선이 나중이다 — 순서가 바뀌면 복원값이 저장을 유발해
+        # 첫 실행에서 '기본값을 사용자가 고른 값'으로 굳혀 버린다.
+        self._restore_sweep_settings()
+        self._wire_sweep_settings(box)
         return box
+
+    # ── 스윕 설정 영속화 ──
+    # 이 값들은 GUI 위젯에만 있었고 alert_settings.json 에는 한 번도 쓰이지
+    # 않았다. 그래서 서버(headless_sweep_cfg)는 늘 빈 설정을 읽어 전국으로
+    # 떨어졌고, 운영자에게는 좁힐 레버가 아예 없었다. 여기서 위젯 값을
+    # headless_sweep_cfg 가 읽는 바로 그 키로 저장한다.
+    def _sweep_settings_patch(self):
+        return {
+            "sweep_regions": self._selected_auto_regions(),
+            SWEEP_NATIONWIDE_KEY: bool(self.autoNationwide.isChecked()),
+            "sweep_extra": self._splt(self.autoExtra.text()),
+            "sweep_exclude": self._splt(self.autoExclude.text()),
+            "sweep_min": self._num(self.autoMin.text()),
+            "sweep_max": self._num(self.autoMax.text()),
+            "sweep_days": int(self.autoDays.value()),
+            "sweep_rest_min": int(self.autoRestMin.value()),
+            "sweep_rest_max": int(self.autoRestMax.value()),
+            "sweep_gap_min": float(self.autoGapMin.value()),
+            "sweep_gap_max": float(self.autoGapMax.value()),
+            "sweep_lanes": int(self.autoLanes.value()),
+        }
+
+    def _restore_sweep_settings(self):
+        """저장된 값을 위젯에 되돌린다. 없으면 위젯 초기값 그대로 둔다."""
+        s = self._load_alert_settings()
+        if not isinstance(s, dict):
+            return
+
+        def _txt(widget, key):
+            v = s.get(key)
+            if isinstance(v, (list, tuple)):
+                v = ", ".join(str(x) for x in v)
+            if v is not None:
+                widget.setText(str(v))
+
+        def _spin(widget, key):
+            v = s.get(key)
+            if v is None:
+                return
+            try:
+                widget.setValue(type(widget.value())(v))
+            except (TypeError, ValueError):
+                pass
+
+        def _spin_range(lo, hi, lo_key, hi_key):
+            """min<=max 커플링을 잠시 풀고 두 값을 되돌린 뒤 다시 건다.
+
+            커플링(lo.valueChanged→hi.setMinimum, hi.valueChanged→lo.setMaximum)이
+            걸린 채로 복원하면 지금 위젯에 들어 있는 값이 저장값을 잘라낸다.
+            어느 쪽을 먼저 넣어도 마찬가지라 순서로는 못 피한다 — 현재 하한이
+            200 이면 상한 140 은 200 으로 잘리고, 그 반대도 같다.
+            커플링이 건드리지 않는 lo.minimum()/hi.maximum() 이 원래 한계다."""
+            floor, ceil = lo.minimum(), hi.maximum()
+            lo.setMaximum(ceil)
+            hi.setMinimum(floor)
+            _spin(lo, lo_key)
+            _spin(hi, hi_key)
+            hi.setMinimum(lo.value())
+            lo.setMaximum(hi.value())
+        try:
+            _txt(self.autoExtra, "sweep_extra")
+            _txt(self.autoExclude, "sweep_exclude")
+            _txt(self.autoMin, "sweep_min")
+            _txt(self.autoMax, "sweep_max")
+            _spin(self.autoDays, "sweep_days")
+            _spin_range(self.autoRestMin, self.autoRestMax,
+                        "sweep_rest_min", "sweep_rest_max")
+            _spin_range(self.autoGapMin, self.autoGapMax,
+                        "sweep_gap_min", "sweep_gap_max")
+            _spin(self.autoLanes, "sweep_lanes")
+            self.autoNationwide.setChecked(bool(s.get(SWEEP_NATIONWIDE_KEY)))
+            want = {str(r) for r in (s.get("sweep_regions") or []) if r}
+            if want:
+                for leaf in getattr(self, "auto_area_leaves", []):
+                    if leaf.data(0, Qt.ItemDataRole.UserRole) in want:
+                        leaf.setCheckState(0, Qt.CheckState.Checked)
+        except Exception as e:
+            print(f"[스윕설정 복원 실패] {type(e).__name__}: {e}")
+
+    def _wire_sweep_settings(self, parent):
+        """위젯 변경 → alert_settings.json 저장. 디바운스 필수 —
+        시도/구를 한 번 체크하면 itemChanged 가 수백 발 나온다."""
+        self._sweep_save_timer = QtCore.QTimer(parent)
+        self._sweep_save_timer.setSingleShot(True)
+        self._sweep_save_timer.setInterval(300)
+        self._sweep_save_timer.timeout.connect(self._save_sweep_settings)
+        kick = self._sweep_save_timer.start
+        self.autoAreaTree.itemChanged.connect(lambda *_: kick())
+        self.autoNationwide.toggled.connect(lambda *_: kick())
+        for w in (self.autoExtra, self.autoExclude, self.autoMin, self.autoMax):
+            w.textChanged.connect(lambda *_: kick())
+        for w in (self.autoDays, self.autoRestMin, self.autoRestMax,
+                  self.autoGapMin, self.autoGapMax, self.autoLanes):
+            w.valueChanged.connect(lambda *_: kick())
+
+    def _save_sweep_settings(self):
+        self._save_alert_settings(self._sweep_settings_patch())
+
+    def on_reset_cap_clicked(self):
+        """앱 슬롯 상한 관측치 초기화 — 헤드리스의 --reset-cap 과 같은 동작.
+
+        관측 상한은 하강만 한다(스스로 회복하지 않는다). 등록 엔드포인트의
+        일시적 오류 하나로 내려앉으면 여기 말고는 routes 파일을 손으로 고치는
+        길뿐이었다."""
+        if not self._router:
+            self.alert("라우터가 없습니다 — 로그를 확인하세요")
+            return False
+        if self._router.reset_observed_cap():
+            self.alertLog.append("[라우터] 앱 슬롯 상한 관측치 초기화 —"
+                                 " 다음 등록부터 설정 상한을 다시 씁니다")
+            return True
+        self.alertLog.append("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
+        return False
 
 
     # ── 알림 설정 저장/불러오기 ──
@@ -2722,7 +3494,7 @@ class MainWindow(QMainWindow):
 
     def on_auto_excel_clicked(self):
         """엑셀 조건 — 형식 안내 팝업 + 샘플 저장 + 파일 불러오기."""
-        from daangn.auto_monitor import load_conditions_from_excel
+        from daangn.sweep_engine import load_conditions_from_excel
         dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("엑셀 조건 불러오기"); dlg.resize(620, 400)
         v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
         v.addWidget(QtWidgets.QLabel(
@@ -2842,11 +3614,15 @@ class MainWindow(QMainWindow):
             "proxies": self._collect_proxies(),
             # 실행 중 프록시 추가/삭제 반영용 (조건 루프마다 재조회)
             "proxy_provider": self._collect_proxies,
-            # 초기 토큰은 워커스레드의 token_provider 가 획득(LDPlayer 부팅+수확은
-            # 오래 걸려 메인스레드서 하면 GUI 프리징).
+            # 초기 토큰도 워커스레드의 token_provider 가 파일에서 읽는다(메인스레드
+            # 접근 없음). 파일을 신선하게 유지하는 건 _HarvestThread 다.
             "access_token": None,
-            # 사이클마다 최신 access 재조회(자동수확 연동). 스레드세이프(GUI 미접근).
-            "token_provider": self._harvest_token_quiet if self.autoTokenRefresh.isChecked() else None,
+            # 사이클마다 최신 access 재조회 — accounts.json 을 **읽기만** 한다.
+            # GUI 의 수확 소유자는 _HarvestThread(20분 주기, __init__ 에서 기동)
+            # 하나뿐이다. 여기서 harvest_all 을 부르면 휴식주기(30~90초)마다 함대를
+            # 통째로 깨워 _HarvestThread 와 동시에 adb 를 두드리고 accounts.json 을
+            # 같이 쓴다 — LDPlayer 순차기동 규칙도 그때 깨진다.
+            "token_provider": self._read_token_quiet if self.autoTokenRefresh.isChecked() else None,
             # 계정 안정화(밴회피): 사이클마다 계정 라운드로빈 + 계정별 고정프록시(없으면 KR네이티브)
             # + daily_cap/warmup. 수확 갱신 켜졌을 때 함께 활성(다계정 전제).
             "stabilize": self.autoTokenRefresh.isChecked(),
@@ -2856,11 +3632,12 @@ class MainWindow(QMainWindow):
             "out_json": "./OUT.json",
             "db_path": "./auto_seen.db",
         }
-        sel = self._selected_auto_regions()
-        if sel:
-            cfg["scope"] = "regions"; cfg["regions"] = sel
-        else:
-            cfg["scope"] = "nationwide"
+        # 범위 판정은 헤드리스(headless_sweep_cfg)와 같은 함수를 쓴다 —
+        # 여기서만 '미선택=전국'이면 GUI 에서 본 범위와 서버가 도는 범위가 갈린다.
+        cfg.update(sweep_scope_for(self._selected_auto_regions(),
+                                   self.autoNationwide.isChecked(),
+                                   out_json=cfg["out_json"],
+                                   log=self.alertLog.append))
         return cfg
 
     @staticmethod
@@ -2884,19 +3661,32 @@ class MainWindow(QMainWindow):
         panel_excl = self._splt(self.autoExclude.text())
         extra = self._splt(self.autoExtra.text())
         days = self.autoDays.value() or None
-        conditions = []
-        for e in self._queue_entries():
-            conditions.append({
-                "keyword": e["keyword"],
-                "extra": extra,
-                "exclude": list(e.get("exclude") or []) or panel_excl,
-                "min": e.get("min") if e.get("min") is not None else panel_min,
-                "max": e.get("max") if e.get("max") is not None else panel_max,
-                "days": days,
-            })
+        conditions = sweep_conditions(self._queue_entries(), extra=extra,
+                                      exclude=panel_excl, min_price=panel_min,
+                                      max_price=panel_max, days=days)
         cfg = dict(self._auto_cfg_base())
         cfg["conditions"] = conditions
         return cfg
+
+    def _dispose_auto_monitor(self):
+        """다 쓴 AutoMonitor 를 놓아준다 — 시그널을 끊고 Qt 에 반납한다.
+
+        돌고 있는 스레드는 건드리지 않는다(호출자가 이미 정지시킨 뒤에 부른다).
+        반환값은 실제로 버렸는지 — 테스트가 누수 여부를 이걸로 본다."""
+        am = self.auto_monitor
+        self.auto_monitor = None
+        if am is None:
+            return False
+        for sig in ("log", "found"):
+            try:
+                getattr(am, sig).disconnect()
+            except (TypeError, RuntimeError, AttributeError):
+                pass                    # 연결이 없으면 disconnect 가 TypeError
+        try:
+            am.deleteLater()
+        except (RuntimeError, AttributeError):
+            pass
+        return True
 
     def _start_search_sweep(self):
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
@@ -2913,6 +3703,10 @@ class MainWindow(QMainWindow):
                 self.alertLog.append("[검색스윕] 대기열이 비어 시작하지 않습니다")
                 return
             from daangn.auto_monitor import AutoMonitor
+            # 죽은 모니터를 버리고 간다. 안 버리면 되살릴 때마다 MainWindow 에
+            # 매달린 QThread 가 한 개씩 쌓이고(수명이 창과 같다), 끊지 않은
+            # log/found 시그널은 죽은 객체에서도 계속 슬롯을 때린다.
+            self._dispose_auto_monitor()
             self.auto_monitor = AutoMonitor(self, cfg)
             self.auto_monitor.log.connect(self.alertLog.append)
             self.auto_monitor.found.connect(self._on_sweep_found)
@@ -2950,20 +3744,28 @@ class MainWindow(QMainWindow):
         have = getattr(self, "_sweep_kws", None)
         am = self.auto_monitor
         running = am is not None and am.isRunning()
-        if have is None:
-            # 아직 안 떴거나 정지 요청 뒤 — 큐가 찼고 스레드가 빠졌으면 띄운다.
-            if want and not running:
-                self._start_search_sweep()
+        # 판정은 헤드리스(HeadlessSweepRunner.resync)와 같은 함수를 쓴다 —
+        # 따로 두면 서버에서만 나는 버그가 생긴다.
+        act = sweep_resync_action(want, have, running)
+        if not act:
+            self._sweep_revives = 0
             return
-        if want == have and (running or not want):
+        if act == "start":
+            self._sweep_revives = 0
+            self._start_search_sweep()
             return
-        if want == have:
-            # AutoMonitor.run 은 루프 전체를 except 로 감싸므로 치명오류가 나면
-            # 스레드만 조용히 빠진다. _sweep_kws 는 남아 있어 want == have 가
-            # 계속 성립하고, 스윕은 세션 내내 죽은 채로 방치된다.
-            self.alertLog.append(
-                f"[검색스윕] 스레드가 죽어 있음 — 키워드 {len(want)}개로 되살립니다")
+        if act == "revive":
+            # 상한 계산도 헤드리스와 같은 함수를 쓴다. 예전엔 여기에 상한이
+            # 아예 없어서, 뜨자마자 죽는 엔진을 틱마다 영원히 다시 띄우고
+            # 죽은 AutoMonitor 를 창에 쌓았다.
+            ok, self._sweep_revives, msg = sweep_revive_step(
+                getattr(self, "_sweep_revives", 0), len(want))
+            if msg:
+                self.alertLog.append(msg)
+            if not ok:
+                return
         else:
+            self._sweep_revives = 0
             self.alertLog.append(
                 f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
         self._stop_search_sweep()          # _sweep_kws 를 None 으로 되돌린다
@@ -2974,9 +3776,7 @@ class MainWindow(QMainWindow):
         """검색 스윕이 찾은 매물도 앱 알림과 같은 문으로 워치리스트에 들어간다."""
         kw = ""
         try:
-            kws = self._sweep_queue.keywords()
-            title = payload.get("title") or ""
-            kw = next((k for k in kws if k in title), kws[0] if kws else "")
+            kw = sweep_keyword_for(payload, self._sweep_queue.keywords())
         except Exception:
             pass
         norm = sweep_found_to_match(payload, kw)
@@ -3403,27 +4203,18 @@ class MainWindow(QMainWindow):
             self._leave_task()
             self.alert(str(e))
 
+    def _read_token_quiet(self) -> str | None:
+        """스윕 스레드의 토큰 provider — accounts.json 을 **읽기만** 한다.
+
+        GUI 에서 수확을 소유하는 건 _HarvestThread(20분 주기) 하나뿐이다.
+        스윕이 필요한 건 '수확'이 아니라 '신선한 토큰'이고, 그 파일을 신선하게
+        유지하는 일은 이미 그 스레드가 한다. GUI 미접근(showMessage/alert 금지)."""
+        return read_token_quiet("./accounts.json")
+
     def _harvest_token_quiet(self) -> str | None:
-        """스레드세이프 토큰 provider — AutoMonitor 스레드서 사이클마다 호출.
-        GUI 미접근(showMessage/alert 금지). LDPlayer 수확 → 최신 access 반환."""
-        import json as _json
-        try:
-            import ld_autoharvest
-            ld_autoharvest.harvest_all("./accounts.json", nudge=True)
-        except Exception:
-            pass
-        try:
-            from daangn_ext.token_manager import token_exp
-            best = None
-            with open("./accounts.json", encoding="utf-8") as _f:
-                _accs = _json.load(_f)
-            for a in _accs:
-                acc = a.get("access") or ""
-                if acc and (best is None or token_exp(acc) > token_exp(best)):
-                    best = acc
-            return best
-        except Exception:
-            return None
+        """수확 후 최신 access. 사용자가 부른 작업(_alert_api)에서만 쓴다 —
+        주기적 수확은 _HarvestThread 소유다. GUI 미접근. 본체는 헤드리스와 공유."""
+        return harvest_token_quiet("./accounts.json")
 
     def _refresh_tokens(self) -> str | None:
         """검색 전 access 토큰 확보. LDPlayer 온디바이스 수확 우선(WAF 우회),
@@ -4183,89 +4974,216 @@ def _run_headless():
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
     # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).
-    # 저장소를 못 열었거나 article_id 없는 매치만 이 집합으로 막는다.
+    # article_id 없는 매치는 같은 DB 의 seen_key 테이블이 받아 재시작해도 남는다.
+    # 이 집합은 저장소를 아예 못 열었을 때만 쓰는 마지막 방어선이다.
     fallback_seen = set()
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
+
+    # ── 라우터 · 검색 스윕 — GUI(MainWindow.__init__)와 같은 생성 경로 ──
+    # 이게 없으면 앱 슬롯 상한을 넘긴 키워드는 서버에서 아무도 안 본다.
+    router = sweep_queue = sweep_runner = None
+    seed_state = {}
+    # 스윕 스레드가 찾은 매물은 여기로만 건너온다 — sqlite 는 폴링 스레드 소유다.
+    import queue as _queue
+    sweep_found_q = _queue.Queue(maxsize=SWEEP_FIND_QUEUE_MAX)
+    sweep_found_dropped = [0]
+
+    def _server_keyword_list(core_only=False):
+        """서버에 이미 등록된 키워드 목록(첫 유효 계정 기준).
+
+        등록은 전 계정에 같은 키워드를 쓰므로 한 계정만 봐도 함대 상태를 안다.
+        첫 실행 씨딩에만 쓰이며, routes 가 차면 호출조차 되지 않는다."""
+        from daangn_ext.keyword_alert_api import KeywordAlertAPI
+        valid = m._valid(core_only)
+        if not valid:
+            return {}
+        _code, access, proxy = valid[0]
+        api = KeywordAlertAPI(access, "./data/config.json", proxy=proxy)
+        try:
+            return api.list()
+        finally:
+            try:
+                api.close()
+            except Exception:
+                pass
+
+    try:
+        from daangn_ext.sweep_queue import SweepQueue
+        from daangn_ext.keyword_router import KeywordRouter, DEFAULT_SLOT_CAP
+        sweep_queue = SweepQueue("./data/sweep_queue.json")
+        _cap = int(_settings().get(SLOT_CAP_KEY) or DEFAULT_SLOT_CAP)
+        router = KeywordRouter(m, sweep_queue, slot_cap=_cap)
+
+        def _sweep_found(payload):
+            """**스윕 스레드**에서 불린다 — 큐에 넣기만 하고 아무것도 안 만진다.
+
+            여기서 WatchStore 를 건드리면 폴링 루프와 sqlite 커넥션 하나를
+            두 스레드가 나눠 쓴다(drain_sweep_finds 참고). put_nowait 는
+            절대 막히지 않으므로 스윕 스레드가 폴링에 붙잡히지 않는다."""
+            try:
+                sweep_found_q.put_nowait(payload)
+            except _queue.Full:
+                sweep_found_dropped[0] += 1
+
+        def _sweep_cfg_builder():
+            return headless_sweep_cfg(
+                _settings(), sweep_queue.entries(), _notify_cfg(),
+                proxies=headless_proxies(), proxy_provider=headless_proxies,
+                # 헤드리스에서 수확을 소유하는 건 아래 폴링 루프(20분 주기)뿐이다.
+                # 스윕까지 harvest_all 을 부르면 두 스레드가 스케줄에 맞춰 같은
+                # 함대를 동시에 깨운다 — adb 폭주이자 accounts.json 동시쓰기이며,
+                # LDPlayer 순차기동 규칙도 어긴다. 스윕이 필요한 건 신선한 토큰이라
+                # 폴링 루프가 갱신해 둔 파일을 읽는 것으로 충분하다.
+                # --no-harvest 면 아무도 갱신하지 않으므로 provider 자체를 뺀다
+                # (= stabilize off, 기존 동작 그대로).
+                token_provider=(read_token_quiet if do_harvest else None),
+                # 지역 미지정이면 기본 지역으로 좁힌다는 사실을 서버 로그에
+                # 남긴다 — 안 남기면 커버리지가 6537동에서 조용히 줄어든다.
+                log=log)
+
+        sweep_runner = HeadlessSweepRunner(sweep_queue, _sweep_cfg_builder,
+                                           log, _sweep_found)
+    except Exception as e:
+        log("[검색스윕] 초기화 실패 — 앱 슬롯 밖 키워드는 커버되지 않습니다: "
+            f"{str(e)[:120]}")
+
+    # 관측 상한 되돌리기 — 등록 엔드포인트의 일시적 오류 하나로 유효 상한이
+    # 잘못 내려앉았을 때의 탈출구. 이 플래그가 생기기 전에는 서버에서
+    # data/keyword_routes.json 을 손으로 고치는 것 말고 방법이 없었다.
+    if "--reset-cap" in argv:
+        if router is None:
+            log("[라우터] 초기화 실패 — 상한 관측치를 되돌릴 수 없습니다")
+        elif router.reset_observed_cap():
+            log("[라우터] 앱 슬롯 상한 관측치 초기화 —"
+                " 다음 등록부터 설정 상한을 다시 씁니다")
+        else:
+            log("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
+
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
     if "--register" in argv:
         st = _settings(); co = bool(st.get("core_only"))
-        log(f"[등록] 명품 {len(LUXURY_BRANDS)}브랜드 전계정 등록 (커버 {'핵심' if co else '전국'})")
-        try:
-            r = m.register_all(LUXURY_BRANDS, core_only=co, log=log)
-            log(f"[등록] 완료: {r}")
-        except Exception as e:
-            log(f"[등록] 실패: {str(e)[:80]}")
-        if once:
-            log("--register --once 완료"); return
-    while True:
-        st = _settings()
-        core_only = bool(st.get("core_only"))
-        now = _time.time()
-        # 자동수확(20분 주기)
-        if do_harvest and now - last_harvest > 1200:
-            try:
-                import ld_autoharvest
-                u, i, t, h = ld_autoharvest.harvest_all("./accounts.json", nudge=True, log=log)
-                log(f"[수확] 갱신 {u} 신규 {i} 총 {t} (수확 {h})")
-            except Exception as e:
-                log(f"[수확] 실패: {str(e)[:60]}")
-            last_harvest = now
-        # 유효 토큰 현황
-        try:
-            valid = len(m._valid(core_only))
-        except Exception:
-            valid = 0
-        # 폴링
-        try:
-            matches = m.poll_all(core_only=core_only, log=log)
-        except Exception as e:
-            log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
-        fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
-        if dropped:
-            log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
-        if fresh:
-            log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
-            _notify(fresh, _notify_cfg())
-            try:
-                added = watch_tracker.add_from_matches(fresh) if watch_tracker else 0
-                if added:
-                    log(f"[가격추적] {added}건 추적 시작")
-            except Exception as e:
-                log(f"[가격추적] 등록 실패: {str(e)[:80]}")
+        log(f"[등록] 명품 {len(LUXURY_BRANDS)}브랜드 등록 (커버 {'핵심' if co else '전국'})")
+        # register_all 을 직접 부르면 라우터가 모르는 키워드가 서버에 생긴다 —
+        # 그러면 상한 계산이 어긋나고 스윕 대기열도 만들어지지 않는다.
+        if router is None:
+            log("[등록] 라우터가 없어 등록을 건너뜁니다 — 초기화 실패 로그를 확인하세요")
         else:
-            log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
-        # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
-        if watch_tracker and watch_budget and \
-                headless_watch_due(last_watch_sweep, now, policy.sweep_ms() // 1000):
-            last_watch_sweep = now
+            # 등록 **전에** 씨딩한다 — 이 브랜치 이전 경로로 이미 서버가 꽉 차
+            # 있으면, 인정하지 않고 등록하면 전부 실패해 스윕으로 밀린다.
+            seed_router_from_server(
+                router, lambda: _server_keyword_list(co), log, seed_state)
             try:
-                dropped = watch_tracker.enforce_cap()
-                if dropped:
-                    log(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
-                # 예산은 GUI(_WatchSweepThread)와 같이 생짜 WATCH_SWEEP_INTERVAL 로 계산한다.
-                # 스윕 "빈도"만 야간에 느려지고, 한 번 돌 때의 회차 예산 크기는 안 커진다 —
-                # GUI 와 다르게 계산하면 두 런타임이 다시 갈라진다.
-                budget = watch_sweep_budget(watch_store.active_count(),
-                                            WATCH_SWEEP_INTERVAL)
-                if budget:
-                    watch_budget.reload()
-                    lines = watch_event_lines(
-                        watch_tracker.sweep(watch_budget.next, budget))
-                    if getattr(watch_tracker, "last_sweep_exhausted", False):
-                        log("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
-                    if lines:
-                        log("[가격추적] " + " / ".join(lines))
-                        _notify_lines(lines, _notify_cfg())
+                for r in router.add_many(LUXURY_BRANDS, core_only=co, log=log):
+                    log(f"[등록] {r.get('keyword')} → {r.get('route')}"
+                        f" ({r.get('reason') or ''})")
             except Exception as e:
-                log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
+                log(f"[등록] 실패: {str(e)[:80]}")
         if once:
-            log("--once 완료"); break
-        eff = policy.poll_ms() // 1000
-        log(f"다음 폴링 {eff}초 후")
-        try:
-            _time.sleep(eff)
-        except KeyboardInterrupt:
-            log("중단됨"); break
+            log("--register --once 완료")
+            if sweep_runner is not None:
+                sweep_runner.stop(join=8)
+            return
+    try:
+        while True:
+            st = _settings()
+            core_only = bool(st.get("core_only"))
+            now = _time.time()
+            # 자동수확(20분 주기)
+            if do_harvest and now - last_harvest > 1200:
+                try:
+                    import ld_autoharvest
+                    u, i, t, h = ld_autoharvest.harvest_all("./accounts.json", nudge=True, log=log)
+                    log(f"[수확] 갱신 {u} 신규 {i} 총 {t} (수확 {h})")
+                except Exception as e:
+                    log(f"[수확] 실패: {str(e)[:60]}")
+                last_harvest = now
+            # ── 라우터 · 검색 스윕 — GUI _auto_poll_tick 과 같은 순서 ──
+            # 씨딩 → 승격 → 스윕 재동기화. 재동기화는 루프 1회에 한 번뿐이라
+            # 대기열이 요동쳐도 재시작은 폴링 주기당 한 번을 넘지 않는다.
+            seed_router_from_server(
+                router, lambda: _server_keyword_list(core_only), log, seed_state)
+            if router is not None:
+                try:
+                    for p in router.rebalance(core_only=core_only, log=log):
+                        log(f"[라우터] {p['keyword']} → 앱 알림 승격")
+                except Exception as e:
+                    log(f"[라우터] 승격 실패: {str(e)[:80]}")
+            if sweep_runner is not None:
+                sweep_runner.resync()
+            # 스윕 스레드가 넘긴 매물을 여기(폴링 스레드)서 워치리스트에 넣는다.
+            if sweep_found_dropped[0]:
+                log(f"[검색스윕] 인계 큐가 차서 {sweep_found_dropped[0]}건 버림")
+                sweep_found_dropped[0] = 0
+            drain_sweep_finds(sweep_found_q, watch_tracker,
+                              (sweep_queue.keywords if sweep_queue is not None
+                               else list), log)
+            # 유효 토큰 현황
+            try:
+                valid = len(m._valid(core_only))
+            except Exception:
+                valid = 0
+            # 폴링
+            try:
+                matches = m.poll_all(core_only=core_only, log=log)
+            except Exception as e:
+                log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
+            fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
+            if dropped:
+                log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
+            if fresh:
+                log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
+                _notify(fresh, _notify_cfg())
+                try:
+                    added = watch_tracker.add_from_matches(fresh) if watch_tracker else 0
+                    if added:
+                        log(f"[가격추적] {added}건 추적 시작")
+                except Exception as e:
+                    log(f"[가격추적] 등록 실패: {str(e)[:80]}")
+            else:
+                log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
+            # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
+            if watch_tracker and watch_budget and \
+                    headless_watch_due(last_watch_sweep, now, policy.sweep_ms() // 1000):
+                last_watch_sweep = now
+                try:
+                    dropped = watch_tracker.enforce_cap()
+                    if dropped:
+                        log(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
+                    # 예산은 GUI(_WatchSweepThread)와 같이 생짜 WATCH_SWEEP_INTERVAL 로 계산한다.
+                    # 스윕 "빈도"만 야간에 느려지고, 한 번 돌 때의 회차 예산 크기는 안 커진다 —
+                    # GUI 와 다르게 계산하면 두 런타임이 다시 갈라진다.
+                    budget = watch_sweep_budget(watch_store.active_count(),
+                                                WATCH_SWEEP_INTERVAL)
+                    if budget:
+                        watch_budget.reload()
+                        lines = watch_event_lines(
+                            watch_tracker.sweep(watch_budget.next, budget))
+                        if getattr(watch_tracker, "last_sweep_exhausted", False):
+                            log("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
+                        if lines:
+                            log("[가격추적] " + " / ".join(lines))
+                            _notify_lines(lines, _notify_cfg())
+                except Exception as e:
+                    log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
+            if once:
+                log("--once 완료"); break
+            eff = policy.poll_ms() // 1000
+            log(f"다음 폴링 {eff}초 후")
+            try:
+                _time.sleep(eff)
+            except KeyboardInterrupt:
+                log("중단됨"); break
+    finally:
+        # 스윕 스레드를 남겨두면 프로세스가 안 끝난다(서버 재시작이 걸린다).
+        # --once·KeyboardInterrupt·예외 어느 경로로 나가도 여기를 지난다.
+        if sweep_runner is not None:
+            sweep_runner.stop(join=8)
+        # 멈춘 뒤 큐에 남은 것까지 넣는다. 안 그러면 --once 는 스윕이 찾은 걸
+        # 하나도 기록하지 못하고(시작하자마자 비어 있는 큐를 훑고 끝난다),
+        # 상시 운영에서도 종료 때 마지막 주기 분이 통째로 사라진다.
+        drain_sweep_finds(sweep_found_q, watch_tracker,
+                          (sweep_queue.keywords if sweep_queue is not None
+                           else list), log)
 
 
 if __name__ == "__main__":

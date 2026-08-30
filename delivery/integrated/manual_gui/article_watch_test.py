@@ -645,6 +645,42 @@ store6.mark("30", tier=aw.TIER_DEAD)
 ck("판매완료·삭제(dead)는 재등록 안 함",
    tr6.add_from_matches(M30, now=NOW + 30) == 0)
 
+# ── seen_key: article_id 없는 매치의 영속 중복 판정 ──
+# 옛 match_seen.json 이 하던 일이다. 파일을 되살리는 대신 watch.db 안의 별도
+# 테이블로 둔다 — 매물이 아니므로 watch 행이 되면 안 된다.
+print("=== seen_key ===")
+_sk_path = os.path.join(tempfile.mkdtemp(), "watch.db")
+sk = aw.WatchStore(_sk_path)
+ck("처음 보는 키는 True", sk.seen_key_add("inbox-1", now=NOW) is True)
+ck("같은 키는 False", sk.seen_key_add("inbox-1", now=NOW + 1) is False)
+ck("다른 키는 True", sk.seen_key_add("inbox-2", now=NOW + 1) is True)
+ck("has 로 조회", sk.seen_key_has("inbox-1") and not sk.seen_key_has("inbox-9"))
+ck("빈 키는 기록 안 함",
+   sk.seen_key_add("") is False and sk.seen_key_count() == 2)
+ck("seen_key 는 watch 행이 아니다",
+   sk.get("inbox-1") is None and sk.listing_rows() == [],
+   str(sk.listing_rows()))
+ck("seen_key 는 조회 대상도 아니다",
+   sk.due(NOW + 99999, 10) == [] and sk.active_count() == 0)
+sk.close()
+
+# 재시작: 같은 파일을 다시 열어도 기억한다(이게 이 테이블의 존재 이유다).
+sk2 = aw.WatchStore(_sk_path)
+ck("재시작해도 기억한다", sk2.seen_key_add("inbox-1", now=NOW + 5) is False)
+ck("재시작 후 건수 유지", sk2.seen_key_count() == 2, sk2.seen_key_count())
+
+# 상한: 무한히 자라면 옛 파일과 같은 문제가 된다.
+for _i in range(12):
+    sk2.seen_key_add(f"k-{_i}", now=NOW + 100 + _i, cap=5)
+ck("상한을 넘지 않는다", sk2.seen_key_count() == 5, sk2.seen_key_count())
+ck("오래된 것부터 버린다",
+   sk2.seen_key_has("k-11") and not sk2.seen_key_has("k-0"))
+ck("버려진 키는 다시 신규가 된다", sk2.seen_key_add("k-0", now=NOW + 200, cap=5))
+ck("기본 상한은 옛 파일과 같다", aw.SEEN_KEY_CAP == 5000)
+sk2.close()
+
+ck("백필 묘비 출처 상수", aw.SOURCE_MATCH_SEEN == "match_seen")
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

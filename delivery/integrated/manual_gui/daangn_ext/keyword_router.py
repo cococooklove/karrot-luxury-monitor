@@ -6,6 +6,42 @@
 슬롯 계산: register_all 은 같은 키워드를 모든 유효 계정에 등록한다. 계정을
 늘려도 등록 가능한 키워드 '종류'는 늘지 않는다 — 함대 전체 한도가 곧 계정당
 상한이다. 그래서 used 는 앱으로 배정된 키워드 수이고 네트워크 조회가 없다.
+
+상한은 하드코딩이 아니라 관측값이다: 서버 상한이 설정값(기본 30)보다 낮으면
+등록이 매번 실패하는데도 라우터는 계속 여유가 있다고 믿고 재시도한다.
+
+실패 사유(차단 키워드 vs 진짜 한도 초과)는 register_all 의 반환값만으로는
+구분할 수 없다 — keyword_alert_api.register_many 는 이 둘을 내부적으로는
+구분해 알고 있지만 register_all 이 계정별 결과를 세 정수(added/skipped/
+failed)로 뭉개면서 사유가 사라진다. 그래서 사유를 추측하는 대신, 실패한
+계정이 실제로 몇 개의 키워드를 들고 있는지(KeywordAlertAPI 가 이미 받아온
+목록에서 센 값, register_all 의 "observed_count")를 근거로 쓴다.
+
+'만원'의 정의는 이 클래스에 하나뿐이다: 이번 거부가 함대 한도 때문이라고
+볼 근거가 있으면 지금 이 순간 남은 슬롯은 0 이다 → 관측 상한은 그때의
+used 다(_observe_cap_full 이 유일한 결론 지점). 실측값은 '상한 값'이
+아니라 '근거'로만 쓴다 — 서버 실보유수에는 이 라우터가 모르는 키워드
+(이 브랜치 이전 일괄등록분 등)가 섞여 있어 그건 라우터가 쓸 수 있는
+슬롯수가 아니다. 실측 20 을 그대로 상한으로 삼으면 used=15 에서 free=5
+가 되는데, 그 5 는 영영 채워지지 않는다(등록이 계속 거부되니 used 가
+안 오르고, used 가 안 오르니 더 낮은 관측도 못 받는다) — 상한이 수렴하지
+않고 매 틱 재시도만 태우는 원인이었다.
+
+근거로 인정하는 조건: used 가 0 보다 크고, 실측값이 used 이상. "우리가
+밀어 넣었다고 믿는 만큼은 그 계정이 실제로 갖고 있는데도 이번 등록은
+거부당했다" — 남은 슬롯이 0 이라는 직접 신호다. 실측값 < used 는 그
+계정이 아직 다른 계정만큼 못 따라간 것일 수 있어(막 유효해진 계정 등)
+근거가 아니다 — 차단 키워드가 실패한 계정이 겨우 2개를 갖고 있다고 해서
+상한이 2 라는 뜻은 아니다. 뒤처짐과 상한 도달을 구분 못 하면 오탐이다.
+used 가 아직 0(성공 이력 없음)이면 비교 기준이 없으므로 건너뛴다.
+
+register_all 이 명시적으로 "fleet_full"(그 실패가 차단이 아니라 함대
+한도 때문이라는 신호)을 보낼 수도 있다 — 지금의 실제 구현은 보내지
+않지만, 더 나은 증거가 생기면 그대로 쓸 자리를 남겨둔다.
+
+관측값은 절대 스스로 오르지 않는다. 되돌리는 길은 reset_observed_cap() 하나이고,
+운영자에게는 그것이 GUI 고급 패널의 [슬롯 상한 초기화] 버튼과 헤드리스의
+--reset-cap 플래그로 나 있다.
 """
 from __future__ import annotations
 
@@ -17,6 +53,11 @@ DEFAULT_SLOT_CAP = 30
 
 ROUTE_APP = "app"
 ROUTE_SWEEP = "sweep"
+
+# routes 파일에 라우트 항목과 함께 저장되는 예약 키(상한 관측치). 실제
+# 키워드는 절대 이 문자열과 같을 수 없다 — add() 의 keyword.strip() 을
+# 거치므로 공백을 포함한 이 값은 사용자가 입력할 수 없다.
+_CAP_META_KEY = "  __cap__"
 
 # 등록이 실패한 키워드는 지수 백오프로만 다시 시도한다. 재시도 한 번이
 # '전 계정 × (목록조회 + 차단조회 + 등록)' 이라 계정 12개면 수십 요청이다.
@@ -33,19 +74,30 @@ class KeywordRouter:
         self.queue = queue
         self.slot_cap = int(slot_cap)
         self.routes_fp = routes_fp
-        self._routes = self._load()
+        self._routes, self._observed_cap = self._load()
 
     # ── 영속 ──
-    def _load(self) -> dict:
+    def _load(self) -> tuple[dict, int | None]:
         try:
             with open(self.routes_fp, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            return {}
+            return {}, None
         if not isinstance(data, dict):
-            return {}
+            return {}, None
+        observed = None
+        meta = data.get(_CAP_META_KEY)
+        if isinstance(meta, dict):
+            try:
+                v = int(meta.get("observed"))
+                if v > 0:
+                    observed = v
+            except Exception:
+                observed = None
         out = {}
         for k, v in data.items():
+            if k == _CAP_META_KEY:
+                continue
             if isinstance(v, dict) and v.get("route") in (ROUTE_APP, ROUTE_SWEEP):
                 e = {"route": v["route"],
                      "reason": str(v.get("reason") or ""),
@@ -63,23 +115,96 @@ class KeywordRouter:
                     except Exception:
                         e["retry_n"] = 1
                 out[str(k)] = e
-        return out
+        return out, observed
 
     def _save(self) -> None:
         try:
             d = os.path.dirname(self.routes_fp)
             if d:
                 os.makedirs(d, exist_ok=True)
+            payload = dict(self._routes)
+            if self._observed_cap is not None:
+                payload[_CAP_META_KEY] = {"observed": self._observed_cap}
             with open(self.routes_fp, "w", encoding="utf-8") as f:
-                json.dump(self._routes, f, ensure_ascii=False)
+                json.dump(payload, f, ensure_ascii=False)
         except Exception:
             pass
 
     # ── 조회 ──
     def capacity(self) -> dict:
         used = sum(1 for v in self._routes.values() if v["route"] == ROUTE_APP)
-        return {"cap": self.slot_cap, "used": used,
-                "free": max(0, self.slot_cap - used)}
+        cap = self.slot_cap
+        if self._observed_cap is not None and self._observed_cap < cap:
+            cap = self._observed_cap
+        return {"cap": cap, "used": used, "free": max(0, cap - used)}
+
+    def _observe_cap_full(self, log, why: str = "서버가 등록을 거부함") -> None:
+        """'만원'의 유일한 결론 지점 — 이번 거부가 함대 한도 때문이라고 볼
+        근거가 있을 때만 호출된다(add·_observe_measured_full 참고).
+
+        그 시점에 app 으로 배정된 키워드 수가 곧 이 라우터가 쓸 수 있는
+        슬롯의 전부다: 더 밀어 넣을 수 없다는 게 방금 확인됐으니 남은
+        슬롯은 0 이다. 그보다 낮게 다시 관측되지 않는 한 갱신하지
+        않는다(오직 하강만)."""
+        used = self.capacity()["used"]
+        if self._observed_cap is not None and self._observed_cap <= used:
+            return
+        prev = self._observed_cap if self._observed_cap is not None else self.slot_cap
+        self._observed_cap = used
+        self._save()
+        log(f"  ⚠ 앱 슬롯 상한 관측치 하향: {prev} → {used}"
+            f"({why} — 잘못 내려갔으면 고급 패널 [슬롯 상한 초기화],"
+            " 서버는 --reset-cap 으로 되돌릴 것)")
+
+    def _observe_measured_full(self, count, used_before: int, log) -> None:
+        """실측값(register_all 의 observed_count)이 '함대 한도 도달'의
+        근거인지만 판정한다. 근거면 결론은 _observe_cap_full 이 낸다 —
+        '만원'의 뜻이 두 갈래로 갈리지 않게 결론 지점은 하나뿐이다.
+
+        add() 가 이 실패를 만나기 직전에 잰 used_before 를 그대로 받는다
+        (그 사이 라우트가 바뀌지 않았다).
+
+        차단 키워드인지 한도 초과인지는 register_all 의 반환만으로 절대
+        구분이 안 된다(모듈 docstring 참고) — 그래서 실패 사유를 보는 대신
+        이 부등식만 본다:
+
+          count < used_before  → 근거 아님, 버림.
+            이 계정이 다른 계정만큼 아직 못 따라간 것일 수 있다(막 유효해진
+            계정 등). '적게 갖고 있다'는 것 자체는 상한의 근거가 아니다 —
+            차단 키워드가 실패한 계정이 겨우 2개를 갖고 있다고 해서 상한이
+            2 라는 뜻은 아니다. 뒤처짐과 상한 도달을 구분 못 하면 오탐이다.
+
+          count >= used_before  → 근거. 우리가 이 계정에 밀어 넣었다고 믿는
+            만큼은 실제로도 갖고 있는데("따라잡음") 이번 등록은 거부됐다.
+            남은 슬롯이 0 이라는 직접 신호이므로 상한을 used 로 내린다.
+            count 자체를 상한으로 삼지 않는 이유는 모듈 docstring 참고 —
+            그 값에는 라우터가 모르는 키워드가 섞여 있어 수렴하지 않는다.
+
+        used_before<=0(성공 이력이 아예 없음)이면 비교 기준이 없어 건너뛴다."""
+        try:
+            count = int(count)
+        except Exception:
+            return
+        if used_before <= 0 or count < used_before:
+            return
+        self._observe_cap_full(
+            log, why=f"계정 실 보유수 {count}개 확인, 그런데도 거부됨")
+
+    def reset_observed_cap(self, log=None) -> bool:
+        """관측으로 낮아진 유효 상한을 되돌린다 — 일시적 서버 오류·오탐으로
+        낮아진 경우 운영자가 빠져나갈 구멍. seed_from_server 는 routes 가
+        비어 있을 때만 동작해 관측치가 있는 상태에선 거의 열리지 않으므로,
+        평시 탈출 경로는 이 메서드다.
+
+        운영자가 닿는 문은 둘이다: GUI 고급 패널의 [슬롯 상한 초기화] 버튼
+        (MainWindow.on_reset_cap_clicked)과 헤드리스의 --reset-cap 플래그."""
+        if self._observed_cap is None:
+            return False
+        self._observed_cap = None
+        self._save()
+        if log:
+            log("  앱 슬롯 상한 관측치 초기화")
+        return True
 
     def routes(self) -> list[dict]:
         return [dict(v, keyword=k) for k, v in
@@ -108,6 +233,10 @@ class KeywordRouter:
                                 "at": now}
             n += 1
         if n:
+            # routes 가 비어 씨딩이 열렸다는 것 자체가 서버 상태를 다시
+            # 믿기로 한 것이다 — 남아 있던 관측 상한(예: 예전에 다 지워진
+            # 뒤에도 파일에 남았던 값)도 같이 씻어낸다.
+            self._observed_cap = None
             self._save()
         return n
 
@@ -120,9 +249,10 @@ class KeywordRouter:
         if not keyword:
             return {"keyword": keyword, "route": None, "reason": "빈 키워드"}
 
-        if self.capacity()["free"] <= 0:
+        cap_now = self.capacity()
+        if cap_now["free"] <= 0:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
-                                  f"앱 슬롯 만원({self.slot_cap})", log)
+                                  f"앱 슬롯 만원({cap_now['cap']})", log)
         try:
             res = self.alerts.register_all(
                 [keyword], min_price, max_price, exclude,
@@ -135,6 +265,18 @@ class KeywordRouter:
         # 없었다는 뜻인데, 이때 app 으로 표시하면 슬롯만 먹고 아무데서도 감시되지
         # 않는다 — 느리더라도 스윕이 낫다.
         if not (res.get("added") or res.get("skipped")):
+            # fleet_full 은 alerts 가 "이 실패는 차단 키워드가 아니라 함대
+            # 한도 때문"이라고 명시했을 때만 켜진다. 신호가 없으면(현재의
+            # 실제 구현이 그렇다) 관측하지 않는다 — 차단 키워드 실패를
+            # 한도로 오인하면 멀쩡한 슬롯을 스윕에 묶어버린다.
+            if res.get("failed") and res.get("fleet_full"):
+                self._observe_cap_full(log)
+            # 측정된 신호(우선): register_many 가 실패한 계정의 실제 보유수를
+            # 다시 세서 넘겨준 값. 사유 추측 없이 부등식만으로 판단한다 —
+            # _observe_measured_count 의 docstring 참고.
+            oc = res.get("observed_count")
+            if oc is not None:
+                self._observe_measured_full(oc, cap_now["used"], log)
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
                                   "앱 등록 실패(차단 키워드·유효 계정 없음)", log,
                                   failed=True)
@@ -147,8 +289,67 @@ class KeywordRouter:
 
     def add_many(self, keywords, min_price=None, max_price=None, exclude=None,
                  core_only=False, log=None) -> list[dict]:
-        return [self.add(k, min_price, max_price, exclude, core_only, log)
-                for k in keywords or []]
+        """여러 키워드를 한 번에 배정한다(반환은 키워드별 결과 — 호출자가
+        키워드마다 경로를 로그한다).
+
+        슬롯에 들어갈 만큼은 register_all 한 번으로 묶는다. add() 를 키워드
+        수만큼 부르면 그 수만큼 '전 계정 목록조회'가 되풀이된다 — 계정
+        100개에 브랜드 20개면 부트스트랩 한 번에 수천 요청 차이다."""
+        items = [str(k or "").strip() for k in (keywords or [])]
+        free = self.capacity()["free"]
+        batch, seen = [], set()
+        for kw in items:
+            if len(batch) >= free:
+                break               # 넘치는 몫은 add() 가 요청 없이 스윕으로
+            if not kw or kw in seen or kw in self._routes:
+                continue            # 빈 값·중복·이미 배정된 것은 개별 처리
+            seen.add(kw)
+            batch.append(kw)
+        done = (self._register_batch(batch, min_price, max_price, exclude,
+                                     core_only, log)
+                if len(batch) > 1 else set())
+        return [{"keyword": k, "route": ROUTE_APP, "reason": "앱 알림 등록"}
+                if k in done else
+                self.add(k, min_price, max_price, exclude, core_only, log)
+                for k in items]
+
+    def _register_batch(self, batch, min_price, max_price, exclude, core_only,
+                        log) -> set:
+        """묶음 등록 1회. 전원 성공일 때만 그 키워드들을 app 으로 확정한다.
+
+        register_all 이 계정별 결과를 세 정수로 뭉개므로 부분 실패의 범인을
+        지목할 수 없다 — failed 가 하나라도 있으면 배치 결과를 통째로 버리고
+        호출자가 키워드별로 다시 태운다(귀속·백오프가 필요한 경우는 개별
+        경로뿐이다). 이미 들어간 것은 그 재시도에서 skipped 로 걸러져 등록
+        요청을 더 쓰지 않는다.
+
+        배치가 통째로 거부되면(added·skipped 둘 다 0) 개별 재시도에 앞서
+        상한부터 관측한다 — 거기서 만원이 확정되면 이어지는 add() 들은
+        요청 없이 곧장 스윕으로 간다."""
+        cap_now = self.capacity()
+        log = log or (lambda m: None)
+        try:
+            res = self.alerts.register_all(
+                batch, min_price, max_price, exclude,
+                log=log, core_only=core_only) or {}
+        except Exception:
+            return set()            # 사유·백오프 기록은 개별 경로에 맡긴다
+        if not (res.get("added") or res.get("skipped")):
+            if res.get("failed") and res.get("fleet_full"):
+                self._observe_cap_full(log)
+            oc = res.get("observed_count")
+            if oc is not None:
+                self._observe_measured_full(oc, cap_now["used"], log)
+            return set()
+        if res.get("failed"):
+            return set()
+        now = int(time.time())
+        for kw in batch:
+            self.queue.remove(kw)
+            self._routes[kw] = {"route": ROUTE_APP, "reason": "앱 알림 등록",
+                                "at": now}
+        self._save()
+        return set(batch)
 
     def _to_sweep(self, keyword, min_price, max_price, exclude, now, reason,
                   log, failed: bool = False) -> dict:
@@ -185,13 +386,16 @@ class KeywordRouter:
         승격에 실패한 키워드는 (a) 백오프가 풀릴 때까지 건너뛰고 (b) 큐 맨 뒤로
         보낸다. 둘 다 없으면 못 들어가는 키워드 하나가 큐 머리에 눌러앉아
         매 틱 재시도되면서, 뒤에 있는 멀쩡한 키워드는 영영 승격되지 않는다."""
-        free = self.capacity()["free"]
-        if free <= 0 or not len(self.queue):
+        if self.capacity()["free"] <= 0 or not len(self.queue):
             return []
         now = int(time.time())
         out = []
         for entry in self.queue.oldest(len(self.queue)):
-            if len(out) >= free:
+            # 여유는 매 건 다시 본다(로컬 계산, 요청 없음). 승격으로 줄기도
+            # 하지만, 실패 한 건이 '함대 만원'을 알려주면 그 자리에서 0 이
+            # 된다 — 틱 시작 때의 free 를 붙들고 있으면 이미 만원인 줄
+            # 알면서 큐를 끝까지 훑는다(실패 한 건이 곧 전 계정 요청 한 벌).
+            if self.capacity()["free"] <= 0:
                 break
             kw = entry["keyword"]
             if self.retry_after(kw) > now:

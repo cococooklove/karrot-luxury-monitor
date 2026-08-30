@@ -4,6 +4,8 @@ settings.txt
 proxies.txt
 report_*.log
 accounts.json
+# accounts.json 프로세스 간 병합락 사이드카(런타임 산출물)
+**/accounts.json.lock
 # 텔레그램 봇 토큰
 notify.json
 # 구글 서비스계정 키

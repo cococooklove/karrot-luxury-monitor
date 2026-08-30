@@ -145,7 +145,27 @@ class KeywordAlertAPI:
                 time.sleep(0.6)
             except Exception as e:
                 failed.append((kw, str(e)[:60])); log(f"  {kw}: 실패 {str(e)[:40]}")
-        return {"added": added, "skipped": skipped, "failed": failed}
+        out = {"added": added, "skipped": skipped, "failed": failed}
+        if failed:
+            # 실패가 하나라도 있으면 이 계정의 실 보유수를 함께 넘긴다.
+            # 차단 키워드인지 한도 초과인지 반환값만으로는 구분 못 하니
+            # 추측하지 않고, 서버가 들고 있는 진짜 개수를 라우터에 넘긴다.
+            #
+            # skip_existing 경로(라우터가 쓰는 유일한 경로)에서는 이미
+            # 답을 갖고 있다: existing 은 이 함수 진입 때 받아온 계정의 전체
+            # 목록이고 added 는 그 뒤 이 호출이 새로 넣은 것뿐이다 → 지금
+            # 보유수 = len(existing)+len(added). 여기서 목록을 다시 조회하면
+            # 차단 키워드 한 개가 전 계정에 실패하는 가장 흔한 경로에서
+            # 요청이 계정마다 하나씩 더 늘어난다(33~50%).
+            if skip_existing:
+                out["account_count"] = len(existing) + len(added)
+            else:
+                # existing 을 안 받아온 경우에만 실측이 필요하다.
+                try:
+                    out["account_count"] = len(self.keywords())
+                except Exception:
+                    pass
+        return out
 
     # ── 삭제 ──
     def delete(self, user_keyword_id: str) -> bool:
@@ -318,6 +338,7 @@ class MultiAccountAlerts:
         valid = self._valid(core_only)
         log(f"유효 계정 {len(valid)}개 (만료계정 제외)")
         total = {"added": 0, "skipped": 0, "failed": 0}
+        observed_count = None    # 실패가 난 계정들 중 실측된 보유수의 최댓값
         for code, access, proxy in valid:
             log(f"── 계정 {code[:6]} ──")
             api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
@@ -326,11 +347,18 @@ class MultiAccountAlerts:
                                         exclude_keywords, log=log)
                 for k in total:
                     total[k] += len(res[k])
+                if "account_count" in res:
+                    n = res["account_count"]
+                    observed_count = n if observed_count is None else max(observed_count, n)
             except Exception as e:
                 log(f"  계정 {code[:6]} 실패: {str(e)[:50]}")
             finally:
                 api.close()
         log(f"전체: 등록 {total['added']} · 스킵 {total['skipped']} · 실패 {total['failed']}")
+        # added/skipped/failed 세 키는 그대로 둔다 — main.py 와 라우터가 이미
+        # 이 모양으로 읽는다. 관측치는 나란히 얹기만 한다.
+        if observed_count is not None:
+            total["observed_count"] = observed_count
         return total
 
     def poll_all(self, category_id: str = FLEA_CATEGORY, log=None, workers: int = 12,

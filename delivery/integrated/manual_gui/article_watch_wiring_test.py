@@ -6,7 +6,9 @@ import os
 import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+app_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, app_dir)
+os.chdir(app_dir)  # Ensure OUT.json is found regardless of where test is run from
 
 import main as m
 

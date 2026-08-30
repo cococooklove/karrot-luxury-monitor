@@ -1,113 +1,124 @@
-"""모든 버튼 클릭 단위 테스트 — 블로킹 다이얼로그 몽키패치 후 핸들러 실행."""
-import os, sys, time, tempfile
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QDialog
-from PyQt6.QtCore import Qt
+"""버튼 배선 테스트 — 핸들러가 붙어 있고, 다이얼로그가 실제로 열리는가.
+
+    python button_test.py
+
+옛 버전은 [검색] 을 눌러 진짜 당근에서 매물을 받아오고 자동 모니터를 30초
+돌렸다. 자격증명·프록시가 없는 환경에서는 영원히 빨갛고, 있어도 네트워크 상태에
+따라 흔들린다. 실수집 검증은 nationwide_test.py 같은 라이브 스크립트가 따로
+한다. 여기서는 네트워크 없이 확인할 수 있는 것만 본다 — 버튼이 핸들러에
+연결돼 있는가, 다이얼로그가 크래시 없이 서는가, 폼 값이 작업 객체로 옮겨지는가.
+(자동 모니터 탭 버튼(autoStartBtn 등)은 탭째 없어졌으므로 여기서 뺐다.)
+"""
+import os
+import re
+import sys
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+app_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, app_dir)
+os.chdir(app_dir)
+
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 R = []
-def ck(n, c, e=""):
-    R.append((n, bool(c))); print(f"  [{'PASS' if c else 'FAIL'}] {n}  {e}")
+
+
+def ck(name, cond, extra=""):
+    R.append((name, bool(cond)))
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name}  {extra}")
+
 
 app = QApplication.instance() or QApplication([])
 
-# ── 블로킹 다이얼로그 몽키패치 ──
+# ── 블로킹 다이얼로그 몽키패치 — 열되 멈추지 않는다 ──
 QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
 QMessageBox.warning = staticmethod(lambda *a, **k: None)
 QMessageBox.information = staticmethod(lambda *a, **k: None)
 QMessageBox.critical = staticmethod(lambda *a, **k: None)
-_saved = {}
-QDialog.exec = lambda self: (_saved.__setitem__("dlg", self), 0)[1]   # 즉시 반환(빌드만)
+QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: ("", ""))
+QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: ("", ""))
+_opened = []
+QDialog.exec = lambda self: (_opened.append(self), 0)[1]
+# 모달(exec)뿐 아니라 비모달(show)로 뜨는 창도 있다 — 둘 다 잡는다.
+_orig_show = QDialog.show
+
+
+def _rec_show(self):
+    _opened.append(self)
+    _orig_show(self)
+
+
+QDialog.show = _rec_show
 
 import main
+from daangn.task import CrawlTask
+
 w = main.MainWindow()
 w.alert = lambda *a, **k: None          # 알림 무음
-PROXIES = w._collect_proxies()
 
-def pump(cond, timeout=90):
-    t0 = time.time()
-    while not cond() and time.time() - t0 < timeout:
-        app.processEvents(); time.sleep(0.1)
-    return cond()
+print("=== 버튼 → 핸들러 연결 ===")
+# receivers() 가 0 이면 눌러도 아무 일이 없다 — 런타임에만 드러나는 고장이다.
+for attr in ("accountsBtn", "proxyViewBtn", "alertAddBtn", "alertRefreshBtn",
+             "alertDelBtn", "alertDelAllBtn", "alertPollBtn", "alertPollAllBtn",
+             "alertBulkAllBtn", "alertCoverageBtn", "alertFleetBtn",
+             "alertTgTestBtn", "watchToggleBtn", "autoExcelBtn", "autoNotifyBtn",
+             "autoAccountsBtn", "autoProxyViewBtn"):
+    b = getattr(w, attr, None)
+    ck(f"{attr} 연결됨", b is not None and b.receivers(b.clicked) > 0)
+ck("검색 버튼 연결됨", w.ui.startBtn.receivers(w.ui.startBtn.clicked) > 0)
+for key in main.MainWindow.CHIP_TARGETS:
+    c = w._chips[key]
+    ck(f"상태칩 {key} 연결됨", c.receivers(c.clicked) > 0)
 
-print("=== 수동 버튼 ===")
-# 1) startBtn: 지역 1개 체크 + 키워드 → 검색 → 결과 모델 채움
-w.ui.keywordEdit.setText("구찌")
-w.adaptiveCheck.setChecked(False)
-# 트리에서 데이터 많은 지역(역삼동-6035) 우선 체크
-region_item = None
-for ch in w.all_last_child:
-    if ch.data(0, Qt.ItemDataRole.UserRole) == "역삼동-6035":
-        ch.setCheckState(0, Qt.CheckState.Checked); region_item = ch; break
-if region_item is None:                     # 폴백: 아무 유효 지역
-    for ch in w.all_last_child:
-        if ch.data(0, Qt.ItemDataRole.UserRole):
-            ch.setCheckState(0, Qt.CheckState.Checked); region_item = ch; break
-ck("지역 선택 가능", region_item is not None,
-   region_item.data(0, Qt.ItemDataRole.UserRole) if region_item else "")
-before = w.products_model.rowCount()
-w.on_start_btn_clicked()                 # ← startBtn 클릭
-started = pump(lambda: w.controller.is_task_running(), 10)
-done = pump(lambda: not w.controller.is_task_running(), 90)
-after = w.products_model.rowCount()
-ck("startBtn 검색→결과 채움", done and after > before, f"{before}→{after}행")
+print("\n=== 다이얼로그가 선다(자격증명 없이도) ===")
+for name, fn in (("계정·프록시", "on_accounts_btn_clicked"),
+                 ("프록시 목록", "on_proxy_view_clicked"),
+                 ("알림 설정", "on_auto_notify_clicked"),
+                 ("계정 현황", "on_alert_fleet")):
+    _opened.clear()
+    try:
+        getattr(w, fn)()
+        ck(f"{name} 다이얼로그", bool(_opened), f"{fn} → {len(_opened)}개")
+    except Exception as e:
+        ck(f"{name} 다이얼로그", False, f"{type(e).__name__}: {str(e)[:60]}")
+# 열어 둔 자동갱신 타이머가 뒤에 남지 않게 닫는다.
+for d in _opened:
+    try:
+        d.close()
+    except Exception:
+        pass
 
-# 2) saveToExcelBtn: 결과 있으면 엑셀 저장
-xlsx_out = tempfile.mktemp(suffix=".xlsx")
-QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (xlsx_out, ""))
+print("\n=== 엑셀 조건 로드: 취소해도 안 죽는다 ===")
 try:
-    w.save_to_excel()                    # ← 엑셀 저장 클릭
-    saved = pump(lambda: os.path.exists(xlsx_out), 30)
-    ck("saveToExcelBtn 엑셀 저장", saved, xlsx_out if saved else "미생성")
+    w.on_auto_excel_clicked()          # getOpenFileName 이 "" → 취소 경로
+    ck("엑셀 조건 취소 처리", True)
 except Exception as e:
-    ck("saveToExcelBtn", False, str(e)[:50])
+    ck("엑셀 조건 취소 처리", False, f"{type(e).__name__}: {str(e)[:60]}")
 
-# 3) accountsBtn 다이얼로그 빌드 (exec 몽키패치)
-try:
-    w.on_accounts_btn_clicked(); ck("accountsBtn 다이얼로그", True)
-except Exception as e:
-    ck("accountsBtn 다이얼로그", False, str(e)[:50])
-# 4) proxyViewBtn 다이얼로그
-try:
-    w.on_proxy_view_clicked(); ck("proxyViewBtn 다이얼로그", True)
-except Exception as e:
-    ck("proxyViewBtn 다이얼로그", False, str(e)[:50])
-# 5) 매물 상세 (첫 행 선택) — 이미지 다운로드 제외 로직만
-try:
-    if w.products_model.rowCount() > 0:
-        prds = w.controller.get_current_data()
-        w.load_detail(prds[0])           # ← 상세 로드
-        ck("매물 상세뷰 로드", True, prds[0].name[:20])
-    else:
-        ck("매물 상세뷰 로드", False, "결과 없음")
-except Exception as e:
-    ck("매물 상세뷰 로드", False, str(e)[:50])
+print("\n=== 검색폼 → CrawlTask ===")
+w.ui.keywordEdit.setText("샤넬")
+w.extraEdit.setText("정품")
+w.excludeEdit.setText("레플 미러")
+w.ui.minimumEdit.setText("500000")
+w.ui.maximumEdit.setText("3000000")
+extra = [x for x in re.split(r"[,\s]+", w.extraEdit.text().strip()) if x]
+exclude = [x for x in re.split(r"[,\s]+", w.excludeEdit.text().strip()) if x]
+task = CrawlTask(("강남구", "강남구-381"), w.ui.keywordEdit.text(), True,
+                 500000, 3000000, extra_keywords=extra, exclude_keywords=exclude)
+ck("추가·제외 키워드 분해",
+   task.extra_keywords == ["정품"] and task.exclude_keywords == ["레플", "미러"],
+   f"{task.extra_keywords} / {task.exclude_keywords}")
+ck("가격 범위 전달", task.minimum == 500000 and task.maximum == 3000000)
 
-print("=== 자동 버튼 ===")
-# 6) autoExcelBtn: 파일다이얼로그 패치 → 조건 로드
-from openpyxl import Workbook
-cxls = tempfile.mktemp(suffix=".xlsx"); wb = Workbook(); ws = wb.active
-ws.append(["대분류","키워드","제외키워드","최소금액"]); ws.append(["가방","구찌","레플",100000]); wb.save(cxls)
-QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (cxls, ""))
-try:
-    w.on_auto_excel_clicked()
-    ck("autoExcelBtn 조건로드", len(w.auto_conditions) == 1, f"{len(w.auto_conditions)}조건")
-except Exception as e:
-    ck("autoExcelBtn", False, str(e)[:50])
-# 7) autoStartBtn: 시작→정지
-w.autoKeyword.setText("구찌")
-w.auto_conditions = []          # 단일조건으로
-w.autoRestMin.setValue(1); w.autoRestMax.setValue(2)
-try:
-    w.on_auto_start_clicked()            # ← 시작
-    run = pump(lambda: w.auto_monitor and w.auto_monitor.isRunning(), 5)
-    time.sleep(8)
-    w.on_auto_start_clicked()            # ← 정지(토글)
-    stopped = pump(lambda: not (w.auto_monitor and w.auto_monitor.isRunning()), 15)
-    ck("autoStartBtn 시작/정지", run and stopped, "시작→정지 OK")
-except Exception as e:
-    ck("autoStartBtn", False, str(e)[:50])
+print("\n=== 지역 트리에서 동을 고를 수 있다 ===")
+picked = next((c for c in w.all_last_child
+               if c.data(0, main.QtCore.Qt.ItemDataRole.UserRole)), None)
+ck("지역 트리 채워짐", picked is not None,
+   picked.data(0, main.QtCore.Qt.ItemDataRole.UserRole) if picked else "비어 있음")
 
-print("\n===== 결과 =====")
-ok = sum(1 for _, c in R if c); print(f"{ok}/{len(R)} PASS")
-for n, c in R:
-    if not c: print(f"  실패: {n}")
+passed = sum(1 for _, ok in R if ok)
+print(f"\n===== {passed}/{len(R)} PASS =====")
+for name, ok in R:
+    if not ok:
+        print("  실패:", name)
+sys.exit(0 if passed == len(R) else 1)
