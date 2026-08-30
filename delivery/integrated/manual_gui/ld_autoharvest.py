@@ -13,7 +13,17 @@ import base64
 import json
 import os
 import subprocess
+import tempfile
+import threading
 import time
+
+# accounts.json 은 이 기계에서 재발급할 수 없는 세션 토큰의 유일한 사본이다.
+# 두 스레드(GUI 스윕 스레드 + 알림 워커, 헤드리스 폴링 루프 + 스윕)가 같은 프로세스
+# 안에서 동시에 들어올 수 있으므로 읽기-병합-쓰기 전체를 직렬화한다.
+_MERGE_LOCK = threading.Lock()
+# 함대 전체 수확도 프로세스 안에서 하나만 돈다. 동시 수확은 adb 폭주이면서
+# LDPlayer 인스턴스 동시기동 금지 규칙(순차 기동)을 어긴다.
+_HARVEST_LOCK = threading.Lock()
 
 PKG = "com.towneers.www"
 APP_DATA = f"/data/data/{PKG}"
@@ -321,6 +331,17 @@ def harvest_one(adb_bin, serial, nudge=True, min_remaining=600):
 
 
 def merge_accounts(accounts_fp, rows):
+    """수확분을 accounts.json 에 병합. 동시 호출에도 파일이 깨지지 않는다.
+
+    읽기-병합-쓰기를 _MERGE_LOCK 으로 감싸고(안 그러면 나중 쓰기가 앞선 쓰기의
+    삽입을 통째로 덮는다), 승격은 같은 디렉터리의 **고유** 임시파일에서 한다.
+    고정 이름(accounts.json.tmp)을 쓰면 두 쓰기가 한 파일에 뒤섞인 뒤 그 잡탕이
+    os.replace 로 원자적으로 승격된다 — replace 는 원자적이어도 내용은 아니다."""
+    with _MERGE_LOCK:
+        return _merge_accounts_locked(accounts_fp, rows)
+
+
+def _merge_accounts_locked(accounts_fp, rows):
     base = json.load(open(accounts_fp, encoding="utf-8")) if os.path.exists(accounts_fp) else []
     # code 중복 제거(후행 항목 우선 — 최근 수확분)
     by = {}
@@ -340,15 +361,43 @@ def merge_accounts(accounts_fp, rows):
             base.append({"code": c, "refresh": r["refresh"], "access": r["access"],
                          "proxy": None, "label": f"acc-{str(c)[:6]}"})
             ins += 1
-    tmp = accounts_fp + ".tmp"
-    json.dump(base, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-    os.replace(tmp, accounts_fp)
+    _atomic_write_json(accounts_fp, base)
     return upd, ins, len(base)
+
+
+def _atomic_write_json(fp, data):
+    """같은 디렉터리의 고유 임시파일 → fsync → os.replace. 같은 파일시스템 유지."""
+    d = os.path.dirname(os.path.abspath(fp)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(fp) + ".", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, fp)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def harvest_all(accounts_fp="./accounts.json", adb_bin=None, serials=None,
                 nudge=True, log=None):
-    """모든 LDPlayer 인스턴스 수확 → accounts.json 병합. (updated, inserted, total, harvested)."""
+    """모든 LDPlayer 인스턴스 수확 → accounts.json 병합. (updated, inserted, total, harvested).
+
+    프로세스 안에서 한 번에 하나만 돈다. 두 스레드가 동시에 들어오면 뒤쪽은
+    앞쪽이 끝날 때까지 기다렸다가 갱신된 파일 위에서 다시 병합한다 — 함대를 두 번
+    깨우지 않고, ensure_ldplayer 가 인스턴스를 동시 기동하지도 않는다.
+
+    주의: 이 락은 프로세스 안에서만 유효하다. GUI 와 헤드리스를 같은 기계에서
+    동시에 띄우면 두 프로세스가 각각 수확하며, 그건 파일락으로만 막힌다."""
+    with _HARVEST_LOCK:
+        return _harvest_all_locked(accounts_fp, adb_bin, serials, nudge, log)
+
+
+def _harvest_all_locked(accounts_fp, adb_bin, serials, nudge, log):
     log = log or (lambda m: None)
     adb_bin = find_adb(adb_bin)
     use = list(serials or []) or list_instances(adb_bin)

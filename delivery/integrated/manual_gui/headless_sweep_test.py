@@ -300,10 +300,17 @@ ck("조회 실패는 삼키고 0", m.seed_router_from_server(FakeRouter(), boom,
 ck("실패 로그", any("인식 실패" in x for x in L3), str(L3))
 
 print("=== K. GUI 폴링 틱도 씨딩을 지난다 ===")
-src_tick = m.MainWindow._auto_poll_tick.__code__.co_names
-ck("_auto_poll_tick 이 seed_router_from_server 호출",
-   "seed_router_from_server" in src_tick, str(src_tick))
-ck("_auto_poll_tick 이 rebalance 호출", "rebalance" in src_tick)
+_tick_code = m.MainWindow._auto_poll_tick.__code__
+src_tick = set(_tick_code.co_names)
+_tick_job = set()
+for _c in _tick_code.co_consts:
+    if hasattr(_c, "co_names"):
+        _tick_job |= set(_c.co_names)
+# 씨딩은 HTTP 조회다 — 타이머 콜백(GUI 스레드)이 아니라 폴링 잡 안에서 돌아야 한다.
+ck("_auto_poll_tick 의 씨딩은 GUI 스레드 밖(폴링 잡)",
+   "seed_router_from_server" in _tick_job
+   and "seed_router_from_server" not in src_tick, str(src_tick))
+ck("_auto_poll_tick 이 rebalance 호출", "rebalance" in (src_tick | _tick_job))
 ck("_auto_poll_tick 이 재동기화 호출", "_resync_search_sweep" in src_tick)
 ck("_alert_populate 도 씨딩 유지",
    "seed_from_server" in m.MainWindow._alert_populate.__code__.co_names)

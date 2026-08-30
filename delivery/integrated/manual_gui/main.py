@@ -268,16 +268,14 @@ def seed_router_from_server(router, list_fn, log, state):
         return 0
 
 
-def harvest_token_quiet(accounts_path="./accounts.json"):
-    """LDPlayer 수확 후 accounts.json 에서 가장 늦게 만료되는 access 를 돌려준다.
+def read_token_quiet(accounts_path="./accounts.json"):
+    """accounts.json 에서 가장 늦게 만료되는 access 를 읽는다 — 수확은 하지 않는다.
 
-    파일만 만진다 — GUI 스레드에서도, 헤드리스 스윕 스레드에서도 안전하다."""
+    수확을 소유하지 **않는** 쪽(검색 스윕)이 쓰는 provider. 스윕에 필요한 건
+    '수확'이 아니라 '신선한 토큰'이고, 토큰을 신선하게 유지하는 일은 폴링 루프가
+    이미 주기적으로 한다. 여기서 또 함대를 깨우면 두 스레드가 같은 LDPlayer 를
+    동시에 흔들며 accounts.json 을 동시에 쓴다."""
     import json as _json
-    try:
-        import ld_autoharvest
-        ld_autoharvest.harvest_all(accounts_path, nudge=True)
-    except Exception:
-        pass
     try:
         from daangn_ext.token_manager import token_exp
         best = None
@@ -290,6 +288,20 @@ def harvest_token_quiet(accounts_path="./accounts.json"):
         return best
     except Exception:
         return None
+
+
+def harvest_token_quiet(accounts_path="./accounts.json"):
+    """함대 수확 후 최신 access. 수확을 **소유한** 쪽만 부른다.
+
+    소유자는 런타임마다 하나뿐이다: GUI 는 스윕 스레드의 token_provider,
+    헤드리스는 폴링 루프의 20분 주기 수확. 둘 이상이 부르면 adb 폭주 +
+    accounts.json 동시쓰기가 된다."""
+    try:
+        import ld_autoharvest
+        ld_autoharvest.harvest_all(accounts_path, nudge=True)
+    except Exception:
+        pass
+    return read_token_quiet(accounts_path)
 
 
 def headless_proxies(settings_path="./settings.txt",
@@ -2155,6 +2167,27 @@ class MainWindow(QMainWindow):
             raise RuntimeError("유효 토큰 없음 — LDPlayer/폰 수확 확인")
         return KeywordAlertAPI(token)
 
+    def _quiet_keyword_list(self, core_only=False):
+        """서버에 이미 등록된 키워드 목록 — 수확 없이 accounts.json 토큰만 쓴다.
+
+        씨딩 전용. _alert_api() 를 쓰면 안 된다: 그쪽은 조회 전에 LDPlayer 부팅 +
+        함대 전체 수확을 먼저 돌리므로, 첫 실행 씨딩 한 번에 에뮬레이터 팜이 뜬다.
+        헤드리스 _server_keyword_list 와 같은 문이다 — 등록은 전 계정에 같은
+        키워드를 쓰므로 유효한 계정 하나만 봐도 함대 상태를 안다."""
+        from daangn_ext.keyword_alert_api import KeywordAlertAPI
+        valid = self._multi()._valid(core_only)
+        if not valid:
+            return {}
+        _code, access, proxy = valid[0]
+        api = KeywordAlertAPI(access, "./data/config.json", proxy=proxy)
+        try:
+            return api.list()
+        finally:
+            try:
+                api.close()
+            except Exception:
+                pass
+
     def _alert_run(self, fn, on_done=None):
         if self._alert_worker and self._alert_worker.isRunning():
             self.alert("이전 작업 진행 중 — 잠시 후"); return
@@ -2630,26 +2663,33 @@ class MainWindow(QMainWindow):
         이전 폴링이 아직 진행 중이면 조용히 스킵(무인: 모달 팝업 금지)."""
         if self._supervisor:
             self._supervisor.retune()
-        # 자동 시작은 등록 화면(_alert_populate)을 거치지 않는다 — 여기서
-        # 씨딩하지 않으면 무인 첫 실행이 함대가 빈 줄 알고 꽉 찬 서버 한도에
-        # 등록을 시도해 전부 스윕으로 민다. routes 가 차 있으면 조회조차 안 한다.
-        seed_router_from_server(self._router,
-                                lambda: self._safe_alert_list(self.alertLog.append),
-                                self.alertLog.append,
-                                self.__dict__.setdefault("_seed_state", {}))
-        if self._router:
-            try:
-                promoted = self._router.rebalance(core_only=self._core_only(),
-                                                  log=self.alertLog.append)
-                for p in promoted:
-                    self.alertLog.append(f"[라우터] {p['keyword']} → 앱 알림 승격")
-            except Exception as e:
-                self.alertLog.append(f"[라우터] 승격 실패: {str(e)[:80]}")
+        # 스윕 재동기화만 GUI 스레드에 남는다 — QThread 를 만들고 세우는 일이라
+        # 워커로 못 옮긴다. 대신 네트워크를 타지 않는다.
         self._resync_search_sweep()
         if self._alert_worker and self._alert_worker.isRunning():
             self.alertLog.append("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
             return
-        self.on_alert_poll_all()
+        co = self._core_only()
+        state = self.__dict__.setdefault("_seed_state", {})
+
+        def job(log):
+            # 씨딩·승격은 **워커 안에서** 돈다. 씨딩은 20초 타임아웃짜리 HTTP
+            # 조회라 타이머 콜백(=GUI 스레드)에서 하면 창이 그대로 멈춘다.
+            # 자동 시작은 등록 화면(_alert_populate)을 거치지 않으므로 여기서
+            # 씨딩하지 않으면 무인 첫 실행이 함대가 빈 줄 알고 꽉 찬 서버 한도에
+            # 등록을 시도해 전부 스윕으로 민다. routes 가 차 있으면 조회조차 안 한다.
+            # 승격은 씨딩 결과에 기대므로 반드시 뒤에 온다.
+            seed_router_from_server(
+                self._router, lambda: self._quiet_keyword_list(co), log, state)
+            if self._router:
+                try:
+                    for p in self._router.rebalance(core_only=co, log=log):
+                        log(f"[라우터] {p['keyword']} → 앱 알림 승격")
+                except Exception as e:
+                    log(f"[라우터] 승격 실패: {str(e)[:80]}")
+            return self._alert_fleet().poll_all(log=log, core_only=co)
+
+        self._alert_run(job, self._match_populate)
 
     def on_alert_poll_all(self):
         co = self._core_only()
@@ -4645,9 +4685,14 @@ def _run_headless():
             return headless_sweep_cfg(
                 _settings(), sweep_queue.entries(), _notify_cfg(),
                 proxies=headless_proxies(), proxy_provider=headless_proxies,
-                # 수확을 끈 실행(--no-harvest)에서 토큰 provider 가 LDPlayer 를
-                # 깨우면 그 플래그의 뜻이 무너진다.
-                token_provider=(harvest_token_quiet if do_harvest else None))
+                # 헤드리스에서 수확을 소유하는 건 아래 폴링 루프(20분 주기)뿐이다.
+                # 스윕까지 harvest_all 을 부르면 두 스레드가 스케줄에 맞춰 같은
+                # 함대를 동시에 깨운다 — adb 폭주이자 accounts.json 동시쓰기이며,
+                # LDPlayer 순차기동 규칙도 어긴다. 스윕이 필요한 건 신선한 토큰이라
+                # 폴링 루프가 갱신해 둔 파일을 읽는 것으로 충분하다.
+                # --no-harvest 면 아무도 갱신하지 않으므로 provider 자체를 뺀다
+                # (= stabilize off, 기존 동작 그대로).
+                token_provider=(read_token_quiet if do_harvest else None))
 
         sweep_runner = HeadlessSweepRunner(sweep_queue, _sweep_cfg_builder,
                                            log, _sweep_found)

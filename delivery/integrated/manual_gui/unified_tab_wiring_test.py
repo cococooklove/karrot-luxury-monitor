@@ -349,10 +349,11 @@ if _win is not None:
     _seen = []
     _sv_router = _win._router
     _win._resync_search_sweep = lambda: _seen.append("resync")
-    _win.on_alert_poll_all = lambda: _seen.append("poll")
+    # 폴링은 이제 _alert_run 워커로 나간다(씨딩·승격이 그 안에 들어갔다).
+    _win._alert_run = lambda fn, on_done=None: _seen.append("poll")
     _win._router = None
     _win._auto_poll_tick()
-    for _n in ("_resync_search_sweep", "on_alert_poll_all"):
+    for _n in ("_resync_search_sweep", "_alert_run"):
         _win.__dict__.pop(_n, None)
     _win._router = _sv_router
     ck("_auto_poll_tick → 재동기화 후 폴링", _seen == ["resync", "poll"], str(_seen))
