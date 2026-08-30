@@ -31,11 +31,17 @@ def ck(name, cond, extra=""):
 
 
 # ── 합성 토큰/저장소 ──
+# jti: 발급마다 고유값. iat 가 정수초라 같은 초 안에서 같은 (sub,ttl,typ)로
+# 두 번 발급하면 페이로드가 완전히 같아져 "새 토큰"이 이전 토큰과 우연히 동일 문자열이
+# 되는 함정이 있었다(회전 여부를 시각 경계 운에 맡기게 됨) — jti로 항상 구분되게 한다.
+_jti_seq = iter(range(1, 1_000_000))
+
+
 def mkjwt(sub, ttl, typ):
     now = int(time.time())
     h = base64.urlsafe_b64encode(b'{"alg":"HS256"}').decode().rstrip("=")
     p = {"iat": now, "exp": now + ttl, "sub": sub, "type": typ, "code": sub,
-         "client_name": "KARROT_APP"}
+         "client_name": "KARROT_APP", "jti": next(_jti_seq)}
     pb = base64.urlsafe_b64encode(json.dumps(p).encode()).decode().rstrip("=")
     sig = base64.urlsafe_b64encode(b"s" * 32).decode().rstrip("=")
     return f"{h}.{pb}.{sig}"
