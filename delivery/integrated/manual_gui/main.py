@@ -1295,6 +1295,7 @@ class MainWindow(QMainWindow):
         self._router = None
         self._supervisor = None
         self._sweep_queue = None
+        self._sweep_kws = None          # 지금 도는 스윕이 떠 있는 키워드 집합
         try:
             from daangn_ext.sweep_queue import SweepQueue
             from daangn_ext.keyword_router import KeywordRouter, DEFAULT_SLOT_CAP
@@ -1770,8 +1771,10 @@ class MainWindow(QMainWindow):
         if self._router and kw:
             try:
                 self._router.remove(kw)
-            except Exception:
-                pass
+            except Exception as e:
+                # 삼키면 슬롯이 영영 샌다 — 이 호출이 막으려던 바로 그 실패다.
+                self.alertLog.append(
+                    f"[라우터] {kw} 배정 해제 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
         if not uid:                                   # 스윕 대기열 행 — 앱 id 가 없다
             self.alertLog.append(f"[키워드] {kw} 검색 스윕 대기열에서 제거")
             self.on_alert_refresh()
@@ -1791,8 +1794,9 @@ class MainWindow(QMainWindow):
             try:
                 for r in list(self._router.routes()):
                     self._router.remove(r["keyword"])
-            except Exception:
-                pass
+            except Exception as e:
+                self.alertLog.append(
+                    f"[라우터] 배정 비우기 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
         def job(log):
             api = self._alert_api()
             n = api.delete_all(log=log); log(f"총 {n}건 삭제")
@@ -1816,10 +1820,28 @@ class MainWindow(QMainWindow):
                 cell.setToolTip(str(route.get("reason") or ""))
             self.alertTable.setItem(r, c, cell)
 
+    def _queue_entries(self):
+        """스윕 대기열 엔트리. SweepQueue 는 __len__ 이 있어 비면 falsy 다 —
+        존재 여부는 is not None 으로 본다."""
+        try:
+            return (self._sweep_queue.entries()
+                    if self._sweep_queue is not None else [])
+        except Exception:
+            return []
+
     def _alert_populate(self, data):
-        if not data:
+        """등록 목록 그리기.
+
+        토큰이 없어 앱 목록을 못 읽어도(data 가 None) 대기열은 그린다 — 방금 스윕으로
+        밀린 키워드가 안 보이면 사용자는 등록이 삼켜진 줄 안다. 대신 앱 목록을 못
+        읽었다는 사실을 로그에 남겨, 짧아진 표를 '키워드가 사라졌다'로 읽지 않게 한다."""
+        entries = self._queue_entries()
+        if not data and not entries:
             return
-        kws = data.get("user_keywords") or []
+        if not data:
+            self.alertLog.append(
+                "[목록] 앱 등록 목록을 못 읽었습니다 — 검색 스윕 대기열만 표시합니다")
+        kws = (data or {}).get("user_keywords") or []
         routes = self._routes_map()
         self.alertTable.setRowCount(0)
         shown = set()
@@ -1835,12 +1857,6 @@ class MainWindow(QMainWindow):
                             str(k.get("id", "")))
         # 스윕으로 밀린 키워드는 앱 목록에 없다 — 여기 안 보이면 사용자는
         # 등록이 삼켜진 줄 안다. 대기열에서 끌어와 함께 그린다.
-        try:
-            # SweepQueue 는 __len__ 이 있어 비면 falsy 다 — is not None 으로 본다.
-            entries = (self._sweep_queue.entries()
-                       if self._sweep_queue is not None else [])
-        except Exception:
-            entries = []
         for e in entries:
             if e["keyword"] in shown:
                 continue
@@ -1850,7 +1866,7 @@ class MainWindow(QMainWindow):
                 price = f"{e.get('min') or ''}~{e.get('max') or ''}"
             self._alert_row(r, e["keyword"], routes.get(e["keyword"]), price,
                             ",".join(e.get("exclude") or []), "")
-        subs = data.get("subscription_infos") or []
+        subs = (data or {}).get("subscription_infos") or []
         if subs:
             txt = " · ".join(f"{s.get('name')}({s.get('ranged_regions_count')}지역"
                              + (",알림ON" if s.get('enable_notification') else ",알림OFF") + ")"
@@ -2170,6 +2186,7 @@ class MainWindow(QMainWindow):
                     self.alertLog.append(f"[라우터] {p['keyword']} → 앱 알림 승격")
             except Exception as e:
                 self.alertLog.append(f"[라우터] 승격 실패: {str(e)[:80]}")
+        self._resync_search_sweep()
         if self._alert_worker and self._alert_worker.isRunning():
             self.alertLog.append("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
             return
@@ -2842,7 +2859,7 @@ class MainWindow(QMainWindow):
         extra = self._splt(self.autoExtra.text())
         days = self.autoDays.value() or None
         conditions = []
-        for e in self._sweep_queue.entries():
+        for e in self._queue_entries():
             conditions.append({
                 "keyword": e["keyword"],
                 "extra": extra,
@@ -2857,23 +2874,68 @@ class MainWindow(QMainWindow):
 
     def _start_search_sweep(self):
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
+            # stop() 은 비동기다(최대 8초). 그 안에 다시 켜면 여기서 조용히 막혔다 —
+            # 재시작이 통째로 사라지는 것처럼 보이므로 로그를 남긴다.
+            self.alertLog.append(
+                "[검색스윕] 아직 정지 중 — 이번 시작 요청은 건너뜁니다(다음 틱 재시도)")
             return
         try:
+            cfg = self._sweep_cfg()
+            if not cfg.get("conditions"):
+                # conditions 가 비면 AutoMonitor 가 cfg["keyword"] 로 떨어져 KeyError.
+                # 컨트롤러의 큐 검사에 기대지 않고 여기서 직접 막는다.
+                self.alertLog.append("[검색스윕] 대기열이 비어 시작하지 않습니다")
+                return
             from daangn.auto_monitor import AutoMonitor
-            self.auto_monitor = AutoMonitor(self, self._sweep_cfg())
+            self.auto_monitor = AutoMonitor(self, cfg)
             self.auto_monitor.log.connect(self.alertLog.append)
             self.auto_monitor.found.connect(self._on_sweep_found)
             self.auto_monitor.start()
+            # 이 스윕이 어떤 키워드 집합으로 떠 있는지 기억한다 — cfg 는 스냅샷이다.
+            self._sweep_kws = {c["keyword"] for c in cfg["conditions"]}
             self.alertLog.append(
-                f"[검색스윕] 시작 — 키워드 {len(self._sweep_queue)}개")
+                f"[검색스윕] 시작 — 키워드 {len(self._sweep_kws)}개")
         except Exception as e:
             self.alertLog.append(f"[검색스윕] 시작 실패: {str(e)[:120]}")
 
     def _stop_search_sweep(self):
         am = self.auto_monitor
+        self._sweep_kws = None
         if am is not None and am.isRunning():
             am.stop()
             self.alertLog.append("[검색스윕] 정지 요청")
+
+    def _resync_search_sweep(self):
+        """돌고 있는 스윕이 낡은 키워드 집합인지 보고, 다르면 갈아끼운다.
+
+        cfg 는 AutoMonitor 를 만들 때 한 번 찍은 스냅샷이다. 감시 중에 키워드가
+        큐로 밀려오면 아무도 그걸 훑지 않고, 반대로 rebalance 가 앱으로 승격시키면
+        스윕이 이미 앱이 보는 키워드를 계속 훑어 요청을 두 번 쓴다.
+
+        폴링 틱에서만 부른다 — 등록이 몰아쳐도 재시작은 폴링 주기당 한 번을 넘지 않는다."""
+        if not (self._supervisor and self._supervisor.is_running()):
+            return
+        if self._sweep_queue is None:
+            return
+        try:
+            want = set(self._sweep_queue.keywords())
+        except Exception:
+            return
+        have = getattr(self, "_sweep_kws", None)
+        am = self.auto_monitor
+        running = am is not None and am.isRunning()
+        if have is None:
+            # 아직 안 떴거나 정지 요청 뒤 — 큐가 찼고 스레드가 빠졌으면 띄운다.
+            if want and not running:
+                self._start_search_sweep()
+            return
+        if want == have:
+            return
+        self.alertLog.append(
+            f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
+        self._stop_search_sweep()          # _sweep_kws 를 None 으로 되돌린다
+        if want:
+            self._start_search_sweep()     # 아직 정지 중이면 다음 틱이 이어받는다
 
     def _on_sweep_found(self, payload):
         """검색 스윕이 찾은 매물도 앱 알림과 같은 문으로 워치리스트에 들어간다."""

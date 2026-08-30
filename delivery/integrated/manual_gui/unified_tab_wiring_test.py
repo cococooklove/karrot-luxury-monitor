@@ -83,8 +83,15 @@ ck("id 없으면 None", m.sweep_found_to_match({"title": "x"}, "k") is None)
 
 # ── 탭 구성 ──
 ck("자동 모니터 탭 빌더 제거됨", not hasattr(m.MainWindow, "_build_auto_tab"))
-ck("감시 컨트롤러 모듈 import 가능",
-   __import__("daangn_ext.supervisor", fromlist=["SupervisorController"]) is not None)
+_sup = __import__("daangn_ext.supervisor",
+                  fromlist=["SupervisorController", "SupervisorPolicy"])
+ck("감시 컨트롤러 모듈이 두 클래스를 낸다",
+   all(callable(getattr(_sup, n, None))
+       for n in ("SupervisorController", "SupervisorPolicy")),
+   str(sorted(n for n in dir(_sup) if n[0].isupper())))
+ck("컨트롤러가 수명 API 를 갖춘다",
+   all(callable(getattr(_sup.SupervisorController, n, None))
+       for n in ("start", "stop", "is_running", "retune")))
 ck("슬롯 상한 키 정의", m.SLOT_CAP_KEY == "keyword_slot_cap")
 
 # ── 실제 창 구성 (offscreen) ──
@@ -109,7 +116,7 @@ if _win is not None:
     ck("감시 토글 존재", hasattr(_win, "watchToggleBtn"))
     ck("고급 패널 존재", hasattr(_win, "advancedBox"))
     ck("고급 패널 접힘",
-       getattr(getattr(_win, "advancedBox", None), "isChecked", bool)() is False)
+       hasattr(_win, "advancedBox") and _win.advancedBox.isChecked() is False)
     if hasattr(_win, "advancedBox"):
         # qt_ 내부 위젯(콤보 팝업 스크롤 컨테이너 등)은 Qt 가 관리한다 — 제외.
         _kids = [k for k in _win.advancedBox.findChildren(_QW.QWidget)
@@ -184,7 +191,97 @@ if _win is not None:
        sorted(k for c in _fake.calls for k in c[0]) == ["구찌", "롤렉스", "샤넬"],
        str(_fake.calls))
     ck("라우터 결과를 돌려준다", len(_res) == 3, str(_res))
-    ck("라우터 없으면 add_many 도 없다", _win._condition_groups([]) == [])
+    ck("빈 조건이면 그룹 없음", _win._condition_groups([]) == [])
+    _empty = _FakeRouter()
+    _win._router = _empty
+    _win._route_conditions([], core_only=False, log=_logged.append)
+    _win._router = _real_router
+    ck("빈 조건이면 라우터를 아예 안 부른다", _empty.calls == [], str(_empty.calls))
+
+    # ── 대기열 변화 → 검색 스윕 재시작 (Finding 1) ──
+    class _FakeQueue:
+        def __init__(self, kws):
+            self._k = list(kws)
+
+        def keywords(self):
+            return list(self._k)
+
+        def entries(self):
+            return [{"keyword": k, "min": None, "max": None,
+                     "exclude": [], "at": 0} for k in self._k]
+
+        def __len__(self):
+            return len(self._k)
+
+    class _FakeSupervisor:
+        def __init__(self, running=True):
+            self._r = running
+
+        def is_running(self):
+            return self._r
+
+        def retune(self):
+            pass
+
+    def _rig(queue_kws, have, running_supervisor=True):
+        """_resync_search_sweep 만 떼어 본다 — 진짜 스레드도 네트워크도 안 쓴다."""
+        calls = []
+        _win._sweep_queue = _FakeQueue(queue_kws)
+        _win._supervisor = _FakeSupervisor(running_supervisor)
+        _win._sweep_kws = have
+        _win.auto_monitor = None
+        _win._start_search_sweep = lambda: calls.append("start")
+        _win._stop_search_sweep = lambda: (calls.append("stop"),
+                                           setattr(_win, "_sweep_kws", None))[0]
+        _win._resync_search_sweep()
+        return calls
+
+    _saved = (_win._sweep_queue, _win._supervisor, _win._sweep_kws,
+              _win.auto_monitor)
+    ck("키워드 늘면 재시작", _rig(["샤넬", "구찌"], {"샤넬"}) == ["stop", "start"])
+    ck("승격으로 줄면 재시작", _rig(["샤넬"], {"샤넬", "구찌"}) == ["stop", "start"])
+    ck("같으면 안 건드림", _rig(["샤넬"], {"샤넬"}) == [])
+    ck("큐가 비면 정지만", _rig([], {"샤넬"}) == ["stop"])
+    ck("안 떠 있고 큐가 차면 시작", _rig(["샤넬"], None) == ["start"])
+    ck("안 떠 있고 큐도 비면 무동작", _rig([], None) == [])
+    ck("감시 꺼져 있으면 무동작",
+       _rig(["샤넬"], {"구찌"}, running_supervisor=False) == [])
+    # 인스턴스 속성으로 덮어쓴 메서드는 지워서 클래스 구현으로 되돌린다.
+    for _n in ("_start_search_sweep", "_stop_search_sweep"):
+        _win.__dict__.pop(_n, None)
+    (_win._sweep_queue, _win._supervisor, _win._sweep_kws,
+     _win.auto_monitor) = _saved
+    ck("메서드 원복", _win._start_search_sweep.__func__ is
+       m.MainWindow._start_search_sweep)
+
+    _seen = []
+    _sv_router = _win._router
+    _win._resync_search_sweep = lambda: _seen.append("resync")
+    _win.on_alert_poll_all = lambda: _seen.append("poll")
+    _win._router = None
+    _win._auto_poll_tick()
+    for _n in ("_resync_search_sweep", "on_alert_poll_all"):
+        _win.__dict__.pop(_n, None)
+    _win._router = _sv_router
+    ck("_auto_poll_tick → 재동기화 후 폴링", _seen == ["resync", "poll"], str(_seen))
+
+    # ── 앱 목록을 못 읽어도 대기열은 그린다 (Finding 2) ──
+    _sq = _win._sweep_queue
+    _win._sweep_queue = _FakeQueue(["샤넬", "구찌"])
+    _win.alertLog.clear()
+    _win._alert_populate(None)
+    _rows = _win.alertTable.rowCount()
+    _txt = _win.alertLog.toPlainText()
+    _win._sweep_queue = _FakeQueue([])
+    _win.alertTable.setRowCount(3)
+    _win._alert_populate(None)
+    _kept = _win.alertTable.rowCount()
+    _win._sweep_queue = _sq
+    _win.alertTable.setRowCount(0)
+    ck("목록 실패해도 대기열 행은 그린다", _rows == 2, f"{_rows}행")
+    ck("목록을 못 읽었다고 로그에 남긴다", "앱 등록 목록을 못 읽었" in _txt,
+       _txt.strip()[:80])
+    ck("대기열도 비면 표를 건드리지 않는다", _kept == 3, f"{_kept}행")
     ck("경로 열 추가", getattr(_win, "alertTable", None) is not None
        and _win.alertTable.columnCount() == 5)
     # close() 는 부르지 않는다 — closeEvent 가 모달 확인창을 띄워 offscreen 에서 멈춘다.
