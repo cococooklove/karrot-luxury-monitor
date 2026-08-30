@@ -1,5 +1,11 @@
 """
-자동 모니터 엔진 (QThread) — 클라 자동검색 기능 전체 GUI화.
+지역 스윕 엔진 — 클라 자동검색 기능 전체.
+
+구조:
+  - SweepEngine : 순수 파이썬. 로직 전부. 콜백(on_log/on_found/on_status)만 받는다.
+                  헤드리스 서버 런타임(이벤트 루프 없음)이 그대로 돌릴 수 있다.
+  - AutoMonitor : QThread 얇은 어댑터. 콜백 → 시그널. GUI 전용.
+                  PyQt 는 이 클래스를 처음 꺼낼 때만 import 한다(모듈 __getattr__).
 
 기능:
   - 다중조건(엑셀 대분류+상세: 키워드+추가/제외+최소~최대+끌올 n일전) 반복 검색
@@ -14,8 +20,6 @@ import time
 import sqlite3
 import traceback
 from datetime import datetime, timedelta
-
-from PyQt6.QtCore import QThread, pyqtSignal
 
 from daangn_ext.search_filters import KeywordRule
 from daangn_ext.adaptive import collect_region, collect_lanes, load_dong_regions
@@ -66,14 +70,23 @@ class _P:
         self.description = d.get("content", "")
 
 
-class AutoMonitor(QThread):
-    log = pyqtSignal(str)
-    found = pyqtSignal(dict)        # 신규/변동 매물 → 결과 테이블
-    status = pyqtSignal(str)        # 현재 진행 상황 → 상태 라벨
+def _noop(*_a, **_k):
+    pass
 
-    def __init__(self, parent, cfg: dict):
-        super().__init__(parent)
+
+class SweepEngine:
+    """지역 스윕 엔진 — 순수 파이썬. Qt 의존 없음.
+
+    시그널 대신 콜백을 받는다(전부 선택). GUI 는 AutoMonitor 어댑터가
+    콜백을 시그널로 이어 주고, 헤드리스 서버 런타임은 콜백만으로 직접 돌린다.
+      on_log(str) / on_found(dict) / on_status(str)
+    """
+
+    def __init__(self, cfg: dict, on_log=None, on_found=None, on_status=None):
         self.cfg = cfg
+        self.on_log = on_log or _noop
+        self.on_found = on_found or _noop
+        self.on_status = on_status or _noop
         self._stop = False
         self.db = sqlite3.connect(cfg.get("db_path", "./auto_seen.db"),
                                   check_same_thread=False)
@@ -82,11 +95,21 @@ class AutoMonitor(QThread):
         self.db.commit()
         # 알림 송신기 — 실패는 로그로 반드시 노출, 전송은 묶어서(레이트리밋 회피)
         self._tg = TelegramSender(cfg.get("tg_token"), cfg.get("tg_chat"),
-                                  log=self.log.emit,
+                                  log=self._log,
                                   should_stop=lambda: self._stop)
         self._sheet_writer = SheetWriter(cfg.get("sheet_url"),
                                          cfg.get("sheet_cred", "./credentials.json"),
-                                         log=self.log.emit)
+                                         log=self._log)
+
+    # ── 콜백 디스패치 (기존 시그널 emit 자리) ──
+    def _log(self, msg):
+        self.on_log(msg)
+
+    def _found(self, payload):
+        self.on_found(payload)
+
+    def _status(self, msg):
+        self.on_status(msg)
 
     def stop(self):
         self._stop = True
@@ -146,14 +169,14 @@ class AutoMonitor(QThread):
         title = article.get("title", ""); url = article.get("href", "")
         head = f"💱 가격변동 {changed:,}→{price:,}" if changed is not None else "🆕 신규"
         msg = f"{head}\n[{region}] {title}\n{price:,}원\n{url}"
-        self.log.emit(msg)
+        self._log(msg)
         self._tg.enqueue(msg)
         self._sheet_writer.enqueue_row(
             [datetime.now().strftime("%Y-%m-%d %H:%M"),
              region, title, price, url,
              "가격변동" if changed is not None else "신규"])
         # 결과 테이블용
-        self.found.emit({
+        self._found({
             "id": article.get("id"),
             "region": region, "title": title, "price": price, "url": url,
             "image": article.get("thumbnail", ""), "desc": article.get("content", ""),
@@ -174,7 +197,7 @@ class AutoMonitor(QThread):
         if self._sheet_writer.pending():
             ok, fail = self._sheet_writer.flush()
             if fail:
-                self.log.emit(f"[시트] {fail}행 기록 실패 (텔레그램/화면 결과는 정상)")
+                self._log(f"[시트] {fail}행 기록 실패 (텔레그램/화면 결과는 정상)")
 
     # ── 하위호환 래퍼 (기존 테스트/외부 호출용) ──
     def _telegram(self, text):
@@ -238,9 +261,9 @@ class AutoMonitor(QThread):
         if token_provider:
             try:
                 token = token_provider() or token
-                self.log.emit("[토큰] 자동수확 연동 — 사이클마다 갱신")
+                self._log("[토큰] 자동수확 연동 — 사이클마다 갱신")
             except Exception as e:
-                self.log.emit(f"[토큰] provider 초기화 실패: {e}")
+                self._log(f"[토큰] provider 초기화 실패: {e}")
         # 계정 안정화 스케줄러(옵션): 사이클마다 계정 라운드로빈 + 계정별 고정프록시 +
         # daily_cap/warmup. 활성 시 1계정-1IP 로 검색해 핑거프린트 이상·과다요청 방지.
         sched = None
@@ -251,20 +274,20 @@ class AutoMonitor(QThread):
                     accounts_fp=cfg.get("accounts_fp", "./accounts.json"),
                     daily_cap=int(cfg.get("daily_cap", 300)),
                     warmup_days=int(cfg.get("warmup_days", 3)),
-                    log=self.log.emit)
-                self.log.emit("[안정화] 계정 라운드로빈 + daily_cap/warmup ON")
+                    log=self._log)
+                self._log("[안정화] 계정 라운드로빈 + daily_cap/warmup ON")
             except Exception as e:
-                self.log.emit(f"[안정화] 스케줄러 초기화 실패(기존방식 유지): {e}")
+                self._log(f"[안정화] 스케줄러 초기화 실패(기존방식 유지): {e}")
         rmin, rmax = _clamp_range(cfg.get("rest_min", 30), cfg.get("rest_max", 90),
                                   CYCLE_REST_MIN, CYCLE_REST_MAX, 30.0, 90.0)
         gmin, gmax = _clamp_range(cfg.get("gap_min", 0.4), cfg.get("gap_max", 1.2),
                                   REGION_GAP_MIN, REGION_GAP_MAX, 0.4, 1.2)
         cur_proxies = self._live_proxies()
-        self.log.emit(f"[시작] 조건 {len(conditions)}개, 프록시 {len(cur_proxies)}개")
-        self.log.emit(f"[휴식] 사이클 {rmin:.0f}~{rmax:.0f}s · 지역 간 {gmin:.1f}~{gmax:.1f}s")
+        self._log(f"[시작] 조건 {len(conditions)}개, 프록시 {len(cur_proxies)}개")
+        self._log(f"[휴식] 사이클 {rmin:.0f}~{rmax:.0f}s · 지역 간 {gmin:.1f}~{gmax:.1f}s")
         try:
             regions = self._regions()
-            self.log.emit(f"[지역] {len(regions)}개 (동 단위)")
+            self._log(f"[지역] {len(regions)}개 (동 단위)")
             cycle = 0
             while not self._stop:
                 cycle += 1
@@ -277,16 +300,16 @@ class AutoMonitor(QThread):
                         try:
                             token_provider()
                         except Exception as e:
-                            self.log.emit(f"[수확] 실패(계속): {str(e)[:60]}")
+                            self._log(f"[수확] 실패(계속): {str(e)[:60]}")
                     pick = sched.pick()
                     if not pick:
-                        self.log.emit("[안정화] 전 계정 캡/쿨다운 도달 — 휴식 후 재시도")
+                        self._log("[안정화] 전 계정 캡/쿨다운 도달 — 휴식 후 재시도")
                         self._rest(rmin, rmax)
                         continue
                     cur_code = pick["code"]
                     token = pick["access"]
                     sched_proxies = [pick["proxy"]] if pick["proxy"] else None
-                    self.log.emit(
+                    self._log(
                         f"[계정] {cur_code[:6]} · 잔여 {pick['remaining']} · "
                         f"프록시 {'고정1' if pick['proxy'] else 'KR네이티브'}  ({sched.status()})")
                 # 자동수확 연동(스케줄러 미사용 시): 최신 access 재조회. access 30분 만료 대응.
@@ -295,18 +318,18 @@ class AutoMonitor(QThread):
                         nt = token_provider()
                         if nt and nt != token:
                             token = nt
-                            self.log.emit("[토큰] 갱신 반영")
+                            self._log("[토큰] 갱신 반영")
                     except Exception as e:
-                        self.log.emit(f"[토큰] 갱신 조회 실패: {e}")
+                        self._log(f"[토큰] 갱신 조회 실패: {e}")
                 # 프록시 변경은 **사이클 경계에서만** 반영한다. 레인은 시작 시점에
                 # 풀을 샤딩해 나눠 갖기 때문에, 도중에 목록이 바뀌면 레인끼리
                 # 같은 IP 를 쥐게 될 수 있다(= 동시요청 전멸 조건).
                 fresh = self._live_proxies()
                 if fresh != cur_proxies:
-                    self.log.emit(
+                    self._log(
                         f"[프록시] {len(cur_proxies)}개 → {len(fresh)}개 (변경 반영)")
                     cur_proxies = fresh
-                self.log.emit(f"── 사이클 {cycle} ──")
+                self._log(f"── 사이클 {cycle} ──")
                 # 안정화 활성 시 = 이 계정 고정프록시(또는 네이티브). 아니면 = 전체 풀.
                 lane_proxies = sched_proxies if sched else cur_proxies
                 for cond in conditions:
@@ -330,12 +353,12 @@ class AutoMonitor(QThread):
                         try:
                             if cstats.get("missed"):
                                 missed_total += len(cstats["missed"])
-                                self.log.emit(
+                                self._log(
                                     f"\u26a0\ufe0f [{reg}] '{_cond['keyword']}' 가격구간 "
                                     f"{len(cstats['missed'])}개 확인 실패(IP/세션 차단) — "
                                     "다음 사이클에 재시도. 프록시 부족 의심")
                             if cstats.get("expanded"):
-                                self.log.emit(
+                                self._log(
                                     f"[우회] '{_cond['keyword']}' 응답 억제 → "
                                     f"'{cstats['expanded'][0]}' 로 대체 수집")
                             filtered = [a for a in arts if _rule.match(_P(a))]
@@ -345,23 +368,23 @@ class AutoMonitor(QThread):
                             self._flush_notify()
                             done += 1
                             total_new += new
-                            self.log.emit(
+                            self._log(
                                 f"[{done}/{len(regions)}] {reg} · '{_cond['keyword']}' "
                                 f"수집 {len(filtered)} · 신규 {new}"
                                 + (f" · 변동 {chg}" if chg else "")
                                 + f"  (누적 신규 {total_new})")
                         except Exception as e:
                             done += 1
-                            self.log.emit(f"[{done}/{len(regions)}] {reg} 오류: {e}")
-                        self.status.emit(
+                            self._log(f"[{done}/{len(regions)}] {reg} 오류: {e}")
+                        self._status(
                             f"사이클 {cycle} · [{done}/{len(regions)}] "
                             f"'{_cond['keyword']}' 수집 중… (레인 {_lanes})")
 
-                    self.log.emit(
+                    self._log(
                         f"[레인] {n_lanes}개 병렬 (프록시 {len(cur_proxies)}개"
                         + (f", 레인당 IP {len(cur_proxies)//n_lanes}개 전용)"
                            if n_lanes > 1 else " — 1레인 순차)"))
-                    self.status.emit(
+                    self._status(
                         f"사이클 {cycle} · [0/{len(regions)}] "
                         f"'{cond['keyword']}' 수집 중… (레인 {n_lanes})")
                     try:
@@ -377,38 +400,102 @@ class AutoMonitor(QThread):
                             on_result=on_result,
                         )
                         if lsm.get("skipped"):
-                            self.log.emit(f"[중단] 미처리 지역 {lsm['skipped']}개")
+                            self._log(f"[중단] 미처리 지역 {lsm['skipped']}개")
                         # 안정화: 이 계정의 일일 사용량 기록(≈지역수). 차단신호면 격리.
                         if sched and cur_code:
                             sched.note(cur_code, len(regions))
                             if missed_total:
                                 sched.note_block(cur_code)
                     except Exception as e:
-                        self.log.emit(f"[수집 오류] {type(e).__name__}: {e}")
+                        self._log(f"[수집 오류] {type(e).__name__}: {e}")
 
                     # 조건 1개 끝 — 커버리지 요약(누락을 눈에 보이게)
                     if missed_total:
-                        self.log.emit(
+                        self._log(
                             f"[커버리지] '{cond['keyword']}' 확인 실패 구간 {missed_total}개 "
                             f"/ 지역 {len(regions)}개 — 이번 사이클 결과는 불완전할 수 있음")
                     else:
-                        self.log.emit(f"[커버리지] '{cond['keyword']}' 전 구간 확인 완료")
+                        self._log(f"[커버리지] '{cond['keyword']}' 전 구간 확인 완료")
                 if self._stop:
                     break
                 d = self._rest(rmin, rmax)
-                self.log.emit(f"[휴식] {d:.0f}s")
+                self._log(f"[휴식] {d:.0f}s")
         except Exception:
-            self.log.emit("[치명오류]\n" + traceback.format_exc())
+            self._log("[치명오류]\n" + traceback.format_exc())
         finally:
             # 정지 시에도 대기 중인 알림은 마저 보낸다(유실 방지, 최대 30초)
             try:
                 self._flush_notify(final=True)
             except Exception as e:
-                self.log.emit(f"[알림 마무리 실패] {type(e).__name__}: {e}")
-            self.log.emit(
+                self._log(f"[알림 마무리 실패] {type(e).__name__}: {e}")
+            self._log(
                 f"[알림 집계] 텔레그램 전송 {self._tg._sent_total}건 · "
                 f"실패 {self._tg._fail_total}건")
-            self.log.emit("[종료] 자동 모니터 정지")
+            self._log("[종료] 자동 모니터 정지")
+
+
+# ── QThread 어댑터 ────────────────────────────────────────────────────────────
+# PyQt 를 모듈 최상단에서 import 하면 헤드리스 런타임이 이 모듈을 쓰는 것만으로
+# Qt 를 끌고 들어온다. AutoMonitor 를 처음 꺼낼 때만 import 하도록 늦춘다.
+# (main.py 는 `from daangn.auto_monitor import AutoMonitor` 를 그대로 쓴다 —
+#  from-import 도 모듈 __getattr__ 를 타므로 호출부 변경이 필요 없다.)
+def _build_auto_monitor():
+    from PyQt6.QtCore import QThread, pyqtSignal
+
+    class AutoMonitor(QThread):
+        """SweepEngine 을 QThread 로 감싼 얇은 어댑터. 로직은 전부 엔진에 있다."""
+
+        log = pyqtSignal(str)
+        found = pyqtSignal(dict)        # 신규/변동 매물 → 결과 테이블
+        status = pyqtSignal(str)        # 현재 진행 상황 → 상태 라벨
+
+        def __init__(self, parent, cfg: dict):
+            super().__init__(parent)
+            self.cfg = cfg
+            self.engine = SweepEngine(cfg,
+                                      on_log=self.log.emit,
+                                      on_found=self.found.emit,
+                                      on_status=self.status.emit)
+
+        def stop(self):
+            self.engine.stop()
+
+        def run(self):
+            self.engine.run()
+
+        # 중지 플래그는 엔진 것 하나뿐이다(어댑터에 사본을 두면 갈라진다).
+        @property
+        def _stop(self):
+            return self.engine._stop
+
+        @_stop.setter
+        def _stop(self, v):
+            self.engine._stop = v
+
+        # 엔진 내부(_tg/_dedup_notify/_flush_notify/...)로 위임 — 기존 호출부 유지.
+        def __getattr__(self, name):
+            if name.startswith("__") or name == "engine":
+                raise AttributeError(name)
+            try:
+                engine = object.__getattribute__(self, "engine")
+            except AttributeError:
+                raise AttributeError(name)
+            return getattr(engine, name)
+
+        # 언바운드로 꺼내 쓰는 곳이 있어(robust_test) 클래스 사전에도 남겨 둔다.
+        def _regions(self):
+            return SweepEngine._regions(self)
+
+    return AutoMonitor
+
+
+def __getattr__(name):
+    """PEP 562 — AutoMonitor 접근 시에만 PyQt import."""
+    if name == "AutoMonitor":
+        cls = _build_auto_monitor()
+        globals()["AutoMonitor"] = cls      # 이후엔 모듈 전역에서 바로 잡힌다(동일 객체)
+        return cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def load_conditions_from_excel(path: str) -> list[dict]:
