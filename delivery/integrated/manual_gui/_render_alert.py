@@ -10,7 +10,15 @@ import main
 app = QtWidgets.QApplication([])
 w = main.MainWindow()
 w.resize(1200, 1000)
-w.tabs.setCurrentIndex(2)                    # 키워드 알림 탭
+# Look up 매물 감시 tab by title (not hardcoded index)
+alert_tab_idx = None
+for i in range(w.tabs.count()):
+    if w.tabs.tabText(i) == "매물 감시":
+        alert_tab_idx = i
+        break
+if alert_tab_idx is None:
+    alert_tab_idx = 1  # Fallback to index 1 if not found
+w.tabs.setCurrentIndex(alert_tab_idx)
 app.processEvents()
 
 # 샘플 대시보드(멀티계정 커버)
