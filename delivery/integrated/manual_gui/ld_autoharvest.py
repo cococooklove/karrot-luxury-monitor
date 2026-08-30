@@ -10,6 +10,7 @@ accounts.json 에 병합. 앱이 WAF·피닝을 처리하므로 PC 직접 refres
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import subprocess
@@ -24,6 +25,107 @@ _MERGE_LOCK = threading.Lock()
 # 함대 전체 수확도 프로세스 안에서 하나만 돈다. 동시 수확은 adb 폭주이면서
 # LDPlayer 인스턴스 동시기동 금지 규칙(순차 기동)을 어긴다.
 _HARVEST_LOCK = threading.Lock()
+
+# ── 프로세스 간 락 ───────────────────────────────────────────────────────────
+# 스레드락은 한 프로세스 안에서만 유효한데, 클라 PC 는 GUI 를 띄운 채 헤드리스
+# 런타임을 돌릴 수 있다(테스트·이관 중 겹친다). 그때 lost update 가 나면 방금
+# 수확한 토큰이 조용히 사라지고 그 계정은 다음 갱신에서 죽는다 — 복구는 폰 앱
+# 스택뿐이다. 그래서 사이드카(accounts.json.lock)에 OS 파일락을 잡는다.
+try:
+    import fcntl as _fcntl            # POSIX(개발 Mac)
+except ImportError:
+    _fcntl = None
+try:
+    import msvcrt as _msvcrt          # Windows(배포 대상)
+except ImportError:
+    _msvcrt = None
+
+# 락 대기 상한. 스테일 락 정책:
+#   flock/msvcrt.locking 은 **파일핸들에 매달린 OS 락**이라 프로세스가 죽으면
+#   커널이 즉시 놓는다 — 락파일 존재 여부 프로토콜과 달리 영구 스테일이 없다.
+#   남는 위험은 살아 있는 프로세스가 오래 쥐는 경우뿐이고, 그때 수확기를 영원히
+#   재우는 건 막으려던 lost update 보다 나쁘다. 그래서 상한을 넘기면 **크게 남기고
+#   락 없이 진행한다**(= 최악이 손상이 아니라 lost update 로 되돌아갈 뿐).
+LOCK_TIMEOUT = 20.0
+
+
+def _try_lock(fd):
+    """비블로킹 배타 락 시도. 성공 True / 남이 쥐고 있으면 False."""
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    if _msvcrt is not None:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            # LK_NBLCK: 즉시 실패. EOF 너머 1바이트 구간도 잠글 수 있다.
+            _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    return False
+
+
+def _unlock(fd):
+    if _fcntl is not None:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+    elif _msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+
+
+def lock_path(target_fp):
+    return str(target_fp) + ".lock"
+
+
+@contextlib.contextmanager
+def _file_lock(target_fp, timeout=None, log=None):
+    """accounts.json.lock 배타 락. 잡았으면 True, 못 잡았으면 False 를 넘긴다.
+
+    못 잡아도 **예외를 내지 않고 진행한다** — 위 스테일 락 정책 참고. 대상 파일
+    자체가 아니라 사이드카를 잠근다(대상은 os.replace 로 갈아끼워져 inode 가
+    바뀌므로 거기에 건 락은 다음 writer 에게 안 보인다)."""
+    _log = log or (lambda m: None)
+    if _fcntl is None and _msvcrt is None:      # 락 수단 없는 플랫폼
+        _log("[수확] 이 플랫폼에 파일락 수단이 없어 프로세스 간 보호 없이 진행합니다")
+        yield False
+        return
+    timeout = LOCK_TIMEOUT if timeout is None else float(timeout)
+    fd = None
+    got = False
+    try:
+        try:
+            d = os.path.dirname(os.path.abspath(target_fp)) or "."
+            os.makedirs(d, exist_ok=True)
+            fd = os.open(lock_path(target_fp), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as e:
+            _log(f"[수확] 파일락을 열 수 없어 락 없이 진행합니다: {str(e)[:80]}")
+            yield False
+            return
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            got = _try_lock(fd)
+            if got or time.time() >= deadline:
+                break
+            time.sleep(0.05)
+        if not got:
+            _log(f"[수확] accounts.json 파일락 {timeout:.0f}초 대기 초과 — 다른"
+                 " 프로세스(GUI/헤드리스)가 쥔 채로 오래 있습니다. 락 없이"
+                 " 진행합니다(수확분이 덮일 수 있음).")
+        yield got
+    finally:
+        if fd is not None:
+            if got:
+                try:
+                    _unlock(fd)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 PKG = "com.towneers.www"
 APP_DATA = f"/data/data/{PKG}"
@@ -330,15 +432,18 @@ def harvest_one(adb_bin, serial, nudge=True, min_remaining=600):
     return cur
 
 
-def merge_accounts(accounts_fp, rows):
+def merge_accounts(accounts_fp, rows, log=None):
     """수확분을 accounts.json 에 병합. 동시 호출에도 파일이 깨지지 않는다.
 
-    읽기-병합-쓰기를 _MERGE_LOCK 으로 감싸고(안 그러면 나중 쓰기가 앞선 쓰기의
-    삽입을 통째로 덮는다), 승격은 같은 디렉터리의 **고유** 임시파일에서 한다.
-    고정 이름(accounts.json.tmp)을 쓰면 두 쓰기가 한 파일에 뒤섞인 뒤 그 잡탕이
-    os.replace 로 원자적으로 승격된다 — replace 는 원자적이어도 내용은 아니다."""
+    읽기-병합-쓰기 **전체**가 임계구역이다(base 를 읽고 나서 잠그면 이미 늦다):
+    프로세스 안에서는 _MERGE_LOCK, 프로세스 사이에서는 accounts.json.lock 파일락.
+    안 그러면 나중 쓰기가 앞선 쓰기의 삽입을 통째로 덮는다(lost update).
+    승격은 같은 디렉터리의 **고유** 임시파일에서 한다 — 고정 이름
+    (accounts.json.tmp)을 쓰면 두 쓰기가 한 파일에 뒤섞인 뒤 그 잡탕이
+    os.replace 로 원자적으로 승격된다. replace 는 원자적이어도 내용은 아니다."""
     with _MERGE_LOCK:
-        return _merge_accounts_locked(accounts_fp, rows)
+        with _file_lock(accounts_fp, log=log):
+            return _merge_accounts_locked(accounts_fp, rows)
 
 
 def _merge_accounts_locked(accounts_fp, rows):
@@ -427,6 +532,6 @@ def _harvest_all_locked(accounts_fp, adb_bin, serials, nudge, log):
                 rows.append(r)
     if not rows:
         return (0, 0, 0, 0)
-    u, i, t = merge_accounts(accounts_fp, rows)
+    u, i, t = merge_accounts(accounts_fp, rows, log=log)
     log(f"[수확] 갱신 {u} · 신규 {i} · 총 {t}계정")
     return (u, i, t, len(rows))

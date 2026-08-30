@@ -4,8 +4,11 @@ accounts.json 은 이 기계에서 재발급할 수 없는 세션 토큰의 유�
 이 스위트가 지키는 것:
   A. merge_accounts 동시호출이 깨진 파일을 승격하지 못한다(고유 임시파일 + 직렬화).
   B. harvest_all 이 프로세스 안에서 직렬화된다.
-  C. 스윕의 token_provider 가 함대 수확을 트리거하지 않는다.
+  C. 스윕의 token_provider 가 함대 수확을 트리거하지 않는다(헤드리스·GUI 양쪽).
   D. GUI 폴링 틱의 씨딩이 수확도, GUI 스레드 네트워크 호출도 하지 않는다.
+  E. 프로세스 **두 개**가 겹쳐도 lost update 가 없다(accounts.json.lock 파일락)
+     + 락 대기 상한 초과 시 멎지 않고 크게 남기고 진행한다 + 프로세스가 죽으면
+     커널이 락을 놓는다.
 """
 import os
 import sys
@@ -15,6 +18,7 @@ import types
 import shutil
 import tempfile
 import threading
+import subprocess
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -96,7 +100,8 @@ ck("두 writer 의 계정이 모두 남음", _codes == {"AAA111", "BBB222"}, str
 ck("토큰이 짝을 잃지 않음",
    all(a.get("access") == "a-" + a["code"] and a.get("refresh") == "r-" + a["code"]
        for a in (_parsed or [])), str(_parsed))
-_left = [n for n in os.listdir(_d) if n != "accounts.json"]
+_IGNORE = ("accounts.json", "accounts.json.lock")   # .lock 은 병합락 사이드카
+_left = [n for n in os.listdir(_d) if n not in _IGNORE]
 ck("임시파일이 남지 않음", _left == [], str(_left))
 ck("고정 임시경로(accounts.json.tmp)를 쓰지 않음",
    "accounts.json.tmp" not in json.dumps(sorted(os.listdir(_d))))
@@ -119,7 +124,7 @@ except Exception:                              # noqa: BLE001
 ld.json = _real_json
 ck("쓰기 실패는 삼키지 않음", _raised)
 ck("쓰기 실패 후 원본 보존", open(_fp, encoding="utf-8").read() == _before)
-_left2 = [n for n in os.listdir(_d) if n != "accounts.json"]
+_left2 = [n for n in os.listdir(_d) if n not in _IGNORE]
 ck("쓰기 실패 후 임시파일 청소", _left2 == [], str(_left2))
 shutil.rmtree(_d, ignore_errors=True)
 
@@ -206,6 +211,41 @@ _cfg_ro = m.headless_sweep_cfg({}, [], {}, token_provider=m.read_token_quiet)
 ck("읽기전용 provider 여도 stabilize 유지", _cfg_ro["stabilize"] is True)
 ck("--no-harvest 는 provider 없음(기존 동작)",
    m.headless_sweep_cfg({}, [], {})["token_provider"] is None)
+
+print("--- GUI 스윕도 같은 대접: provider 는 읽기만, 수확은 _HarvestThread ---")
+_base_names = set(m.MainWindow._auto_cfg_base.__code__.co_names)
+ck("GUI 스윕 provider = _read_token_quiet", "_read_token_quiet" in _base_names)
+ck("GUI 스윕 provider 가 _harvest_token_quiet 아님",
+   "_harvest_token_quiet" not in _base_names, str(sorted(_base_names))[:200])
+ck("GUI _read_token_quiet 는 공용 읽기함수 사용",
+   "read_token_quiet" in m.MainWindow._read_token_quiet.__code__.co_names)
+_rtq_calls = []
+_real_rtq = m.read_token_quiet
+m.read_token_quiet = lambda p="./accounts.json": _rtq_calls.append(p) or "tok"
+_harv.clear()
+ld.harvest_all = lambda *a, **k: (_harv.append((a, k)), (0, 0, 0, 0))[1]
+_got = m.MainWindow._read_token_quiet(object())
+ld.harvest_all = _real_harvest
+m.read_token_quiet = _real_rtq
+ck("GUI provider 가 수확을 부르지 않음", _harv == [], str(_harv))
+ck("GUI provider 가 accounts.json 을 읽음",
+   _got == "tok" and _rtq_calls == ["./accounts.json"], str(_rtq_calls))
+
+# GUI 의 수확 소유자는 _HarvestThread 다 — 없애지 않았음을 못박는다.
+import inspect as _insp
+ck("_HarvestThread 가 __init__ 에서 기동",
+   "_HarvestThread" in m.MainWindow.__init__.__code__.co_names)
+ck("_HarvestThread 가 harvest_all 소유",
+   "harvest_all" in m._HarvestThread.run.__code__.co_names)
+_ht_sig = _insp.signature(m._HarvestThread.__init__).parameters
+ck("_HarvestThread 기본 주기 1200초(헤드리스와 동일)",
+   _ht_sig["interval"].default == 1200
+   and _ht_sig["accounts"].default == "./accounts.json", str(_ht_sig))
+ck("GUI 기동 시 1200초로 붙임",
+   1200 in m.MainWindow.__init__.__code__.co_consts,
+   str([c for c in m.MainWindow.__init__.__code__.co_consts if isinstance(c, int)]))
+ck("_alert_api(사용자 조작 경로)는 수확 유지",
+   "_harvest_token_quiet" in m.MainWindow._alert_api.__code__.co_names)
 
 
 print("=== D. GUI 폴링 틱 씨딩 — 수확·GUI스레드 네트워크 금지 ===")
@@ -358,6 +398,153 @@ _names = set(m.MainWindow._quiet_keyword_list.__code__.co_names)
 ck("_quiet_keyword_list 가 _alert_api(수확경로)를 안 씀", "_alert_api" not in _names, str(_names))
 ck("_quiet_keyword_list 가 harvest 를 안 씀",
    not [n for n in _names if "harvest" in n], str(_names))
+
+print("=== E. 프로세스 간 병합락 (accounts.json.lock) ===")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_pd = tempfile.mkdtemp(prefix="harvsafe_proc_")
+
+# 자식 1: 느린 읽기-병합-쓰기. go 파일이 생길 때까지 기다렸다 동시에 들어간다.
+_MERGER = r'''
+import sys, os, json, time
+sys.path.insert(0, %r)
+import ld_autoharvest as ld
+fp, code, ready, go, rd = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5])
+
+
+class SlowJson:
+    def __init__(self, real, rd):
+        self._r, self._rd = real, rd
+
+    def load(self, *a, **k):
+        time.sleep(self._rd)                  # 읽기-쓰기 창을 벌린다
+        return self._r.load(*a, **k)
+
+    def dumps(self, *a, **k):
+        return self._r.dumps(*a, **k)
+
+    def dump(self, obj, f, **kw):
+        s = self._r.dumps(obj, **kw)
+        for i in range(0, len(s), 16):
+            f.write(s[i:i + 16])
+            time.sleep(0.002)
+
+
+ld.json = SlowJson(ld.json, rd)
+open(ready, "w").close()
+while not os.path.exists(go):
+    time.sleep(0.01)
+ld.merge_accounts(fp, [{"code": code, "refresh": "r-" + code, "access": "a-" + code}])
+''' % (_HERE,)
+
+# 자식 2: 락을 잡고 지정 시간 동안 쥐고 있는다(경합·타임아웃·죽음 테스트용).
+_HOLDER = r'''
+import sys, os, time
+sys.path.insert(0, %r)
+import ld_autoharvest as ld
+fp, ready, hold = sys.argv[1], sys.argv[2], float(sys.argv[3])
+with ld._file_lock(fp, timeout=10) as got:
+    with open(ready, "w") as f:
+        f.write("1" if got else "0")
+    time.sleep(hold)
+''' % (_HERE,)
+
+_merger_py = os.path.join(_pd, "merger.py")
+_holder_py = os.path.join(_pd, "holder.py")
+open(_merger_py, "w").write(_MERGER)
+open(_holder_py, "w").write(_HOLDER)
+
+ck("이 플랫폼에 파일락 수단이 있음(테스트가 실효)",
+   ld._fcntl is not None or ld._msvcrt is not None)
+
+# ── E1. 프로세스 두 개가 겹쳐 병합해도 lost update 없음 ──
+_pfp = os.path.join(_pd, "accounts.json")
+with open(_pfp, "w", encoding="utf-8") as f:
+    json.dump([], f)
+_go = os.path.join(_pd, "GO")
+_procs = []
+for _c in ("PA1111", "PB2222"):
+    _procs.append(subprocess.Popen(
+        [sys.executable, _merger_py, _pfp, _c,
+         os.path.join(_pd, _c + ".ready"), _go, "0.4"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+_t_ready = time.time()
+while (time.time() - _t_ready < 60
+       and not all(os.path.exists(os.path.join(_pd, c + ".ready"))
+                   for c in ("PA1111", "PB2222"))):
+    time.sleep(0.02)
+ck("두 프로세스가 준비됨",
+   all(os.path.exists(os.path.join(_pd, c + ".ready"))
+       for c in ("PA1111", "PB2222")))
+open(_go, "w").close()                      # 동시에 출발
+_outs = [p.communicate(timeout=120) for p in _procs]
+ck("두 프로세스 모두 정상 종료",
+   all(p.returncode == 0 for p in _procs),
+   str([(p.returncode, o[1][-200:]) for p, o in zip(_procs, _outs)]))
+_pp = None
+try:
+    with open(_pfp, encoding="utf-8") as f:
+        _pp = json.load(f)
+    ck("프로세스 경합 후에도 파일이 파싱됨", True)
+except Exception as e:                         # noqa: BLE001
+    ck("프로세스 경합 후에도 파일이 파싱됨", False, str(e))
+_pcodes = {a.get("code") for a in (_pp or [])}
+ck("프로세스 간 lost update 없음(두 수확분 모두 남음)",
+   _pcodes == {"PA1111", "PB2222"}, str(_pcodes))
+ck("프로세스 경합 후 토큰 짝 유지",
+   all(a.get("access") == "a-" + a["code"] for a in (_pp or [])), str(_pp))
+ck("사이드카가 대상 파일이 아니라 별도 파일",
+   os.path.exists(ld.lock_path(_pfp)) and ld.lock_path(_pfp) != _pfp)
+
+# ── E2. 다른 프로세스가 쥐면 실제로 못 잡는다 ──
+_hfp = os.path.join(_pd, "hold.json")
+with open(_hfp, "w", encoding="utf-8") as f:
+    json.dump([], f)
+_hready = os.path.join(_pd, "hold.ready")
+_holder = subprocess.Popen([sys.executable, _holder_py, _hfp, _hready, "6"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+_t0h = time.time()
+while time.time() - _t0h < 60 and not os.path.exists(_hready):
+    time.sleep(0.02)
+_held = os.path.exists(_hready) and open(_hready).read().strip() == "1"
+ck("홀더 프로세스가 락을 잡음", _held)
+
+_fd = os.open(ld.lock_path(_hfp), os.O_RDWR | os.O_CREAT, 0o600)
+_mine = ld._try_lock(_fd)
+if _mine:
+    ld._unlock(_fd)
+os.close(_fd)
+ck("남이 쥔 락은 못 잡는다(진짜 OS 락)", _mine is False)
+
+# ── E3. 상한을 넘겨도 멎지 않는다 — 크게 남기고 진행 ──
+_lg = []
+_t0 = time.time()
+_ran = []
+with ld._file_lock(_hfp, timeout=0.3, log=_lg.append) as _got:
+    _ran.append(_got)
+_el = time.time() - _t0
+ck("대기 상한에서 예외 없이 빠져나옴", _ran == [False], str(_ran))
+ck("상한만큼만 기다린다(무한 대기 아님)", 0.25 <= _el < 3.0, f"{_el:.3f}s")
+ck("상한 초과를 크게 남긴다",
+   any("대기 초과" in x and "락 없이 진행" in x for x in _lg), str(_lg))
+ck("상한 기본값 20초", ld.LOCK_TIMEOUT == 20.0, str(ld.LOCK_TIMEOUT))
+
+# ── E4. 스테일 락 정책: 프로세스가 죽으면 커널이 놓는다 ──
+_holder.kill()          # SIGKILL(윈도우는 TerminateProcess) — 정리 코드 없이 즉사
+_holder.wait(timeout=30)
+_t0k = time.time()
+_reacq = False
+while time.time() - _t0k < 10:
+    _fd2 = os.open(ld.lock_path(_hfp), os.O_RDWR | os.O_CREAT, 0o600)
+    _reacq = ld._try_lock(_fd2)
+    if _reacq:
+        ld._unlock(_fd2)
+    os.close(_fd2)
+    if _reacq:
+        break
+    time.sleep(0.05)
+ck("홀더가 죽으면 락이 풀린다(영구 스테일 없음)", _reacq)
+
+shutil.rmtree(_pd, ignore_errors=True)
 
 passed = sum(1 for x in R if x)
 print(f"===== {passed}/{len(R)} PASS =====")

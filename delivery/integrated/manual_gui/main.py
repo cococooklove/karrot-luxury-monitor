@@ -3315,11 +3315,15 @@ class MainWindow(QMainWindow):
             "proxies": self._collect_proxies(),
             # 실행 중 프록시 추가/삭제 반영용 (조건 루프마다 재조회)
             "proxy_provider": self._collect_proxies,
-            # 초기 토큰은 워커스레드의 token_provider 가 획득(LDPlayer 부팅+수확은
-            # 오래 걸려 메인스레드서 하면 GUI 프리징).
+            # 초기 토큰도 워커스레드의 token_provider 가 파일에서 읽는다(메인스레드
+            # 접근 없음). 파일을 신선하게 유지하는 건 _HarvestThread 다.
             "access_token": None,
-            # 사이클마다 최신 access 재조회(자동수확 연동). 스레드세이프(GUI 미접근).
-            "token_provider": self._harvest_token_quiet if self.autoTokenRefresh.isChecked() else None,
+            # 사이클마다 최신 access 재조회 — accounts.json 을 **읽기만** 한다.
+            # GUI 의 수확 소유자는 _HarvestThread(20분 주기, __init__ 에서 기동)
+            # 하나뿐이다. 여기서 harvest_all 을 부르면 휴식주기(30~90초)마다 함대를
+            # 통째로 깨워 _HarvestThread 와 동시에 adb 를 두드리고 accounts.json 을
+            # 같이 쓴다 — LDPlayer 순차기동 규칙도 그때 깨진다.
+            "token_provider": self._read_token_quiet if self.autoTokenRefresh.isChecked() else None,
             # 계정 안정화(밴회피): 사이클마다 계정 라운드로빈 + 계정별 고정프록시(없으면 KR네이티브)
             # + daily_cap/warmup. 수확 갱신 켜졌을 때 함께 활성(다계정 전제).
             "stabilize": self.autoTokenRefresh.isChecked(),
@@ -3865,9 +3869,17 @@ class MainWindow(QMainWindow):
             self._leave_task()
             self.alert(str(e))
 
+    def _read_token_quiet(self) -> str | None:
+        """스윕 스레드의 토큰 provider — accounts.json 을 **읽기만** 한다.
+
+        GUI 에서 수확을 소유하는 건 _HarvestThread(20분 주기) 하나뿐이다.
+        스윕이 필요한 건 '수확'이 아니라 '신선한 토큰'이고, 그 파일을 신선하게
+        유지하는 일은 이미 그 스레드가 한다. GUI 미접근(showMessage/alert 금지)."""
+        return read_token_quiet("./accounts.json")
+
     def _harvest_token_quiet(self) -> str | None:
-        """스레드세이프 토큰 provider — 스윕 스레드서 사이클마다 호출.
-        GUI 미접근(showMessage/alert 금지). 본체는 헤드리스와 공유한다."""
+        """수확 후 최신 access. 사용자가 부른 작업(_alert_api)에서만 쓴다 —
+        주기적 수확은 _HarvestThread 소유다. GUI 미접근. 본체는 헤드리스와 공유."""
         return harvest_token_quiet("./accounts.json")
 
     def _refresh_tokens(self) -> str | None:
