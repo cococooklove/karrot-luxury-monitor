@@ -4041,6 +4041,7 @@ def _run_headless():
     import sys as _sys, json as _json, os as _os, time as _time
     _chdir_app_dir()
     from daangn_ext.keyword_alert_api import MultiAccountAlerts, token_remaining
+    from daangn_ext.supervisor import SupervisorPolicy
 
     def log(m):
         print(f"[{_time.strftime('%H:%M:%S')}] {m}", flush=True)
@@ -4091,13 +4092,18 @@ def _run_headless():
         except Exception:
             pass
 
-    def _night_factor(nights_on):
-        if not nights_on:
+    def _night_factor_live():
+        if not bool(_settings().get("night")):
             return 1
         h = _time.localtime().tm_hour
         if 0 <= h < 7: return 3
         if 22 <= h < 24 or 7 <= h < 9: return 2
         return 1
+
+    # GUI 와 같은 간격 정책 공유 — 야간 감속 배수가 폴링·워치 스윕 양쪽에
+    # 같은 곳(SupervisorPolicy)에서 계산되게 한다(따로 계산하면 둘이 갈라진다).
+    policy = SupervisorPolicy(lambda: interval, _night_factor_live,
+                              sweep_interval=WATCH_SWEEP_INTERVAL)
 
     def _notify(items, nt):
         if not items:
@@ -4184,7 +4190,6 @@ def _run_headless():
     while True:
         st = _settings()
         core_only = bool(st.get("core_only"))
-        nights = bool(st.get("night"))
         now = _time.time()
         # 자동수확(20분 주기)
         if do_harvest and now - last_harvest > 1200:
@@ -4228,16 +4233,17 @@ def _run_headless():
             _save_seen(seen_order)
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
-        # 워치리스트 스윕 — 폴링과 같은 스레드에서 10분 간격으로만
+        # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
+        # 간격과 예산은 반드시 같은 값에서 나와야 한다(어긋나면 하루 요청량이 틀어진다).
+        sweep_sec = policy.sweep_ms() // 1000
         if watch_tracker and watch_budget and \
-                headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
+                headless_watch_due(last_watch_sweep, now, sweep_sec):
             last_watch_sweep = now
             try:
                 dropped = watch_tracker.enforce_cap()
                 if dropped:
                     log(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
-                budget = watch_sweep_budget(watch_store.active_count(),
-                                            WATCH_SWEEP_INTERVAL)
+                budget = watch_sweep_budget(watch_store.active_count(), sweep_sec)
                 if budget:
                     watch_budget.reload()
                     lines = watch_event_lines(
@@ -4251,7 +4257,7 @@ def _run_headless():
                 log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
         if once:
             log("--once 완료"); break
-        eff = interval * _night_factor(nights)
+        eff = policy.poll_ms() // 1000
         log(f"다음 폴링 {eff}초 후")
         try:
             _time.sleep(eff)
