@@ -70,19 +70,36 @@ ck("ended 필터",
 ck("알 수 없는 필터는 전부", len(m.listing_display_rows(mixed, NOW, "??")) == 3)
 ck("빈 입력", m.listing_display_rows([], NOW) == [])
 
-# ── 백필이 세운 중복판정용 묘비(dead + 제목 없음)는 표에 안 나온다 ──
+# ── 백필이 세운 중복판정용 묘비(source=match_seen)는 표에 안 나온다 ──
+# 기준은 출처다. '제목이 비었다'로 거르면 제목 없이 들어온 실제 매물이 종료되는
+# 순간 표에서 조용히 사라진다.
 tomb = row(id="t", title="", region="", tier=aw.TIER_DEAD, price=0,
-           first_price=0, keyword="")
-ck("빈 묘비는 숨김", m.listing_display_rows([tomb], NOW) == [], "")
-ck("빈 묘비는 ended 필터에서도 숨김",
+           first_price=0, keyword="", source=aw.SOURCE_MATCH_SEEN)
+ck("백필 묘비는 숨김", m.listing_display_rows([tomb], NOW) == [], "")
+ck("백필 묘비는 ended 필터에서도 숨김",
    m.listing_display_rows([tomb], NOW, "ended") == [])
+ck("match_seen 은 제목이 있어도 숨김",
+   m.listing_display_rows([dict(tomb, title="샤넬")], NOW) == [])
+ck("match_seen 은 살아 있어도(fresh) 숨김",
+   m.listing_display_rows([dict(tomb, tier=aw.TIER_FRESH)], NOW) == [])
+ck("제목 없는 dead 라도 출처가 있으면 보인다",
+   [x["id"] for x in m.listing_display_rows(
+       [dict(tomb, source="app")], NOW)] == ["t"], "종료 사유는 사용자가 봐야 한다")
+ck("제목 없는 dead 는 ended 필터에도 걸린다",
+   [x["id"] for x in m.listing_display_rows(
+       [dict(tomb, source="sweep")], NOW, "ended")] == ["t"])
 ck("제목 있는 dead 는 보인다",
-   [x["id"] for x in m.listing_display_rows([dict(tomb, title="샤넬")], NOW)] == ["t"])
+   [x["id"] for x in m.listing_display_rows(
+       [dict(tomb, title="샤넬", source="app")], NOW)] == ["t"])
 ck("evicted 는 제목 없어도 안 숨김",
    [x["id"] for x in m.listing_display_rows(
-       [dict(tomb, tier=aw.TIER_EVICTED)], NOW)] == ["t"])
+       [dict(tomb, tier=aw.TIER_EVICTED, source="app")], NOW)] == ["t"])
 ck("묘비를 섞어도 나머지는 그대로",
    [x["id"] for x in m.listing_display_rows([row(id="a"), tomb], NOW)] == ["a"])
+ck("백필이 세우는 출처가 표의 필터 기준과 같다",
+   'aw.SOURCE_MATCH_SEEN' in open(
+       os.path.join(app_dir, "tools", "backfill_listings.py"),
+       encoding="utf-8").read())
 
 # ── 검색 스윕 결과 정규화 ──
 found = {"id": 555, "region": "분당", "title": "루이비통 알마",

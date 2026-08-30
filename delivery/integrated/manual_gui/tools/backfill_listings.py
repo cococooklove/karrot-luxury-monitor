@@ -74,8 +74,8 @@ def backfill(store, auto_seen_db, match_seen_json, now: int) -> dict:
     # 있으면 첫 폴링에 텔레그램·시트로 다시 나간다. 그러고 나서 이 파일을
     # 지우면 되돌릴 수 없다.
     #
-    # 값이 없으므로 묘비만 세운다. tier=dead 이고 제목이 비어 있어
-    # listing_display_rows 가 걸러내므로 표에 빈 줄로 뜨지 않는다.
+    # 값이 없으므로 묘비만 세운다. source=match_seen 이라 listing_display_rows
+    # 가 출처로 걸러내므로 표에 빈 줄로 뜨지 않는다.
     ids = []
     if match_seen_json and os.path.exists(match_seen_json):
         try:
@@ -106,7 +106,7 @@ def backfill(store, auto_seen_db, match_seen_json, now: int) -> dict:
             "tier": aw.TIER_DEAD,
             "fail": 0,
             "keyword": "",
-            "source": "match_seen",
+            "source": aw.SOURCE_MATCH_SEEN,
             "first_price": 0,
             "last_change": 0,
             "last_delta": 0,

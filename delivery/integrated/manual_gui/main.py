@@ -122,10 +122,11 @@ def listing_display_rows(rows, now, state_filter="all"):
     from daangn_ext import article_watch as _aw
     out = []
     for r in rows or []:
-        # 중복 판정만을 위한 묘비(백필이 세운 tier=dead·제목 없음)는 보여줄 게
-        # 없다. 걸러내지 않으면 표에 빈 줄로 뜬다. evicted 는 되살아나므로
-        # 여기 해당하지 않는다.
-        if (r.get("tier") or "") == _aw.TIER_DEAD and not (r.get("title") or ""):
+        # 중복 판정만을 위한 묘비(백필이 match_seen.json 에서 옮긴 행)는 보여줄
+        # 게 없다. 걸러내지 않으면 표에 빈 줄로 뜬다. 판정 기준은 '제목이 비었다'
+        # 가 아니라 출처다 — 제목 없이 들어온 실제 매물이 종료되는 순간 표에서
+        # 조용히 사라지면 사용자는 이유를 알 수 없다.
+        if (r.get("source") or "") == _aw.SOURCE_MATCH_SEEN:
             continue
         state = _aw.state_for(r, now)
         if state_filter in ("new", "down", "ended") and state != state_filter:

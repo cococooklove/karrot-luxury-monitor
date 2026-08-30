@@ -31,6 +31,10 @@ TIER_AGED = "aged"
 # evicted 는 다시 매칭되면(= 아직 살아 있다는 뜻) add_from_matches 가 재등록한다.
 TIER_DEAD = "dead"
 TIER_EVICTED = "evicted"
+# 백필(tools/backfill_listings.py)이 match_seen.json 에서 옮긴 행의 출처.
+# 값이 id 뿐이라 보여줄 게 없는 '중복판정 전용' 행이다 — 표는 출처로 거른다.
+# 제목이 비었다는 건 증상일 뿐이라 실제 매물도 걸려들 수 있다.
+SOURCE_MATCH_SEEN = "match_seen"
 ACTIVE_TIERS = (TIER_FRESH, TIER_AGED)
 _ACTIVE_SQL = "tier IN ('fresh','aged')"
 
