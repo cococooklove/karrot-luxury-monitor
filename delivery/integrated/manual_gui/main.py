@@ -324,14 +324,17 @@ def drain_sweep_finds(q, tracker, keywords_fn, log, limit=SWEEP_FIND_QUEUE_MAX):
     payload 정규화까지 여기서 한다 — sweep_queue 파일 읽기(keywords_fn)도
     스윕 스레드에 남기지 않기 위해서다."""
     import queue as _q
+    # 추적기가 없으면(watch.db 열기 실패) 큐를 비우지 않는다 — 꺼내고 버리면
+    # 저장소가 살아난 뒤에도 그 사이 찾은 매물이 조용히 사라진다.
+    if q is None or tracker is None:
+        return 0
     payloads = []
-    if q is not None:
-        while len(payloads) < int(limit):
-            try:
-                payloads.append(q.get_nowait())
-            except _q.Empty:
-                break
-    if not payloads or tracker is None:
+    while len(payloads) < int(limit):
+        try:
+            payloads.append(q.get_nowait())
+        except _q.Empty:
+            break
+    if not payloads:
         return 0
     try:
         kws = list(keywords_fn() or [])
@@ -435,15 +438,19 @@ def read_token_quiet(accounts_path="./accounts.json"):
         return None
 
 
-def harvest_token_quiet(accounts_path="./accounts.json"):
+def harvest_token_quiet(accounts_path="./accounts.json", log=None):
     """함대 수확 후 최신 access. 수확을 **소유한** 쪽만 부른다.
 
-    소유자는 런타임마다 하나뿐이다: GUI 는 스윕 스레드의 token_provider,
-    헤드리스는 폴링 루프의 20분 주기 수확. 둘 이상이 부르면 adb 폭주 +
-    accounts.json 동시쓰기가 된다."""
+    주기적 소유자는 런타임마다 하나뿐이다: GUI 는 _HarvestThread(20분),
+    헤드리스는 폴링 루프(20분). 스윕은 어느 쪽에서도 수확하지 않고
+    read_token_quiet 로 파일만 읽는다. 여기를 부르는 나머지 한 곳은
+    사용자가 직접 누른 _multi(harvest=True) 뿐이다.
+
+    log 를 넘기면 병합 락 경고까지 보인다 — 안 넘기면 'accounts.json 을
+    다른 프로세스가 잡고 있어 수확분이 덮일 수 있다'는 경고가 삼켜진다."""
     try:
         import ld_autoharvest
-        ld_autoharvest.harvest_all(accounts_path, nudge=True)
+        ld_autoharvest.harvest_all(accounts_path, nudge=True, log=log)
     except Exception:
         pass
     return read_token_quiet(accounts_path)
@@ -704,7 +711,8 @@ class _HarvestThread(QtCore.QThread):
         while not self._stop:
             try:
                 import ld_autoharvest
-                u, i, t, h = ld_autoharvest.harvest_all(self.accounts, nudge=True)
+                u, i, t, h = ld_autoharvest.harvest_all(
+                    self.accounts, nudge=True, log=self.tick.emit)
                 self.tick.emit(f"[자동수확] {h}계정 갱신 · 총 {t}계정" if h
                                else "[자동수확] 대상 없음(LDPlayer/폰 확인)")
             except Exception as e:
@@ -2744,7 +2752,9 @@ class MainWindow(QMainWindow):
         if harvest:
             try:
                 import ld_autoharvest
-                ld_autoharvest.harvest_all("./accounts.json", nudge=True)
+                ld_autoharvest.harvest_all(
+                    "./accounts.json", nudge=True,
+                    log=lambda m: self.sb.showMessage(m, 4000))
             except Exception:
                 pass
         return MultiAccountAlerts("./accounts.json", "./data/config.json")
@@ -5026,7 +5036,10 @@ def _run_headless():
                 # 폴링 루프가 갱신해 둔 파일을 읽는 것으로 충분하다.
                 # --no-harvest 면 아무도 갱신하지 않으므로 provider 자체를 뺀다
                 # (= stabilize off, 기존 동작 그대로).
-                token_provider=(read_token_quiet if do_harvest else None))
+                token_provider=(read_token_quiet if do_harvest else None),
+                # 지역 미지정이면 기본 지역으로 좁힌다는 사실을 서버 로그에
+                # 남긴다 — 안 남기면 커버리지가 6537동에서 조용히 줄어든다.
+                log=log)
 
         sweep_runner = HeadlessSweepRunner(sweep_queue, _sweep_cfg_builder,
                                            log, _sweep_found)
@@ -5165,6 +5178,12 @@ def _run_headless():
         # --once·KeyboardInterrupt·예외 어느 경로로 나가도 여기를 지난다.
         if sweep_runner is not None:
             sweep_runner.stop(join=8)
+        # 멈춘 뒤 큐에 남은 것까지 넣는다. 안 그러면 --once 는 스윕이 찾은 걸
+        # 하나도 기록하지 못하고(시작하자마자 비어 있는 큐를 훑고 끝난다),
+        # 상시 운영에서도 종료 때 마지막 주기 분이 통째로 사라진다.
+        drain_sweep_finds(sweep_found_q, watch_tracker,
+                          (sweep_queue.keywords if sweep_queue is not None
+                           else list), log)
 
 
 if __name__ == "__main__":
