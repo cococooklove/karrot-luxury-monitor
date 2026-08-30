@@ -160,6 +160,45 @@ if _win is not None:
         _win.advancedBox.setChecked(True)
         ck("펼치면 다시 보임", not any(k.isHidden() for k in _kids))
         _win.advancedBox.setChecked(False)
+    # ── 상태칩 → 고급 패널 항목 (설계 §1: 칩 클릭은 해당 항목으로 스크롤) ──
+    ck("상태칩 존재",
+       set(getattr(_win, "_chips", {})) == {"token", "accounts", "coverage", "poll"},
+       str(sorted(getattr(_win, "_chips", {}))))
+    ck("칩 목적지가 실재하는 위젯",
+       all(getattr(_win, a, None) is not None
+           for a in _win.CHIP_TARGETS.values()),
+       str(_win.CHIP_TARGETS))
+    ck("칩 목적지는 전부 고급 패널 안",
+       all(getattr(_win, a) in _win.advancedBox.findChildren(_QW.QWidget)
+           for a in _win.CHIP_TARGETS.values()))
+    ck("탭이 스크롤 영역 안에 있다",
+       _win._enclosing_scroll(_win.alertCoverMode) is not None)
+    _win.advancedBox.setChecked(False)
+    _moved = _win.on_chip_clicked("coverage")
+    ck("칩을 누르면 접힌 고급 패널이 펴진다",
+       _moved and _win.advancedBox.isChecked())
+    ck("커버리지 칩 → 커버 모드로 데려간다",
+       _win.focusWidget() is _win.alertCoverMode, str(_win.focusWidget()))
+    ck("펴진 목적지는 보인다", not _win.alertCoverMode.isHidden())
+    ck("이미 펴져 있어도 데려간다", _win.on_chip_clicked("poll"))
+    ck("다음폴링 칩 → 폴링 주기", _win.focusWidget() is _win.alertPollInterval,
+       str(_win.focusWidget()))
+    ck("토큰·계정 칩 → 계정 현황",
+       _win.on_chip_clicked("token") and _win.on_chip_clicked("accounts")
+       and _win.focusWidget() is _win.alertFleetBtn, str(_win.focusWidget()))
+    # 대응 항목 없는 칩은 아무 데도 데려가지 않는다(엉뚱한 목적지보다 낫다).
+    ck("추적중은 목적지가 없다", "watch" not in _win.CHIP_TARGETS)
+    ck("모르는 칩은 무시", _win.on_chip_clicked("watch") is False)
+    _win.advancedBox.setChecked(False)
+    # 칩 문구는 헬스 갱신이 채운다(자격증명 없어도 크래시 없이 값이 바뀐다).
+    _win._refresh_alert_health()
+    ck("헬스 갱신이 칩 문구를 채운다",
+       _win._chips["token"].text().startswith("토큰")
+       and _win._chips["accounts"].text().startswith("계정")
+       and _win._chips["coverage"].text().startswith("커버리지")
+       and "폴링" in _win._chips["poll"].text(),
+       " / ".join(c.text() for c in _win._chips.values()))
+
     ck("감시 토글 핸들러", callable(getattr(_win, "on_watch_toggle", None)))
     ck("라우터 속성", hasattr(_win, "_router"))
     ck("컨트롤러 속성", hasattr(_win, "_supervisor"))

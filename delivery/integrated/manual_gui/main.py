@@ -1434,6 +1434,18 @@ class MainWindow(QMainWindow):
                 print(f"[에뮬레이터] 창 복구 실패: {type(e).__name__}: {e}")
 
     # ── 키워드 알림 탭 ─────────────────────────────────────────────
+    # ── 상태칩 → 고급 패널 항목 ──
+    # 칩은 값을 보여줄 뿐 조절은 고급 패널이 한다. 사용자가 "커버리지 78%" 를
+    # 보고 그 설정으로 가는 길이 없으면 칩은 죽은 글자다(설계 §1: 칩 클릭은 해당
+    # 고급 패널 항목으로 스크롤한다). 대응 항목이 없는 칩은 여기 넣지 않는다 —
+    # 없는 목적지를 지어내면 사용자가 엉뚱한 곳으로 간다.
+    CHIP_TARGETS = {
+        "token": "alertFleetBtn",       # 토큰 유효/만료 → 계정별 만료 현황
+        "accounts": "alertFleetBtn",    # 계정 수 → 같은 팜 현황 다이얼로그
+        "coverage": "alertCoverMode",   # 커버리지 → 전국/핵심 커버 모드
+        "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
+    }
+
     def _build_alert_tab(self):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
@@ -1474,6 +1486,22 @@ class MainWindow(QMainWindow):
         self.watchToggleBtn.setCheckable(True)
         self.watchToggleBtn.clicked.connect(self.on_watch_toggle)
         top.addWidget(self.watchToggleBtn)
+        # 칩 — 읽기 전용 상태 표시지만 죽은 글자는 아니다. 누르면 그 값을 조절하는
+        # 고급 패널 항목까지 펼쳐서 데려간다.
+        self._chips = {}
+        for key, text in (("token", "토큰 -"), ("accounts", "계정 -"),
+                          ("coverage", "커버리지 -"), ("poll", "다음폴링 -")):
+            chip = QtWidgets.QPushButton(text)
+            chip.setObjectName("statChip")
+            chip.setFlat(True)
+            chip.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            chip.setToolTip("누르면 고급 패널의 해당 설정으로 이동합니다")
+            chip.clicked.connect(lambda _c=False, k=key: self.on_chip_clicked(k))
+            self._chips[key] = chip
+            self._style_chip(key, "ok")
+            top.addWidget(chip)
+        # 추적중 칩은 고급 패널에 대응 항목이 없다(스윕 주기는 정책 상수다).
+        # 목적지 없는 칩은 누르지 않는 편이 낫다 — 라벨로 둔다.
         top.addWidget(self._watch_label, 1)
         v.addLayout(top)
 
@@ -1732,6 +1760,64 @@ class MainWindow(QMainWindow):
         self._init_dashboard()
         return w
 
+    _CHIP_COLORS = {"ok": ("#221C16", "#E6DDCB", "#3A3225"),
+                    "warn": ("#332616", "#F0C87C", "#5A4626"),
+                    "bad": ("#3A211C", "#F0A79C", "#6A342C"),
+                    "off": ("#1C1A17", "#8C8478", "#2E2A24")}
+
+    def _style_chip(self, key, level="ok"):
+        chip = getattr(self, "_chips", {}).get(key)
+        if chip is None:
+            return
+        bg, fg, br = self._CHIP_COLORS.get(level, self._CHIP_COLORS["ok"])
+        chip.setStyleSheet(
+            "QPushButton#statChip{padding:4px 10px; border-radius:11px; font-size:12px;"
+            f"background:{bg}; color:{fg}; border:1px solid {br};}}"
+            f"QPushButton#statChip:hover{{border:1px solid #F0D48C;}}")
+
+    def _set_chip(self, key, text, level="ok"):
+        chip = getattr(self, "_chips", {}).get(key)
+        if chip is None:
+            return
+        chip.setText(text)
+        self._style_chip(key, level)
+
+    @staticmethod
+    def _enclosing_scroll(widget):
+        """위젯을 담고 있는 QScrollArea. 탭은 _scroll() 로 감싸여 있다."""
+        p = widget.parentWidget() if widget is not None else None
+        while p is not None:
+            if isinstance(p, QtWidgets.QScrollArea):
+                return p
+            p = p.parentWidget()
+        return None
+
+    def on_chip_clicked(self, key):
+        """상태칩 → 고급 패널을 펼치고 대응 항목으로 스크롤. 목적지 없으면 무시.
+
+        반환값은 실제로 데려갔는지다(테스트가 확인한다)."""
+        target = getattr(self, self.CHIP_TARGETS.get(key) or "", None)
+        if target is None:
+            return False
+        if not self.advancedBox.isChecked():
+            self.advancedBox.setChecked(True)       # toggled → 자식 표시
+        # 방금 펼친 위젯은 아직 좌표가 없다 — 레이아웃을 먼저 확정시켜야
+        # ensureWidgetVisible 이 옛 자리로 스크롤하지 않는다.
+        parent_layout = self.advancedBox.parentWidget().layout() \
+            if self.advancedBox.parentWidget() else None
+        if parent_layout is not None:
+            parent_layout.activate()
+        area = self._enclosing_scroll(target)
+
+        def _reveal():
+            if area is not None:
+                area.ensureWidgetVisible(target, 0, 60)
+            target.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+
+        _reveal()
+        QtCore.QTimer.singleShot(0, _reveal)   # 애니메이션/지연 레이아웃 뒤 한 번 더
+        return True
+
     def _sync_advanced_visible(self, on):
         """체크형 QGroupBox 는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨긴다.
 
@@ -1878,6 +1964,22 @@ class MainWindow(QMainWindow):
         tg = "🟢 텔레그램 연결" if (nt.get("tg_token") and nt.get("tg_chat")) else "⚪ 텔레그램 미설정"
         if nt.get("sheet_url"):
             tg += " · 🟢 시트"
+        # 컨트롤 바 칩 — 같은 값을 한 줄 요약으로. 누르면 해당 설정으로 간다.
+        self._set_chip("token", f"토큰 {alive}", "ok" if tok_ok else "bad")
+        n_acc = alive + expired
+        self._set_chip("accounts", f"계정 {n_acc}",
+                       "ok" if n_acc else "warn")
+        try:
+            pct = int(self.dashBar.value())
+        except Exception:
+            pct = 0
+        self._set_chip("coverage", f"커버리지 {pct}%" if pct else "커버리지 -",
+                       "ok" if pct else "warn")
+        if self._alert_poll_timer.isActive():
+            rem = max(0, self._alert_poll_timer.remainingTime()) // 1000
+            self._set_chip("poll", f"다음폴링 {rem // 60}:{rem % 60:02d}", "ok")
+        else:
+            self._set_chip("poll", "폴링 OFF", "off")
         self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
         bg = "#3A211C" if not tok_ok else "#221C16"
         self.dashHealth.setStyleSheet(
