@@ -9,12 +9,26 @@
 
 상한은 하드코딩이 아니라 관측값이다: 서버 상한이 설정값(기본 30)보다 낮으면
 등록이 매번 실패하는데도 라우터는 계속 여유가 있다고 믿고 재시도한다.
-register_all 의 반환에 "fleet_full"(그 실패가 차단 키워드가 아니라 함대
-한도에 부딪힌 것이라는 신호)이 있으면, 그 시점의 used 를 유효 상한으로
-낮춰 캐시한다. 이 신호가 없으면(현재 실제 구현은 아직 보내지 않는다) 절대
-낮추지 않는다 — 차단 키워드 실패를 한도 축소로 오인하면 실제로 있는 슬롯을
-스윕으로 묶어버리기 때문이다. 관측값은 절대 스스로 오르지 않고,
-reset_observed_cap() 으로만 되돌린다.
+
+실패 사유(차단 키워드 vs 진짜 한도 초과)는 register_all 의 반환값만으로는
+구분할 수 없다 — keyword_alert_api.register_many 는 이 둘을 내부적으로는
+구분해 알고 있지만 register_all 이 계정별 결과를 세 정수(added/skipped/
+failed)로 뭉개면서 사유가 사라진다. 그래서 사유를 추측하는 대신, 실패한
+계정이 실제로 몇 개의 키워드를 들고 있는지(KeywordAlertAPI.keywords() 로
+실측한 값, register_all 의 "observed_count")를 근거로 쓴다. 이 실측값이
+①이 라우터가 그 계정에 이미 넣었다고 믿는 수(capacity()["used"]) 이상이고
+②그러면서도 지금 믿는 유효 상한보다는 낮을 때만 — 즉 "우리가 민 만큼은
+다 갖고 있는데도 이번 건은 거부당했다"에 해당할 때만 — 그 실측값으로
+상한을 낮춘다. used 보다 낮은 실측값은 그 계정이 아직 다른 계정만큼
+못 따라간 것뿐일 수 있어 상한의 증거가 아니다(뒤처짐과 상한 도달을
+구분 못 하면 오탐이다). used 가 아직 0(성공 이력 없음)이면 비교 기준이
+없으므로 건너뛴다.
+
+register_all 이 명시적으로 "fleet_full"(그 실패가 차단이 아니라 함대
+한도 때문이라는 신호)을 보낼 수도 있다 — 지금의 실제 구현은 보내지
+않지만, 더 나은 증거가 생기면 그대로 쓸 자리를 남겨둔다.
+
+관측값은 절대 스스로 오르지 않고, reset_observed_cap() 으로만 되돌린다.
 """
 from __future__ import annotations
 
@@ -124,6 +138,49 @@ class KeywordRouter:
         log(f"  ⚠ 앱 슬롯 상한 관측치 하향: {prev} → {used}"
             f"(서버가 등록을 거부함 — reset_observed_cap() 으로 되돌릴 수 있음)")
 
+    def _observe_measured_count(self, count, used_before: int, cap_before: int,
+                                log) -> None:
+        """실패한 등록의 계정이 실제로 몇 개를 들고 있는지(서버 실측값)를
+        상한 후보로 검토한다. add() 가 이 실패를 만나기 직전에 잰
+        used_before/cap_before 를 그대로 받는다 — 그 사이 라우트가
+        바뀌지 않았으므로 재계산할 필요가 없다.
+
+        차단 키워드인지 한도 초과인지는 register_all 의 반환만으로 절대
+        구분이 안 된다(모듈 docstring 참고) — 그래서 실패 사유를 보는 대신
+        이 부등식만 본다:
+
+          count < used_before  → 증거 아님, 버림.
+            이 계정이 다른 계정만큼 아직 못 따라간 것일 수 있다(막 유효해진
+            계정 등). '적게 갖고 있다'는 것 자체는 상한의 증거가 아니다 —
+            차단 키워드가 실패한 계정이 겨우 12개를 갖고 있다고 해서 상한이
+            12 라는 뜻은 아니다. 뒤처짐과 상한 도달을 구분 못 하면 오탐이다.
+
+          count >= cap_before   → 낮출 게 없음, 버림.
+            지금 믿는 상한만큼(또는 그 이상) 이미 갖고 있다는 뜻이라 이
+            계정에 대해선 '낮은 상한'의 증거가 아니다. 오히려 로컬 집계
+            (used)가 실제보다 적게 세고 있다는 신호에 가깝다 — 그건
+            seed_from_server 의 몫이지 여기서 다룰 문제가 아니다.
+
+          used_before <= count < cap_before  → 신뢰할 근거.
+            우리가 이 계정에 이미 밀어 넣었다고 믿는 만큼은 실제로도 갖고
+            있는데("따라잡음"), 그런데도 이번 등록은 거부됐다 — 그 계정의
+            진짜 한계가 지금 믿는 상한보다 낮다는 가장 직접적인 증거다.
+
+        used_before<=0(성공 이력이 아예 없음)이면 비교 기준이 없어 건너뛴다."""
+        try:
+            count = int(count)
+        except Exception:
+            return
+        if used_before <= 0 or count < used_before or count >= cap_before:
+            return
+        if self._observed_cap is not None and self._observed_cap <= count:
+            return
+        prev = self._observed_cap if self._observed_cap is not None else self.slot_cap
+        self._observed_cap = count
+        self._save()
+        log(f"  ⚠ 앱 슬롯 상한 관측치 하향(실측): {prev} → {count}"
+            f"(계정 실 등록수 확인 — reset_observed_cap() 으로 되돌릴 수 있음)")
+
     def reset_observed_cap(self, log=None) -> bool:
         """관측으로 낮아진 유효 상한을 되돌린다 — 일시적 서버 오류·오탐으로
         낮아진 경우 운영자가 빠져나갈 구멍. seed_from_server 는 routes 가
@@ -202,6 +259,12 @@ class KeywordRouter:
             # 한도로 오인하면 멀쩡한 슬롯을 스윕에 묶어버린다.
             if res.get("failed") and res.get("fleet_full"):
                 self._observe_cap_full(log)
+            # 측정된 신호(우선): register_many 가 실패한 계정의 실제 보유수를
+            # 다시 세서 넘겨준 값. 사유 추측 없이 부등식만으로 판단한다 —
+            # _observe_measured_count 의 docstring 참고.
+            oc = res.get("observed_count")
+            if oc is not None:
+                self._observe_measured_count(oc, cap_now["used"], cap_now["cap"], log)
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
                                   "앱 등록 실패(차단 키워드·유효 계정 없음)", log,
                                   failed=True)

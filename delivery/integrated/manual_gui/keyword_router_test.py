@@ -420,6 +420,93 @@ n = rP3.seed_from_server(["Z"])
 ck("씨딩 성공", n == 1)
 ck("씨딩이 관측치를 씻어냄", rP3.capacity()["cap"] == 4, str(rP3.capacity()))
 
+# ── Q. 실측 상한(observed_count) — "측정, 추론 아님" ──
+class CountAwareFleet:
+    """register_all 이 keyword_alert_api 의 실제 모양(added/skipped/failed +
+    실패 시 observed_count)을 흉내낸다. ok 는 성공, 그 외는 실패하며
+    fail_counts 에 있으면 그 계정 실측 보유수를 함께 보낸다."""
+
+    def __init__(self, ok=(), fail_counts=None):
+        self.ok = set(ok)
+        self.fail_counts = dict(fail_counts or {})
+        self.calls = []
+
+    def register_all(self, keywords, min_price=None, max_price=None,
+                     exclude_keywords=None, log=None, core_only=False):
+        self.calls.append(list(keywords))
+        kw = keywords[0]
+        if kw in self.ok:
+            return {"added": 1, "skipped": 0, "failed": 0}
+        out = {"added": 0, "skipped": 0, "failed": 1}
+        if kw in self.fail_counts:
+            out["observed_count"] = self.fail_counts[kw]
+        return out
+
+
+def _fill(router, kws):
+    for kw in kws:
+        router.add(kw)
+
+
+# used 이상 · 현재 상한 미만인 실측값 → 하향
+dQ1 = tempfile.mkdtemp()
+fQ1 = CountAwareFleet(ok={"A", "B", "C", "D", "E"}, fail_counts={"F": 12})
+rQ1 = KeywordRouter(fQ1, SweepQueue(os.path.join(dQ1, "q.json")), slot_cap=30,
+                    routes_fp=os.path.join(dQ1, "routes.json"))
+_fill(rQ1, ["A", "B", "C", "D", "E"])
+ck("사전조건: used=5", rQ1.capacity()["used"] == 5, str(rQ1.capacity()))
+res = rQ1.add("F")
+ck("실측 실패는 sweep", res["route"] == "sweep", str(res))
+ck("used<=count<cap 이면 하향", rQ1.capacity()["cap"] == 12, str(rQ1.capacity()))
+
+# used 보다 낮은 실측값(뒤처진 계정) → 상한의 증거 아님, 낮추지 않는다
+dQ2 = tempfile.mkdtemp()
+fQ2 = CountAwareFleet(ok={"A", "B", "C", "D", "E"}, fail_counts={"G": 2})
+rQ2 = KeywordRouter(fQ2, SweepQueue(os.path.join(dQ2, "q.json")), slot_cap=30,
+                    routes_fp=os.path.join(dQ2, "routes.json"))
+_fill(rQ2, ["A", "B", "C", "D", "E"])
+rQ2.add("G")
+ck("count < used 는 무시(뒤처짐, 상한 증거 아님)",
+   rQ2.capacity()["cap"] == 30, str(rQ2.capacity()))
+
+# 이미 현재 상한 이상인 실측값 → 낮출 게 없으니 무시
+dQ3 = tempfile.mkdtemp()
+fQ3 = CountAwareFleet(ok={"A"}, fail_counts={"H": 30})
+rQ3 = KeywordRouter(fQ3, SweepQueue(os.path.join(dQ3, "q.json")), slot_cap=30,
+                    routes_fp=os.path.join(dQ3, "routes.json"))
+_fill(rQ3, ["A"])
+rQ3.add("H")
+ck("count >= 현재 상한이면 변화 없음", rQ3.capacity()["cap"] == 30, str(rQ3.capacity()))
+
+# used=0(성공 이력 없음)일 때는 비교 기준이 없어 건너뛴다
+dQ4 = tempfile.mkdtemp()
+fQ4 = CountAwareFleet(fail_counts={"I": 5})
+rQ4 = KeywordRouter(fQ4, SweepQueue(os.path.join(dQ4, "q.json")), slot_cap=30,
+                    routes_fp=os.path.join(dQ4, "routes.json"))
+rQ4.add("I")
+ck("used=0 이면 실측값 무시", rQ4.capacity()["cap"] == 30, str(rQ4.capacity()))
+
+# 상한은 실측으로도 스스로 오르지 않는다 — 더 낮은 값만 반영
+dQ5 = tempfile.mkdtemp()
+fQ5 = CountAwareFleet(ok={"A", "B", "C"}, fail_counts={"X": 3, "Y": 1})
+rQ5 = KeywordRouter(fQ5, SweepQueue(os.path.join(dQ5, "q.json")), slot_cap=10,
+                    routes_fp=os.path.join(dQ5, "routes.json"))
+_fill(rQ5, ["A", "B", "C"])
+rQ5.add("X")
+ck("1차 실측 하향", rQ5.capacity()["cap"] == 3, str(rQ5.capacity()))
+fQ5.ok = set(); fQ5.fail_counts = {"X": 9}
+rQ5.add("X")
+ck("더 높은 재측정으로는 오르지 않음", rQ5.capacity()["cap"] == 3, str(rQ5.capacity()))
+
+# 재시작해도 실측 하향은 유지된다
+rQ1b = KeywordRouter(CountAwareFleet(), SweepQueue(os.path.join(dQ1, "q2.json")),
+                     slot_cap=30, routes_fp=os.path.join(dQ1, "routes.json"))
+ck("재시작 후에도 실측 상한 유지", rQ1b.capacity()["cap"] == 12, str(rQ1b.capacity()))
+
+# reset_observed_cap 은 실측으로 낮아진 것도 되돌린다
+ck("reset 은 실측 관측치도 지움", rQ1b.reset_observed_cap() is True)
+ck("reset 후 기본 상한으로", rQ1b.capacity()["cap"] == 30, str(rQ1b.capacity()))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

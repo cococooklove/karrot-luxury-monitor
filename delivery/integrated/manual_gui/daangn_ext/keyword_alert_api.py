@@ -145,7 +145,17 @@ class KeywordAlertAPI:
                 time.sleep(0.6)
             except Exception as e:
                 failed.append((kw, str(e)[:60])); log(f"  {kw}: 실패 {str(e)[:40]}")
-        return {"added": added, "skipped": skipped, "failed": failed}
+        out = {"added": added, "skipped": skipped, "failed": failed}
+        if failed:
+            # 실패가 하나라도 있을 때만 이 계정이 실제로 몇 개를 들고
+            # 있는지 다시 센다 — 성공 경로엔 요청을 하나도 더 안 태운다.
+            # 차단 키워드인지 한도 초과인지 반환값만으로는 구분 못 하니
+            # 추측하지 않고, 서버가 돌려주는 진짜 보유수를 그대로 넘긴다.
+            try:
+                out["account_count"] = len(self.keywords())
+            except Exception:
+                pass
+        return out
 
     # ── 삭제 ──
     def delete(self, user_keyword_id: str) -> bool:
@@ -318,6 +328,7 @@ class MultiAccountAlerts:
         valid = self._valid(core_only)
         log(f"유효 계정 {len(valid)}개 (만료계정 제외)")
         total = {"added": 0, "skipped": 0, "failed": 0}
+        observed_count = None    # 실패가 난 계정들 중 실측된 보유수의 최댓값
         for code, access, proxy in valid:
             log(f"── 계정 {code[:6]} ──")
             api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
@@ -326,11 +337,18 @@ class MultiAccountAlerts:
                                         exclude_keywords, log=log)
                 for k in total:
                     total[k] += len(res[k])
+                if "account_count" in res:
+                    n = res["account_count"]
+                    observed_count = n if observed_count is None else max(observed_count, n)
             except Exception as e:
                 log(f"  계정 {code[:6]} 실패: {str(e)[:50]}")
             finally:
                 api.close()
         log(f"전체: 등록 {total['added']} · 스킵 {total['skipped']} · 실패 {total['failed']}")
+        # added/skipped/failed 세 키는 그대로 둔다 — main.py 와 라우터가 이미
+        # 이 모양으로 읽는다. 관측치는 나란히 얹기만 한다.
+        if observed_count is not None:
+            total["observed_count"] = observed_count
         return total
 
     def poll_all(self, category_id: str = FLEA_CATEGORY, log=None, workers: int = 12,
