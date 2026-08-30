@@ -1127,11 +1127,12 @@ class MainWindow(QMainWindow):
         fl.addLayout(r0)
         r1 = QtWidgets.QHBoxLayout()
         self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
-        self.alertBulkBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 일괄(현재계정)")
+        # 단일계정 일괄등록은 없앴다 — register_all 은 전 계정에 같은 키워드를 쓰고
+        # 라우터 capacity() 도 함대 기준이라, 한 계정만 건드리면 집계가 조용히 어긋난다.
         self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 전계정등록(전국)")
         self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
-        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkBtn); r1.addWidget(self.alertBulkAllBtn)
+        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkAllBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
         v.addWidget(form)
@@ -1253,7 +1254,6 @@ class MainWindow(QMainWindow):
         v.addWidget(self.alertLog)
 
         self.alertAddBtn.clicked.connect(self.on_alert_add)
-        self.alertBulkBtn.clicked.connect(self.on_alert_bulk)
         self.alertRefreshBtn.clicked.connect(self.on_alert_refresh)
         self.alertDelBtn.clicked.connect(self.on_alert_delete)
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
@@ -1741,14 +1741,13 @@ class MainWindow(QMainWindow):
             self._log_route(payload["route"])
         self._alert_populate(payload.get("list"))
 
-    def on_alert_bulk(self):
-        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
-        def job(log):
-            api = self._alert_api()
-            res = api.register_many(LUXURY_BRANDS, mn, mx, log=log)
-            log(f"완료 — 등록 {len(res['added'])} · 스킵 {len(res['skipped'])} · 실패 {len(res['failed'])}")
-            return api.list()
-        self._alert_run(job, self._alert_populate)
+    def _alert_routes_done(self, payload):
+        """라우터 여러 건 결과 → 경로 로그 + 목록 갱신."""
+        if not payload:
+            return
+        for r in payload.get("routes") or []:
+            self._log_route(r)
+        self._alert_populate(payload.get("list"))
 
     def on_alert_refresh(self):
         def job(log):
@@ -2118,14 +2117,33 @@ class MainWindow(QMainWindow):
         def job(log):
             res = self._router.add_many(LUXURY_BRANDS, mn, mx, core_only=co, log=log)
             return {"routes": res, "list": self._safe_alert_list(log)}
+        self._alert_run(job, self._alert_routes_done)
 
-        def done(payload):
-            if not payload:
-                return
-            for r in payload.get("routes") or []:
-                self._log_route(r)
-            self._alert_populate(payload.get("list"))
-        self._alert_run(job, done)
+    @staticmethod
+    def _condition_groups(conditions):
+        """엑셀 조건 → [(키워드들, min, max, exclude)]. 필터가 같은 행끼리 묶는다.
+
+        라우터는 한 호출에 필터 하나만 받는다. 행마다 가격·제외가 다르면 그룹이
+        갈라지고, 같으면 한 번에 들어간다."""
+        groups = {}
+        for c in conditions or []:
+            kw = str((c or {}).get("keyword") or "").strip()
+            if not kw:
+                continue
+            key = (c.get("min"), c.get("max"), tuple(c.get("exclude") or []))
+            groups.setdefault(key, [])
+            if kw not in groups[key]:
+                groups[key].append(kw)
+        return [(kws, k[0], k[1], list(k[2])) for k, kws in groups.items()]
+
+    def _route_conditions(self, conditions, core_only=False, log=None):
+        """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다."""
+        log = log or self.alertLog.append
+        out = []
+        for kws, mn, mx, excl in self._condition_groups(conditions):
+            out.extend(self._router.add_many(kws, mn, mx, excl,
+                                             core_only=core_only, log=log) or [])
+        return out
 
     def _night_factor(self):
         """야간 감속 배수 — 새벽0~7시 ×3, 늦밤22~24·이른7~9시 ×2, 그외 ×1."""
@@ -2339,7 +2357,6 @@ class MainWindow(QMainWindow):
             "체크 시 LDPlayer 정품앱이 갱신한 access 토큰을 자동 수확(WAF 우회). "
             "LDPlayer 실행+로그인 상태면 별도 설정 불필요.")
         self._notify = self._load_notify()
-        self.auto_conditions = []
 
         s0 = QtWidgets.QHBoxLayout(); s0.setSpacing(8)
         s0.addWidget(QtWidgets.QLabel("가격"))
@@ -2707,15 +2724,32 @@ class MainWindow(QMainWindow):
             if not p:
                 return
             try:
-                self.auto_conditions = load_conditions_from_excel(p)
-                cats = {c.get("category") or "-" for c in self.auto_conditions}
-                self.alertLog.append(
-                    f"[엑셀] 조건 {len(self.auto_conditions)}개 로드 (대분류 {len(cats)}종)")
-                QtWidgets.QMessageBox.information(
-                    dlg, "불러옴", f"조건 {len(self.auto_conditions)}개 로드됨.")
-                dlg.accept()
+                conds = load_conditions_from_excel(p)
             except Exception as e:
                 QtWidgets.QMessageBox.warning(dlg, "오류", f"엑셀 로드 오류:\n{e}")
+                return
+            if not self._router:
+                self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
+            cats = {c.get("category") or "-" for c in conds}
+            self.alertLog.append(
+                f"[엑셀] 조건 {len(conds)}개 로드 (대분류 {len(cats)}종) — 라우터로 배정")
+            # 추가키워드·끌올일수·대분류는 라우터가 표현하지 못한다. 앱 알림은 그
+            # 셋을 애초에 못 받고, 스윕행 키워드는 고급 패널의 추가/끌올 값을 쓴다.
+            dropped = sorted({n for c in conds for n, v in
+                              (("추가키워드", c.get("extra")), ("끌올일수", c.get("days")),
+                               ("대분류", c.get("category"))) if v})
+            if dropped:
+                self.alertLog.append(
+                    f"[엑셀] 라우터가 못 받는 항목 무시: {', '.join(dropped)}")
+            co = self._core_only()
+
+            def job(log):
+                res = self._route_conditions(conds, core_only=co, log=log)
+                return {"routes": res, "list": self._safe_alert_list(log)}
+            self._alert_run(job, self._alert_routes_done)
+            QtWidgets.QMessageBox.information(
+                dlg, "불러옴", f"조건 {len(conds)}개를 라우터로 배정 중입니다.")
+            dlg.accept()
 
         sampleBtn.clicked.connect(do_sample)
         loadBtn.clicked.connect(do_load)

@@ -136,6 +136,55 @@ if _win is not None:
                   "autoTable", "autoLog"):
         ck(f"안 옮긴 위젯 제거: {_attr}", not hasattr(_win, _attr))
     ck("자동폴링 버튼 제거", not hasattr(_win, "alertAutoPollBtn"))
+    ck("단일계정 일괄등록 제거", not hasattr(_win, "alertBulkBtn")
+       and not hasattr(_win, "on_alert_bulk"))
+    ck("엑셀 조건 캐시 제거", not hasattr(_win, "auto_conditions"))
+
+    # ── 엑셀 조건 → 라우터 (워크북 안 연다) ──
+    class _FakeRouter:
+        def __init__(self):
+            self.calls = []
+
+        def add_many(self, keywords, min_price=None, max_price=None,
+                     exclude=None, core_only=False, log=None):
+            self.calls.append((list(keywords), min_price, max_price,
+                               list(exclude or []), core_only))
+            return [{"keyword": k, "route": "app", "reason": "앱 알림 등록"}
+                    for k in keywords]
+
+    _conds = [
+        {"category": "가방", "keyword": "샤넬", "extra": ["정품"],
+         "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
+        {"category": "가방", "keyword": "구찌", "extra": [],
+         "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
+        {"category": "시계", "keyword": "롤렉스", "extra": [],
+         "exclude": [], "min": 1000000, "max": None, "days": 30},
+        {"category": "", "keyword": "", "extra": [], "exclude": [],
+         "min": None, "max": None, "days": None},          # 빈 키워드 = 버림
+    ]
+    _groups = _win._condition_groups(_conds)
+    ck("필터 같은 행은 한 그룹", len(_groups) == 2, str(_groups))
+    ck("빈 키워드 버림",
+       all(kw for g in _groups for kw in g[0]), str(_groups))
+    _g0 = next(g for g in _groups if "샤넬" in g[0])
+    ck("그룹에 두 키워드", sorted(_g0[0]) == ["구찌", "샤넬"], str(_g0))
+    ck("그룹이 행의 가격·제외를 그대로 든다",
+       (_g0[1], _g0[2], _g0[3]) == (500000, 3000000, ["레플"]), str(_g0))
+
+    _fake = _FakeRouter()
+    _real_router = _win._router
+    _win._router = _fake
+    _logged = []
+    _res = _win._route_conditions(_conds, core_only=True, log=_logged.append)
+    _win._router = _real_router
+    ck("엑셀 조건이 라우터 add_many 로 간다", len(_fake.calls) == 2,
+       str(_fake.calls))
+    ck("core_only 전달", all(c[4] is True for c in _fake.calls))
+    ck("모든 키워드 배정",
+       sorted(k for c in _fake.calls for k in c[0]) == ["구찌", "롤렉스", "샤넬"],
+       str(_fake.calls))
+    ck("라우터 결과를 돌려준다", len(_res) == 3, str(_res))
+    ck("라우터 없으면 add_many 도 없다", _win._condition_groups([]) == [])
     ck("경로 열 추가", getattr(_win, "alertTable", None) is not None
        and _win.alertTable.columnCount() == 5)
     # close() 는 부르지 않는다 — closeEvent 가 모달 확인창을 띄워 offscreen 에서 멈춘다.
