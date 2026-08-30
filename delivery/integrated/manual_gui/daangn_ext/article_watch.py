@@ -68,6 +68,9 @@ def _int(v, default=0) -> int:
         return default
 
 
+from .app_api import status_str as _status   # noqa: E402  (헬퍼와 같이 두려고 여기서 import)
+
+
 def normalize(payload: dict, article_id: str) -> dict:
     """단건 조회 응답 → 표준 dict. 사라진 매물이면 gone=True 하나만 담는다."""
     art = payload.get("article") if isinstance(payload.get("article"), dict) else payload
@@ -80,7 +83,7 @@ def normalize(payload: dict, article_id: str) -> dict:
         "gone": False,
         "title": art.get("title") or "",
         "price": _int(art.get("price")),
-        "status": art.get("status") or "",
+        "status": _status(art.get("status")),
         "status_name": art.get("status_name") or "",
         "region": art.get("display_region_name") or art.get("display_location_name") or "",
         "url": art.get("permalink") or f"https://www.daangn.com/kr/buy-sell/-{article_id}/",
@@ -256,7 +259,18 @@ class WatchStore:
         return [dict(r) for r in rows]
 
     def upsert(self, row: dict) -> None:
-        vals = [row.get(c) for c in _COLUMNS]
+        # 당근이 어떤 필드를 갑자기 객체로 주기 시작하면 sqlite 는
+        # 'Error binding parameter N' 만 던지고, 그 N 이 몇 번째 컬럼인지 찾느라
+        # 스윕이 통째로 멈춘 채 시간을 버린다. 어느 컬럼인지 이름으로 남기고
+        # 값은 JSON 으로 눌러 담아 스윕 자체는 계속 굴린다.
+        vals = []
+        for c in _COLUMNS:
+            v = row.get(c)
+            if isinstance(v, (dict, list, tuple, set)):
+                print(f"[가격추적] watch.{c} 에 {type(v).__name__} 이 들어왔습니다 "
+                      f"— 문자열로 저장합니다: {v!r:.120}")
+                v = json.dumps(v, ensure_ascii=False, default=str)
+            vals.append(v)
         placeholders = ",".join("?" * len(_COLUMNS))
         updates = ",".join(f"{c}=excluded.{c}" for c in _COLUMNS if c != "id")
         self._db.execute(

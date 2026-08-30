@@ -181,6 +181,25 @@ def collect(cfg: AppApiConfig, keyword: str, region_id: str,
     return seen, {"pages": pages, "requests": pages, "stopped_by": why}
 
 
+def status_str(v) -> str:
+    """status 를 항상 'ongoing'/'reserved'/'closed' 같은 소문자 문자열로 만든다.
+
+    당근은 같은 필드를 응답에 따라 문자열로도, {"type": "ONGOING"} 같은 객체로도
+    준다. 객체를 그대로 흘리면 watch DB 쓰기가
+    'Error binding parameter 6: type dict is not supported' 로 죽어 가격추적
+    스윕이 통째로 실패한다(운영 서버 실측).
+    """
+    if isinstance(v, dict):
+        for k in ("type", "status", "name", "value", "code"):
+            got = v.get(k)
+            if isinstance(got, str) and got:
+                return got.strip().lower()
+        return ""
+    if isinstance(v, str):
+        return v.strip().lower()
+    return "" if v is None else str(v).strip().lower()
+
+
 def to_article(doc: dict) -> dict:
     """앱 API document → 기존 파이프라인이 쓰는 매물 dict 로 정규화.
 
@@ -199,7 +218,9 @@ def to_article(doc: dict) -> dict:
         "region": doc.get("regionName", ""),
         "boostedAt": doc.get("publishedAt") or doc.get("createdAt") or "",
         "createdAt": doc.get("createdAt") or "",
-        "status": doc.get("status", ""),
+        # 응답에 따라 문자열이 아니라 {"type": "ONGOING"} 같은 객체로 온다.
+        # 그대로 흘리면 watch DB 쓰기가 sqlite 바인딩 오류로 죽는다.
+        "status": status_str(doc.get("status")),
         "category": doc.get("categoryId", ""),
         # 앱에만 있는 신호 — 시세·수요 판단에 쓴다
         "watchesCount": doc.get("watchesCount", 0),
