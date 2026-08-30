@@ -81,6 +81,69 @@ def watch_status_text(active, next_check_at, now):
     return f"추적 중 {active}건 · 다음 점검 {when}"
 
 
+STATE_ICONS = {
+    "new": "🆕 신규",
+    "tracking": "● 추적중",
+    "down": "↓ 인하",
+    "up": "↑ 인상",
+    "paused": "⏸ 추적중단",
+    "ended": "✓ 종료",
+}
+
+# 필터 버튼이 고르는 값. all 은 전부.
+LISTING_FILTERS = ("all", "new", "down", "ended")
+
+
+def _delta_text(first_price, price):
+    """최초 감지가 대비 증감. 기준선을 모르면 '-'."""
+    if not first_price or not isinstance(price, int) or not isinstance(first_price, int):
+        return "-"
+    d = price - first_price
+    if d == 0:
+        return "0원 (0.0%)"
+    pct = d * 100.0 / first_price
+    return f"{d:+,}원 ({pct:+.1f}%)"
+
+
+def _ts_text(ts):
+    import time as _t
+    if not ts:
+        return "-"
+    try:
+        return _t.strftime("%m/%d %H:%M", _t.localtime(int(ts)))
+    except Exception:
+        return "-"
+
+
+def listing_display_rows(rows, now, state_filter="all"):
+    """watch 행 목록 → 매물 표에 그릴 형태. 최초 감지 내림차순.
+
+    위젯을 모르는 순수 함수로 두어 GUI 없이 검증한다."""
+    from daangn_ext import article_watch as _aw
+    out = []
+    for r in rows or []:
+        state = _aw.state_for(r, now)
+        if state_filter in ("new", "down", "ended") and state != state_filter:
+            continue
+        out.append({
+            "id": str(r.get("id") or ""),
+            "state": state,
+            "icon": STATE_ICONS.get(state, state),
+            "keyword": r.get("keyword") or "",
+            "title": (r.get("title") or "")[:60],
+            "region": r.get("region") or "",
+            "price": r.get("price") or 0,
+            "delta_text": _delta_text(r.get("first_price"), r.get("price")),
+            "last_change_text": _ts_text(r.get("last_change")),
+            "first_seen_text": _ts_text(r.get("first_seen")),
+            "url": r.get("url") or "",
+        })
+    order = {str(r.get("id") or ""): int(r.get("first_seen") or 0)
+             for r in rows or []}
+    out.sort(key=lambda x: order.get(x["id"], 0), reverse=True)
+    return out
+
+
 def headless_watch_due(last_sweep, now, interval):
     """헤드리스 루프에서 이번 회에 스윕할 차례인지.
 
