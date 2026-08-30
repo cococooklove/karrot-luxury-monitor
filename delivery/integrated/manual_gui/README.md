@@ -58,9 +58,38 @@ IP 19/20 (쿨다운 1, 540초 후 해제)  ·  간격 1500ms (자동감속 x1.5)
 
 테스트: `python throttle_test.py`
 
+## 에뮬레이터 탭 (LDPlayer 인스턴스 관리)
+
+LDPlayer 는 인스턴스마다 독립 창을 띄우고 탭 UI 가 없다. 계정이 늘면 창이 화면을
+뒤덮으므로 앱이 대신 관리한다.
+
+- **왼쪽 그리드** — 인스턴스별 카드(썸네일·이름·상태). 3초마다 6개씩 라운드로빈으로
+  캡처하므로 인스턴스가 100개여도 한 틱 부하는 그대로다.
+- **오른쪽 탭** — 카드를 클릭한 인스턴스만 앱 안에 붙여 직접 조작. 동시 최대 4개이고
+  넘치면 가장 오래된 탭부터 자동으로 떼어낸다.
+- **안 보는 창 치우기(기본 켬)** — 탭으로 열지 않은 인스턴스 창을 화면 밖으로 보내고
+  작업표시줄에서도 감춘다. 인스턴스는 계속 돌고 썸네일도 갱신된다. 체크를 끄면 원위치.
+
+창은 종료할 때 전부 원래 상태로 되돌린다(`closeEvent` + `aboutToQuit`). 앱이 크래시로
+죽어 창이 화면 밖에 남더라도, 다음 실행 때 자동으로 찾아 되살린다(`ldwin.rescue`).
+
+Windows 전용이며 다른 OS 에서는 탭이 "Windows 전용" 안내만 띄운다.
+
+### 클라 PC 에서 한 번은 돌려볼 것
+
+```bat
+python ldwin_probe.py             :: 전체 진단(부착 테스트 6초 포함)
+python ldwin_probe.py --no-embed  :: 창 안 건드리고 조회만
+```
+
+창 핸들 매칭 / 썸네일 캡처 / 부착·복구를 실제 LDPlayer 로 확인하고 PASS·FAIL 로
+찍는다. 맥에서는 검증할 수 없는 부분이라 배포 전 1회 실행이 원칙.
+
 ## 테스트
 
 ```bash
+../../../.venv/bin/python ldwin_test.py      # 창 핸들 매칭·파싱 10항목, OS 무관
+../../../.venv/bin/python ldwin_sim_test.py # 가짜 Win32 로 창 복구 상태머신 10항목, OS 무관
 ../../../.venv/bin/python notify_test.py     # 알림(텔레그램/시트) 54항목, 네트워크 거의 불필요
 ../../../.venv/bin/python robust_test.py     # 재시도 소진 처리 12항목, 오프라인
 QT_QPA_PLATFORM=offscreen ../../../.venv/bin/python full_test.py       # 전체 18항목(라이브)
