@@ -4234,16 +4234,18 @@ def _run_headless():
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
         # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
-        # 간격과 예산은 반드시 같은 값에서 나와야 한다(어긋나면 하루 요청량이 틀어진다).
-        sweep_sec = policy.sweep_ms() // 1000
         if watch_tracker and watch_budget and \
-                headless_watch_due(last_watch_sweep, now, sweep_sec):
+                headless_watch_due(last_watch_sweep, now, policy.sweep_ms() // 1000):
             last_watch_sweep = now
             try:
                 dropped = watch_tracker.enforce_cap()
                 if dropped:
                     log(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
-                budget = watch_sweep_budget(watch_store.active_count(), sweep_sec)
+                # 예산은 GUI(_WatchSweepThread)와 같이 생짜 WATCH_SWEEP_INTERVAL 로 계산한다.
+                # 스윕 "빈도"만 야간에 느려지고, 한 번 돌 때의 회차 예산 크기는 안 커진다 —
+                # GUI 와 다르게 계산하면 두 런타임이 다시 갈라진다.
+                budget = watch_sweep_budget(watch_store.active_count(),
+                                            WATCH_SWEEP_INTERVAL)
                 if budget:
                     watch_budget.reload()
                     lines = watch_event_lines(
