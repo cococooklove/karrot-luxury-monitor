@@ -23,6 +23,10 @@ LDPlayer 다중관리자에서 인스턴스 N개 생성 → 각각에 `.ldbk` �
 - 5개 .ldbk = 인스턴스 5개 (계정 6,7,9,11,13 그룹)
 
 ## 2. adb 포트 확인
+> LDPlayer 설치 경로는 서버마다 다르다(예: 현행 운영 서버는 `D:\LDPlayer\LDPlayer9`).
+> 아래 명령의 경로는 실제 설치 위치로 바꿔 쓸 것. 코드(`ld_autoharvest`)는
+> C:\LDPlayer, D:\LDPlayer, C:\Program Files(x86)\LDPlayer 등을 자동탐색한다.
+
 LDPlayer adb.exe 경로: `C:\LDPlayer\LDPlayer9\adb.exe`
 ```
 "C:\LDPlayer\LDPlayer9\adb.exe" devices

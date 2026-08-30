@@ -7,8 +7,9 @@
 KarrotMonitor.exe        ← GitHub Actions 아티팩트
 settings.txt             ← 프록시/속도 (네가 채움)
 notify.json              ← 텔레그램 알림 (네가 채움)
-conditions.xlsx          ← 검색 조건(명품 키워드/지역/가격) (네가 채움, 선택)
 ```
+(선택) 검색 조건 엑셀: exe 옆에 두는 파일이 아니라, 클라가 `매물 감시` 탭 `고급` →
+`엑셀 조건` 다이얼로그에서 직접 고르거나 `샘플 엑셀 저장`으로 새로 만든다.
 + 클라 PC에 **LDPlayer + .ldbk 복원**(계정 로그인 상태). exe 가 LDPlayer 감지→토큰 자동수확.
 
 ## 네가 배포 전 채울 값
@@ -20,7 +21,7 @@ conditions.xlsx          ← 검색 조건(명품 키워드/지역/가격) (네�
 http://user:pass@host1:port    ← 3줄~: 프록시 (밴분산, 한 줄에 하나)
 http://user:pass@host2:port
 ```
-(프록시 없으면 3줄부터 비움. 계정별 프록시는 앱 '계정+프록시 추가'서 accounts.json 에도 가능)
+(프록시 없으면 3줄부터 비움. 계정별 프록시는 앱 '계정+프록시'서 accounts.json 에도 가능)
 
 ### 2. notify.json (텔레그램)
 ```json
@@ -29,14 +30,14 @@ http://user:pass@host2:port
 봇토큰 = @BotFather, 채팅ID = 봇에게 메시지 후 getUpdates. (구글시트 쓰면 sheet_url/cred)
 
 ### 3. 검색 조건 (명품 키워드/지역/가격)
-GUI '자동' 탭서 직접 입력하거나 conditions.xlsx 로 다중조건:
+GUI '매물 감시' 탭 '고급'서 직접 입력하거나 '엑셀 조건' 다이얼로그로 conditions.xlsx 다중조건:
 - 키워드(예: 샤넬, 루이비통), 추가/제외어, 최소~최대 가격, 끌올 n일
 - 지역: 전국(동단위) 또는 선택 동네
 - 명품 브랜드 사전은 `daangn_ext`/`parse_luxury` 에 내장 — 키워드만 지정하면 필터됨
 
 ## 클라 사용 (제로 설정 — 프로그램만 실행)
 1. `KarrotMonitor.exe` 더블클릭
-2. '자동' 탭 → '자동 모니터 시작'
+2. '매물 감시' 탭 → '▶ 감시 시작'
    - **LDPlayer 자동 부팅** (ldconsole 로 인스턴스 기동 — 클라가 LDPlayer 안 켜도 됨)
    - '토큰 갱신' 기본 체크됨 → LDPlayer서 access 자동수확(WAF 우회)
    - 신규 명품 매물 → 결과 테이블 + 텔레그램 알림
@@ -45,7 +46,7 @@ GUI '자동' 탭서 직접 입력하거나 conditions.xlsx 로 다중조건:
 > 운영자 1회 사전준비(클라 PC): LDPlayer 설치 + .ldbk 로 인스턴스 복원(계정 로그인).
 > 이후 클라는 exe 만 실행 — LDPlayer 를 직접 열 필요 없음(exe 가 부팅).
 
-## 키워드 알림 탭 (무인 운영 핵심)
+## `매물 감시` 탭 (무인 운영 핵심)
 토큰만으로 명품 신규매물 실시간 수신 — 앱/LDPlayer 상시 켜둘 필요 없음.
 
 - **실시간 헬스줄**: 토큰(유효N·임박만료) / 자동수확(다음) / 자동폴링(주기·마지막·신규) / 텔레그램·시트 — 한 눈에.

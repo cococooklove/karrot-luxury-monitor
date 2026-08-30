@@ -11,9 +11,9 @@ scrap_area_code.py: 법정동 데이터를 이용해 당근에 요청하여 OUT.
 scrap_area_check.py: OUT.json 정합성 체크
 ```
 
-## 알림 설정 (자동 모니터)
+## 알림 설정 (매물 감시)
 
-`자동 검색` 탭 → `알림 설정` 버튼.
+`매물 감시` 탭 → `고급` 안 `알림 설정` 버튼.
 
 | 항목 | 설명 |
 |---|---|
@@ -105,4 +105,4 @@ QT_QPA_PLATFORM=offscreen ../../../.venv/bin/python gui_func_test.py   # GUI 14�
 > 당근은 새 세션 초기 요청에 **빈 페이지**를 응답한다(소프트차단).
 > `robust.py` 가 재시도로 뚫으며, 한도(`max_retry=45`)를 소진하면 `meta["exhausted"]` 로 표시한다.
 > 소진을 "0건" 으로 흘리면 조용한 누락이 되므로 `collect_region` 이 새 IP 로 재시도하고,
-> 그래도 실패하면 `stats["missed"]` 에 남겨 자동 모니터 로그에 경고로 뜬다.
+> 그래도 실패하면 `stats["missed"]` 에 남겨 매물 감시 로그에 경고로 뜬다.
