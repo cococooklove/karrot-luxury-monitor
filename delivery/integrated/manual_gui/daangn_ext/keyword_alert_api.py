@@ -147,14 +147,24 @@ class KeywordAlertAPI:
                 failed.append((kw, str(e)[:60])); log(f"  {kw}: 실패 {str(e)[:40]}")
         out = {"added": added, "skipped": skipped, "failed": failed}
         if failed:
-            # 실패가 하나라도 있을 때만 이 계정이 실제로 몇 개를 들고
-            # 있는지 다시 센다 — 성공 경로엔 요청을 하나도 더 안 태운다.
+            # 실패가 하나라도 있으면 이 계정의 실 보유수를 함께 넘긴다.
             # 차단 키워드인지 한도 초과인지 반환값만으로는 구분 못 하니
-            # 추측하지 않고, 서버가 돌려주는 진짜 보유수를 그대로 넘긴다.
-            try:
-                out["account_count"] = len(self.keywords())
-            except Exception:
-                pass
+            # 추측하지 않고, 서버가 들고 있는 진짜 개수를 라우터에 넘긴다.
+            #
+            # skip_existing 경로(라우터가 쓰는 유일한 경로)에서는 이미
+            # 답을 갖고 있다: existing 은 이 함수 진입 때 받아온 계정의 전체
+            # 목록이고 added 는 그 뒤 이 호출이 새로 넣은 것뿐이다 → 지금
+            # 보유수 = len(existing)+len(added). 여기서 목록을 다시 조회하면
+            # 차단 키워드 한 개가 전 계정에 실패하는 가장 흔한 경로에서
+            # 요청이 계정마다 하나씩 더 늘어난다(33~50%).
+            if skip_existing:
+                out["account_count"] = len(existing) + len(added)
+            else:
+                # existing 을 안 받아온 경우에만 실측이 필요하다.
+                try:
+                    out["account_count"] = len(self.keywords())
+                except Exception:
+                    pass
         return out
 
     # ── 삭제 ──
