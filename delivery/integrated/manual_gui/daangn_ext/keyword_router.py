@@ -72,7 +72,7 @@ class KeywordRouter:
         keyword = str(keyword or "").strip()
         now = int(time.time())
         if not keyword:
-            return {"keyword": keyword, "route": ROUTE_SWEEP, "reason": "빈 키워드"}
+            return {"keyword": keyword, "route": None, "reason": "빈 키워드"}
 
         if self.capacity()["free"] <= 0:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
@@ -84,10 +84,13 @@ class KeywordRouter:
         except Exception as e:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
                                   f"등록 실패: {str(e)[:60]}", log)
-        if not res.get("added") and res.get("failed"):
-            # 차단 키워드거나 전 계정에서 거절됐다. 스윕은 이 제약을 안 받는다.
+        # added 든 skipped 든 하나는 있어야 실제로 등록된 것이다. skipped 는 이미
+        # 그 계정에 등록돼 있다는 뜻이라 성공으로 친다. 전부 0 이면 유효 계정이
+        # 없었다는 뜻인데, 이때 app 으로 표시하면 슬롯만 먹고 아무데서도 감시되지
+        # 않는다 — 느리더라도 스윕이 낫다.
+        if not (res.get("added") or res.get("skipped")):
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
-                                  "앱 등록 실패(차단 키워드 등)", log)
+                                  "앱 등록 실패(차단 키워드·유효 계정 없음)", log)
 
         self.queue.remove(keyword)
         self._routes[keyword] = {"route": ROUTE_APP, "reason": "앱 알림 등록",
