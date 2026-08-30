@@ -4172,13 +4172,15 @@ class MainWindow(QMainWindow):
         # (체크박스와 무관하게 True — 자동/수동 동일 데이터소스)
         adaptive = True
 
+        # 토큰 갱신은 실패 시 모달을 띄운다. 모달이 중첩 이벤트루프를 도는 동안
+        # 버튼이 살아 있으면 두 번째 작업이 재진입으로 시작될 수 있다 → 먼저 잠근다.
+        self._enter_task()
+        self.clearItemList()
+
         # 검색 전 토큰 갱신(옵션)
         access_token = None
         if self.tokenRefreshCheck.isChecked():
             access_token = self._refresh_tokens()
-
-        self._enter_task()
-        self.clearItemList()
 
         try:
             tasks = [
@@ -4347,14 +4349,23 @@ class MainWindow(QMainWindow):
         # 화면에 입력한 추가/제외 키워드와 토큰 갱신 설정을 엑셀 조건에도 그대로 태운다.
         # (예전엔 여기서 빠져 있어 같은 조건인데 수동 검색과 결과가 달랐고,
         #  adaptive 가 False 라 구단위 분할이 없어 상한 290 건에서 잘렸다.)
+        # 엑셀은 '전국' 한 칸이 전국 동단위로 펼쳐진다. 게다가 adaptive 경로는 지역마다
+        # 가격분할을 돌리므로 요청 수가 곱으로 늘어난다 → 수동 검색과 같이 규모를 먼저 알린다.
+        total_areas = sum(len(t["areas"]) for t in tasks)
+        if not self.ask(
+            f"{len(tasks)}개 조건 × 총 {total_areas}개 지역에서 검색을 시작합니다.\n"
+            "지역이 많으면 계정 하루 요청 상한을 넘길 수 있습니다."
+        ):
+            return
+
+        self._enter_task()          # 토큰 갱신 모달 중 재진입 방지 — on_search 와 같은 이유
+        self.clearItemList()
+
         extra = self._split_keywords(self.extraEdit.text())
         exclude = self._split_keywords(self.excludeEdit.text())
         access_token = None
         if self.tokenRefreshCheck.isChecked():
             access_token = self._refresh_tokens()
-
-        self._enter_task()
-        self.clearItemList()
 
         try:
             tradeable = self.ui.onlyTradeableCheck.isChecked()
