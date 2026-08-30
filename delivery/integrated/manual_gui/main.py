@@ -2722,7 +2722,7 @@ class MainWindow(QMainWindow):
 
     def on_auto_excel_clicked(self):
         """엑셀 조건 — 형식 안내 팝업 + 샘플 저장 + 파일 불러오기."""
-        from daangn.auto_monitor import load_conditions_from_excel
+        from daangn.sweep_engine import load_conditions_from_excel
         dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("엑셀 조건 불러오기"); dlg.resize(620, 400)
         v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
         v.addWidget(QtWidgets.QLabel(
