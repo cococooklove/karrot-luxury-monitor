@@ -256,21 +256,48 @@ def find_ldconsole(adb_bin=None):
     return None
 
 
-def ld_list(console):
-    """ldconsole list2 → [(index, name, is_running)]."""
+def ld_rows(console):
+    """ldconsole list2 → [{index, name, started, pids}].
+
+    list2: index,name,topWindowHandle,bindWindowHandle,androidStarted,pid,vboxPid,…
+
+    started(=androidStarted)와 **pid 를 따로** 본다. 이 둘이 갈라지는 상태가
+    이 코드의 핵심이다: VM 은 RUNNING 이고 dnplayer 프로세스도 있는데 게스트
+    커널이 안 떠서 adb 기기가 영영 안 붙는 hang(= started 0 · pid 있음).
+    그 상태에서 LDPlayer 는 그 인스턴스를 '이미 실행중'으로 보고 launch 를
+    조용히 무시하므로, pid 를 봐야 quit 이 먼저 필요하다는 걸 알 수 있다."""
     try:
         p = subprocess.run([console, "list2"], capture_output=True, timeout=20,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        rows = []
-        for line in p.stdout.decode("utf-8", "ignore").splitlines():
-            f = line.split(",")
-            if len(f) >= 2 and f[0].strip().lstrip("-").isdigit():
-                # list2: index,name,top_hwnd,bind_hwnd,android_started(0/1),pid,...
-                running = len(f) >= 5 and f[4].strip() not in ("0", "", "-1")
-                rows.append((f[0].strip(), f[1].strip(), running))
-        return rows
+        out = p.stdout.decode("utf-8", "ignore")
     except Exception:
         return []
+    rows = []
+    for line in out.splitlines():
+        f = [x.strip() for x in line.split(",")]
+        if len(f) < 2 or not f[0].lstrip("-").isdigit():
+            continue
+
+        def _pid(i):
+            try:
+                v = int(f[i])
+            except (IndexError, ValueError):
+                return 0
+            return v if v > 0 else 0
+
+        rows.append({
+            "index": f[0],
+            "name": f[1],
+            "started": len(f) >= 5 and f[4] not in ("0", "", "-1"),
+            # dnplayer pid 와 vbox pid — 둘 중 하나라도 살아 있으면 프로세스가 있다.
+            "pids": [x for x in (_pid(5), _pid(6)) if x],
+        })
+    return rows
+
+
+def ld_list(console):
+    """ldconsole list2 → [(index, name, is_running)]. (기존 호출자 호환)"""
+    return [(r["index"], r["name"], r["started"]) for r in ld_rows(console)]
 
 
 def ld_launch(console, index):
@@ -291,6 +318,22 @@ def ld_quit(console, index):
         return False
 
 
+def ld_kill_pid(pid):
+    """quit 이 안 먹을 때의 최후 수단. 비대화형 세션(작업 스케줄러·서비스)에서
+    보낸 quit 은 대화형 데스크톱 세션이 소유한 프로세스를 못 죽인다. 실패해도
+    예외를 내지 않는다 — 죽었는지는 호출자가 list2 로 확인한다."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], timeout=20,
+                           capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            os.kill(int(pid), 9)
+        return True
+    except Exception:
+        return False
+
+
 # ── 함대 기동 정책 ───────────────────────────────────────────────────────────
 # 한 사이클(수확 1틱)에 기동에 쓸 수 있는 총 시간. 6대 × 최대 180s + 간격이면
 # 20분 폴링 주기를 통째로 잡아먹고 호출자를 물린다. 예산을 넘기면 남은 인스턴스는
@@ -305,6 +348,63 @@ PROBE_TIMEOUT = 8
 # 인덱스별 연속 기동 실패 횟수. 계속 실패하는 인스턴스를 부팅 순서 뒤로 미뤄
 # 멀쩡한 인스턴스가 예산을 굶지 않게 한다(고장 1대가 나머지를 영구 차단하는 걸 막음).
 _BOOT_FAILS = {}
+# quit 이 실제로 먹어 프로세스가 사라질 때까지 기다리는 상한. 안 먹는 quit 이
+# 호출자를 물면 안 되므로 반드시 유한하다.
+QUIT_WAIT = 40
+# taskkill 로 강제 종료한 뒤 사라짐을 확인하는 상한.
+KILL_WAIT = 15
+
+
+def _row_of(console, idx):
+    for r in ld_rows(console):
+        if str(r["index"]) == str(idx):
+            return r
+    return None
+
+
+def _wait_process_gone(console, idx, limit):
+    """list2 가 그 인덱스에 대해 pid/vboxPid 를 더는 보고하지 않을 때까지 대기.
+
+    '프로세스가 사라졌다'의 근거를 list2 자신에게서 얻는다 — 인덱스로 바로 물어볼
+    수 있고(serial 매핑 불필요) LDPlayer 가 launch 를 무시할지 판단하는 것과
+    같은 정보원이다. 반환: 정말 사라졌는가."""
+    waited = 0
+    while True:
+        r = _row_of(console, idx)
+        if r is None or (not r["pids"] and not r["started"]):
+            return True
+        if waited >= limit:
+            return False
+        time.sleep(3)
+        waited += 3
+
+
+def _force_down(console, idx, name, log):
+    """인스턴스 프로세스를 확실히 내린다. 반환: 정말 내려갔는가.
+
+    **launch 전에 반드시 이걸 통과해야 한다.** dnplayer 프로세스가 남아 있으면
+    LDPlayer 는 그 인스턴스를 이미 실행중으로 보고 `launch --index N` 을 조용히
+    무시하며 성공을 반환한다(클라 서버에서 확인: launch 후 90초, 새 프로세스도
+    새 adb 기기도 나타나지 않음). 확인 없이 켜면 함대는 영원히 죽어 있다."""
+    r = _row_of(console, idx)
+    if r is None or (not r["pids"] and not r["started"]):
+        return True
+    ld_quit(console, idx)
+    if _wait_process_gone(console, idx, QUIT_WAIT):
+        return True
+    # quit 이 안 먹었다 — 비대화형 세션에서 보낸 quit 은 대화형 데스크톱 세션이
+    # 소유한 프로세스를 못 죽인다. pid 직접 종료로 승격.
+    r = _row_of(console, idx) or {}
+    pids = r.get("pids") or []
+    if pids:
+        log(f"[LDPlayer] {name}(idx {idx}) quit 무반응 → pid {pids} 강제 종료")
+        for p in pids:
+            ld_kill_pid(p)
+        if _wait_process_gone(console, idx, KILL_WAIT):
+            return True
+    log(f"[LDPlayer] {name}(idx {idx}) 프로세스가 안 내려갑니다 —"
+        " 이 상태의 launch 는 무시되므로 건너뜁니다(다음 주기 재시도)")
+    return False
 
 
 def _responsive(adb_bin, serial, timeout=PROBE_TIMEOUT):
@@ -348,14 +448,21 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
     만료된 채 방치됐다(= 유효계정 0). 그래서 '기기 존재'가 아니라 ldconsole list2 의
     **인스턴스별 androidStarted** 로 판단한다.
 
+    인스턴스는 **세 상태**로 나뉜다(전부 list2 가 그 인덱스에 대해 직접 알려준다):
+      1) started        → adb 가 대답하면 그대로 둔다.
+      2) !started, pid 있음 → hang. VM 은 RUNNING 이고 dnplayer 도 살아 있는데
+         게스트 커널이 안 떠 adb 기기가 영영 안 붙는다. **이 상태에서 launch 는
+         no-op 이다** — LDPlayer 는 이미 실행중으로 보고 조용히 무시한다. 반드시
+         quit(안 먹으면 pid 강제 종료) → 프로세스 소멸 확인 → launch 순서.
+      3) !started, pid 없음 → 그냥 launch.
+
     인덱스→serial 매핑은 쓰지 않는다. list2 에는 adb 포트/serial 필드가 없고
     이 코드베이스 어디에도 인덱스로 serial 을 계산하는 곳이 없다. 그래서
-      - 무엇을 켤지는 오직 list2 의 자기 인덱스 정보(androidStarted)로 정하고,
+      - 무엇을 켤지·먼저 죽일지는 오직 list2 의 자기 인덱스 정보(started/pid)로 정하고,
       - serial 은 '대답하는 기기 집합'으로만 다룬다(어느 인덱스 것인지 묻지 않는다).
-    유일한 예외는 **응답하는 기기가 하나도 없는데 실행중이라는 인스턴스는 있는**
-    경우다. 그때는 어느 것이 hang 인지 모호하지 않다(전부다) → quit 후 재기동.
-    부분 결손(일부만 무응답)은 대상을 특정할 수 없으므로 크게 남기기만 하고
-    건드리지 않는다 — 잘못 지목해 멀쩡히 돌던 인스턴스를 죽이는 게 더 나쁘다.
+    started 인데 함대 응답이 0 인 경우도 전부 hang 으로 본다(지목이 모호하지 않다).
+    부분 결손(started 인데 일부만 응답)은 대상을 특정할 수 없으므로 크게 남기기만
+    하고 건드리지 않는다 — 잘못 지목해 멀쩡히 돌던 인스턴스를 죽이는 게 더 나쁘다.
 
     동시 기동은 VM 은 RUNNING 인데 게스트 커널이 안 뜨는 하드 실패다 → **순차 기동**."""
     log = log or (lambda m: None)
@@ -366,18 +473,24 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
         if not live:
             log("[LDPlayer] ldconsole.exe 못찾음 — LDPlayer 설치경로 확인")
         return live
-    insts = ld_list(console)
+    insts = ld_rows(console)
     if not insts:
         if not live:
             log("[LDPlayer] 인스턴스 없음 — .ldbk 복원 필요")
         return live
 
-    started = [(i, n) for i, n, r in insts if r]
-    need = [(i, n, False) for i, n, r in insts if not r]        # androidStarted=0
+    started = [r for r in insts if r["started"]]
+    # (index, name, 프로세스가 남아 있어 quit 이 먼저 필요한가)
+    need = [(r["index"], r["name"], bool(r["pids"]))
+            for r in insts if not r["started"]]
+    _hung = sum(1 for _i, _n, h in need if h)
+    if _hung:
+        log(f"[LDPlayer] 프로세스는 살아 있는데 안드로이드가 안 뜬 인스턴스 {_hung}개 —"
+            " launch 가 무시되는 상태라 종료부터 합니다")
     if started and not live:
         # 응답하는 기기가 0 → 실행중이라는 것들은 전부 hang. 지목이 모호하지 않다.
         log(f"[LDPlayer] 실행중이라는 {len(started)}개가 모두 무응답 — 전부 재기동합니다")
-        need += [(i, n, True) for i, n in started]
+        need += [(r["index"], r["name"], True) for r in started]
     elif len(live) < len(started):
         log(f"[LDPlayer] 실행중 {len(started)}개 중 {len(live)}개만 응답 —"
             " 무응답분은 인덱스를 특정할 수 없어 이번 사이클엔 건드리지 않습니다")
@@ -403,16 +516,16 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
                 f" 남은 {len(need) - pos}개는 다음 수확 주기에 이어서 올립니다")
             break
         dead.clear()        # 재기동하면 같은 serial 이 다시 살아날 수 있다
-        if hung:
-            log(f"[LDPlayer] {name}(idx {idx}) 무응답 → 종료 후 재기동")
-            ld_quit(console, idx)
-            time.sleep(8)
-        ok = False
+        ok = down = False
         for attempt in range(retry + 1):
             if attempt:
                 log(f"[LDPlayer] {name}(idx {idx}) 부팅 실패 → 재기동 {attempt}/{retry}")
-                ld_quit(console, idx)
-                time.sleep(8)
+            # hang 이면 첫 시도 전에, 재시도면 매번 — 프로세스가 정말 사라진 것을
+            # 확인한 뒤에만 launch 한다. 안 그러면 launch 는 조용한 no-op 이다.
+            if hung or attempt:
+                down = _force_down(console, idx, name, log)
+                if not down:
+                    break       # 프로세스가 안 죽는다 → 이 인스턴스는 이번 주기 포기
             ld_launch(console, idx)
             waited = 0
             while waited < boot_wait and time.time() < deadline:

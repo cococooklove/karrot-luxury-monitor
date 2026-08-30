@@ -1,15 +1,21 @@
 """함대 전체 기동 보장 — ensure_ldplayer / _harvest_all_locked.
 
 지키는 것:
-  A. 기기가 하나라도 있으면 끝내지 않는다. list2 의 인스턴스별 androidStarted 로
-     미기동분을 전부 골라 켠다(오늘 클라 서버: 6대 중 1대만 살아 5대 방치).
+  A. 기기가 하나라도 있으면 끝내지 않는다. list2 의 인스턴스별 상태로 미기동분을
+     전부 골라 켠다(오늘 클라 서버: 6대 중 1대만 살아 5대 방치).
   B. adb devices 목록은 증거가 아니다 — 대답(shell echo)해야 살아있는 것으로 센다.
-  C. 순차 기동(동시 launch 는 게스트 커널이 안 뜨는 하드 실패) + gap 유지.
-  D. 예산 상한 — 6대 × 180s 로 호출자를 물리지 않는다. 남은 건 다음 틱이 잇는다.
-  E. 고장난 인스턴스가 나머지를 막지 않는다 + 사이클당 재기동 횟수 상한 +
+  C. **3상태 분류**: started(그대로) / 프로세스는 있는데 안드로이드 미기동(quit
+     먼저, 소멸 확인 후 launch) / 아무것도 없음(그냥 launch).
+     프로세스가 살아 있으면 LDPlayer 는 launch 를 조용히 무시한다 — 가짜 함대가
+     그 동작을 그대로 흉내내므로, quit 을 빠뜨리면 이 스위트가 실패한다.
+  D. 순차 기동(동시 launch 는 게스트 커널이 안 뜨는 하드 실패) + gap 유지.
+  E. 예산 상한 — 6대 × 180s 로 호출자를 물리지 않는다. 남은 건 다음 틱이 잇는다.
+  F. 고장난 인스턴스가 나머지를 막지 않는다 + 사이클당 재기동 횟수 상한 +
      연속 실패는 다음 사이클 후순위(예산 선점 방지).
-  F. ldconsole 없음 / 인스턴스 0 이면 예전과 같이 행동한다.
-  G. _harvest_all_locked 이 함대 보장을 거쳐 수확한다. 프로세스 락은 그대로.
+  G. quit 이 안 먹으면 pid 강제 종료로 승격하고, 그래도 안 죽으면 건너뛴다
+     (안 죽은 채로 launch 하면 no-op 이라 아무 의미가 없다). 어느 경우도 무한대기 없음.
+  H. ldconsole 없음 / 인스턴스 0 이면 예전과 같이 행동한다.
+  I. _harvest_all_locked 이 함대 보장을 거쳐 수확한다. 프로세스 락은 그대로.
 
 이 기계엔 adb/ldconsole 이 없다 — 콘솔/adb 호출을 전부 가짜로 주입한다.
 가짜 serial 문자열("dev-3" 등)은 일부러 포트 산술과 무관하게 지었다: 코드가
@@ -46,34 +52,49 @@ class Clock:
 
 
 # ── 가짜 함대 ────────────────────────────────────────────────────────────────
-class Fleet:
-    """states: 'up'(부팅+응답), 'hung'(adb 기기로 보이지만 무응답), 'down'(없음)."""
+# 상태:
+#   'up'      : androidStarted=1 · pid 있음 · adb 기기 응답
+#   'zombie'  : androidStarted=0 · pid 있음 · adb 기기 **없음**  ← 클라 서버 실상태
+#   'ghost'   : androidStarted=1 · pid 있음 · adb 기기는 있는데 무응답
+#   'down'    : 아무것도 없음
+_PROC = ("up", "zombie", "ghost")
+_DEV = ("up", "ghost")
 
-    def __init__(self, clock, n=6, up=(), hung=(), broken=(), boot_delay=20):
+
+class Fleet:
+    def __init__(self, clock, n=6, up=(), zombie=(), ghost=(), broken=(),
+                 boot_delay=20, quit_fails=(), kill_fails=()):
         self.clock = clock
         self.n = n
-        self.broken = set(broken)
+        self.broken = set(broken)              # launch 해도 안드로이드가 안 뜬다
+        self.quit_fails = set(quit_fails)      # ldconsole quit 이 안 먹는다
+        self.kill_fails = set(kill_fails)      # taskkill 도 안 먹는다
         self.boot_delay = boot_delay
         self.state = {}
         for i in range(n):
-            self.state[i] = "up" if i in up else ("hung" if i in hung else "down")
-        self.ready_at = {}          # idx -> 부팅 완료 시각
-        self.calls = []             # ("launch"|"quit", idx) 순서
-        self.probes = []            # 응답 확인이 실제로 나갔는지
+            self.state[i] = ("up" if i in up else "zombie" if i in zombie
+                             else "ghost" if i in ghost else "down")
+        self.ready_at = {}
+        self.calls = []          # ("launch"|"quit"|"kill", idx)
+        self.probes = []
+        self.noop_launches = []  # 프로세스가 살아 있는 채로 들어온 launch(= 무시됨)
 
     def serial(self, i):
         return f"dev-{i}"
 
+    def pid(self, i):
+        return 9000 + i
+
     def _settle(self):
         for i, t in list(self.ready_at.items()):
             if self.clock.t >= t:
-                self.state[i] = "up"
+                self.state[i] = "zombie" if i in self.broken else "up"
                 del self.ready_at[i]
 
     # -- 주입 대상 --
     def list_instances(self, adb_bin):
         self._settle()
-        return [self.serial(i) for i in range(self.n) if self.state[i] in ("up", "hung")]
+        return [self.serial(i) for i in range(self.n) if self.state[i] in _DEV]
 
     def responsive(self, adb_bin, serial, timeout=None):
         self._settle()
@@ -83,21 +104,43 @@ class Fleet:
                 return self.state[i] == "up"
         return False
 
-    def ld_list(self, console):
+    def ld_rows(self, console):
         self._settle()
-        # ldconsole list2 → (index, name, androidStarted)
-        return [(str(i), f"LD-{i}", self.state[i] in ("up", "hung")) for i in range(self.n)]
+        out = []
+        for i in range(self.n):
+            st = self.state[i]
+            booting = i in self.ready_at
+            out.append({"index": str(i), "name": f"LD-{i}",
+                        "started": st in ("up", "ghost"),
+                        "pids": [self.pid(i)] if (st in _PROC or booting) else []})
+        return out
 
     def ld_launch(self, console, idx):
         i = int(idx)
         self.calls.append(("launch", i))
-        if i not in self.broken and self.state[i] != "up":
-            self.ready_at[i] = self.clock.t + self.boot_delay
+        self._settle()
+        if self.state[i] in _PROC or i in self.ready_at:
+            # LDPlayer 실동작: 프로세스가 살아 있으면 '이미 실행중'으로 보고
+            # 아무것도 하지 않은 채 성공을 반환한다.
+            self.noop_launches.append(i)
+            return True
+        self.ready_at[i] = self.clock.t + self.boot_delay
         return True
 
     def ld_quit(self, console, idx):
         i = int(idx)
         self.calls.append(("quit", i))
+        if i in self.quit_fails:
+            return True                  # 성공을 반환하지만 실제로는 안 죽는다
+        self.state[i] = "down"
+        self.ready_at.pop(i, None)
+        return True
+
+    def kill_pid(self, pid):
+        i = int(pid) - 9000
+        self.calls.append(("kill", i))
+        if i in self.kill_fails:
+            return True
         self.state[i] = "down"
         self.ready_at.pop(i, None)
         return True
@@ -105,24 +148,31 @@ class Fleet:
     def launches(self):
         return [i for k, i in self.calls if k == "launch"]
 
+    def first(self, kind, i):
+        try:
+            return self.calls.index((kind, i))
+        except ValueError:
+            return -1
+
 
 def run(fleet, clock, console="C:/fake/ldconsole.exe", **kw):
-    """ensure_ldplayer 를 가짜 함대 위에서 돌린다. 로그 줄 리스트도 돌려준다."""
     logs = []
-    saved = (ld.time, ld.list_instances, ld._responsive, ld.ld_list,
-             ld.ld_launch, ld.ld_quit, ld.find_ldconsole)
+    names = ("time", "list_instances", "_responsive", "ld_rows", "ld_launch",
+             "ld_quit", "ld_kill_pid", "find_ldconsole")
+    saved = {n: getattr(ld, n) for n in names}
     ld.time = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     ld.list_instances = fleet.list_instances
     ld._responsive = fleet.responsive
-    ld.ld_list = fleet.ld_list
+    ld.ld_rows = fleet.ld_rows
     ld.ld_launch = fleet.ld_launch
     ld.ld_quit = fleet.ld_quit
+    ld.ld_kill_pid = fleet.kill_pid
     ld.find_ldconsole = lambda a=None: console
     try:
         out = ld.ensure_ldplayer("adb", log=logs.append, **kw)
     finally:
-        (ld.time, ld.list_instances, ld._responsive, ld.ld_list,
-         ld.ld_launch, ld.ld_quit, ld.find_ldconsole) = saved
+        for n, v in saved.items():
+            setattr(ld, n, v)
     return out, logs
 
 
@@ -150,27 +200,52 @@ ck("quit 0회", not any(k == "quit" for k, _ in f.calls))
 ck("전원 반환", len(out) == 6, str(out))
 ck("추가 기동 불필요를 남긴다", any("추가 기동 불필요" in x for x in logs), str(logs))
 
+print("=== C. 3상태 분류 — 클라 서버 실상태(1대 정상 · 5대 프로세스만 살아있음) ===")
+reset_fails()
+c = Clock()
+f = Fleet(c, n=6, up=(0,), zombie=(1, 2, 3, 4, 5))
+out, logs = run(f, c, budget=100000)
+ck("응답중인 idx0 은 quit 도 launch 도 안 한다",
+   f.first("quit", 0) == -1 and f.first("launch", 0) == -1, str(f.calls))
+for i in (1, 2, 3, 4, 5):
+    ck(f"idx{i}: quit 이 launch 보다 먼저",
+       f.first("quit", i) >= 0 and f.first("quit", i) < f.first("launch", i), str(f.calls))
+ck("무시되는(프로세스 살아있는) launch 는 한 번도 없었다",
+   f.noop_launches == [], str(f.noop_launches))
+ck("6대 전부 응답 상태가 된다", sorted(out) == [f"dev-{i}" for i in range(6)], str(out))
+ck("종료부터 한다는 걸 남긴다",
+   any("종료부터" in x for x in logs), str(logs))
+
+print("=== C2. 프로세스 없는 인스턴스는 quit 없이 바로 launch ===")
+reset_fails()
+c = Clock()
+f = Fleet(c, n=3, up=(0,))
+out, logs = run(f, c)
+ck("down 상태엔 quit 을 보내지 않는다",
+   not any(k == "quit" for k, _ in f.calls), str(f.calls))
+ck("바로 launch", sorted(f.launches()) == [1, 2], str(f.calls))
+
 print("=== B. 응답 확인 — adb devices 목록은 증거가 아니다 ===")
 reset_fails()
 c = Clock()
-# idx0 은 기기로 보이지만 hang, 나머지는 down → 응답기기 0 → 전부 재기동 대상
-f = Fleet(c, n=3, hung=(0,))
-out, logs = run(f, c)
-ck("hang 인스턴스를 살아있는 것으로 세지 않는다", "dev-0" not in out or f.state[0] == "up", str(out))
-ck("hang 이라도 기동 대상이 된다", 0 in f.launches(), str(f.calls))
-ck("hang 은 quit 먼저", ("quit", 0) in f.calls and
-   f.calls.index(("quit", 0)) < f.calls.index(("launch", 0)), str(f.calls))
+# idx0 은 기기로 보이지만 무응답(ghost) · 나머지 down → 응답기기 0
+f = Fleet(c, n=3, ghost=(0,))
+out, logs = run(f, c, budget=100000)
+ck("무응답 기기를 살아있는 것으로 세지 않는다", f.state[0] == "up" or "dev-0" not in out,
+   str(out))
+ck("ghost 도 기동 대상이 된다", 0 in f.launches(), str(f.calls))
+ck("ghost 는 quit 먼저", 0 <= f.first("quit", 0) < f.first("launch", 0), str(f.calls))
 ck("전원 무응답을 크게 남긴다", any("모두 무응답" in x for x in logs), str(logs))
 ck("응답 확인이 실제로 나갔다", "dev-0" in f.probes, str(f.probes))
 
 print("=== B2. 부분 무응답은 지목하지 않는다(멀쩡한 걸 죽이지 않는다) ===")
 reset_fails()
 c = Clock()
-f = Fleet(c, n=4, up=(0,), hung=(1,))
+f = Fleet(c, n=4, up=(0,), ghost=(1,))
 out, logs = run(f, c)
-ck("무응답 idx1 을 quit 하지 않는다", ("quit", 1) not in f.calls, str(f.calls))
+ck("무응답 idx1 을 quit 하지 않는다", f.first("quit", 1) == -1, str(f.calls))
 ck("idx1 을 켜려 들지도 않는다", 1 not in f.launches(), str(f.calls))
-ck("androidStarted=0 인 2,3 만 켠다", sorted(f.launches()) == [2, 3], str(f.launches()))
+ck("프로세스 없는 2,3 만 켠다", sorted(f.launches()) == [2, 3], str(f.launches()))
 ck("부분 결손을 크게 남긴다", any("특정할 수 없어" in x for x in logs), str(logs))
 
 print("=== B3. _responsive 는 타임아웃 있는 shell echo 를 쓴다 ===")
@@ -195,15 +270,34 @@ ck("shell echo 로 확인", _seen and _seen[0][1] == ("shell", "echo", "ok"), st
 ck("타임아웃을 건다", _seen and _seen[0][2] == ld.PROBE_TIMEOUT, str(_seen[:1]))
 ck("PROBE_TIMEOUT 은 짧다", 0 < ld.PROBE_TIMEOUT <= 15, str(ld.PROBE_TIMEOUT))
 
-print("=== C. 순차 기동 + gap 유지 ===")
+print("=== G. quit 이 안 먹으면 pid 강제 종료로 승격 ===")
 reset_fails()
 c = Clock()
-f = Fleet(c, n=4, boot_delay=20)
+f = Fleet(c, n=2, up=(0,), zombie=(1,), quit_fails=(1,))
+out, logs = run(f, c, budget=100000)
+ck("quit → kill 순서", 0 <= f.first("quit", 1) < f.first("kill", 1), str(f.calls))
+ck("kill 후에 launch", f.first("kill", 1) < f.first("launch", 1), str(f.calls))
+ck("결국 뜬다", "dev-1" in out, str(out))
+ck("강제 종료를 남긴다", any("강제 종료" in x for x in logs), str(logs))
+ck("무시된 launch 없음", f.noop_launches == [], str(f.noop_launches))
+
+print("=== G2. quit 도 kill 도 안 먹으면 건너뛴다(무의미한 launch 금지·무한대기 금지) ===")
+reset_fails()
+c = Clock()
+f = Fleet(c, n=4, zombie=(1,), quit_fails=(1,), kill_fails=(1,))
+_t0 = c.t
+out, logs = run(f, c, budget=100000)
+ck("안 죽는 인스턴스엔 launch 를 보내지 않는다", 1 not in f.launches(), str(f.calls))
+ck("나머지는 정상 기동", sorted(f.launches()) == [0, 2, 3], str(f.launches()))
+ck("사라짐 확인은 유한하다", c.t - _t0 < 10000, str(c.t - _t0))
+ck("안 내려간다고 남긴다", any("안 내려갑니다" in x for x in logs), str(logs))
+ck("QUIT_WAIT/KILL_WAIT 은 유한", 0 < ld.QUIT_WAIT <= 120 and 0 < ld.KILL_WAIT <= 60,
+   f"{ld.QUIT_WAIT}/{ld.KILL_WAIT}")
+
+print("=== D. 순차 기동 + gap 유지 ===")
 
 
 class _SeqFleet(Fleet):
-    """launch 시각을 같이 기록해 '앞 인스턴스가 뜨기 전에 다음을 켜지 않음'을 본다."""
-
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         self.launch_t = []
@@ -213,15 +307,16 @@ class _SeqFleet(Fleet):
         return super().ld_launch(console, idx)
 
 
+reset_fails()
 c = Clock()
 f = _SeqFleet(c, n=4, boot_delay=20)
 out, logs = run(f, c, gap=35, boot_wait=180)
 ck("인덱스 순서대로 켠다", f.launches() == [0, 1, 2, 3], str(f.launches()))
 _gaps = [f.launch_t[i + 1][1] - f.launch_t[i][1] for i in range(len(f.launch_t) - 1)]
-ck("launch 사이 간격 >= boot+gap", all(g >= 35 for g in _gaps), str(_gaps))
+ck("launch 사이 간격 >= gap", all(g >= 35 for g in _gaps), str(_gaps))
 ck("동시 기동 없음(각 launch 전에 이전 것이 응답)", all(g >= 20 + 35 for g in _gaps), str(_gaps))
 
-print("=== D. 예산 상한 ===")
+print("=== E. 예산 상한 ===")
 reset_fails()
 c = Clock()
 f = Fleet(c, n=6, boot_delay=20)
@@ -240,38 +335,40 @@ out, logs = run(f, c, gap=35, boot_wait=180, budget=600)
 ck("예산 안이면 전원 기동", len(out) == 6, str(out))
 ck("총 소요가 예산 부근을 넘지 않는다", c.t - _t0 <= 600 + 180, str(c.t - _t0))
 
-print("=== E. 고장 인스턴스가 나머지를 막지 않는다 ===")
+print("=== F. 고장 인스턴스가 나머지를 막지 않는다 ===")
 reset_fails()
 c = Clock()
 f = Fleet(c, n=4, broken=(1,), boot_delay=20)
-out, logs = run(f, c, gap=5, boot_wait=30, budget=10000)
+out, logs = run(f, c, gap=5, boot_wait=30, budget=100000)
 ck("고장난 1을 건너뛰고 2,3 을 켠다", 2 in f.launches() and 3 in f.launches(), str(f.launches()))
-ck("고장난 것도 결국 살아난 것들은 반환", sorted(out) == ["dev-0", "dev-2", "dev-3"], str(out))
+ck("살아난 것들은 반환", sorted(out) == ["dev-0", "dev-2", "dev-3"], str(out))
 ck("기동 실패를 남긴다", any("기동 실패" in x and "건너뜁니다" in x for x in logs), str(logs))
+ck("재시도 전에 프로세스를 내린다(no-op launch 방지)",
+   f.noop_launches == [], str(f.noop_launches))
 
-print("=== E2. 사이클당 재기동 횟수 상한(adb 폭주 방지) ===")
+print("=== F2. 사이클당 재기동 횟수 상한(adb 폭주 방지) ===")
 ck("고장난 인스턴스 launch 는 retry+1 회", f.launches().count(1) == ld.BOOT_RETRY + 1,
    str(f.launches()))
 ck("BOOT_RETRY 는 1", ld.BOOT_RETRY == 1, str(ld.BOOT_RETRY))
 ck("재기동 전에 quit 1회", [k for k, i in f.calls if i == 1].count("quit") == ld.BOOT_RETRY,
    str(f.calls))
 
-print("=== E3. 연속 실패는 다음 사이클 후순위 ===")
+print("=== F3. 연속 실패는 다음 사이클 후순위 ===")
 reset_fails()
 c = Clock()
 f = Fleet(c, n=3, broken=(0,), boot_delay=20)
-run(f, c, gap=5, boot_wait=30, budget=10000)
+run(f, c, gap=5, boot_wait=30, budget=100000)
 ck("1사이클: 고장 0 이 먼저 시도된다", f.launches()[0] == 0, str(f.launches()))
 ck("실패 카운트가 남는다", ld._BOOT_FAILS.get("0", 0) >= 1, str(ld._BOOT_FAILS))
 ck("성공한 인스턴스는 카운트 없음", "1" not in ld._BOOT_FAILS, str(ld._BOOT_FAILS))
 c2 = Clock()
 f2 = Fleet(c2, n=3, broken=(0,), boot_delay=20)
-run(f2, c2, gap=5, boot_wait=30, budget=10000)
+run(f2, c2, gap=5, boot_wait=30, budget=100000)
 ck("2사이클: 고장 0 은 맨 뒤로 밀린다", f2.launches()[-1] == 0, str(f2.launches()))
 ck("멀쩡한 것들이 먼저 예산을 쓴다", f2.launches()[:2] == [1, 2], str(f2.launches()))
 reset_fails()
 
-print("=== F. ldconsole 없음 / 인스턴스 0 — 예전과 같은 행동 ===")
+print("=== H. ldconsole 없음 / 인스턴스 0 — 예전과 같은 행동 ===")
 c = Clock()
 f = Fleet(c, n=2, up=(0, 1))
 out, logs = run(f, c, console=None)
@@ -290,14 +387,44 @@ out, logs = run(f, c, console=None)
 ck("콘솔 없고 기기도 없으면 안내를 남긴다",
    any("ldconsole" in x for x in logs) and out == [], str(logs))
 
-print("=== G. _harvest_all_locked 이 함대를 보장하고 수확한다 ===")
+print("=== H2. ld_rows 파싱 — started 와 pid 를 따로 읽는다 ===")
+_sv_run = ld.subprocess.run
+
+
+class _P:
+    def __init__(self, s):
+        self.stdout = s.encode("utf-8")
+
+
+_txt = ("0,LD-0,131072,262144,1,4444,5555,540,960,240\n"
+        "1,LD-1,0,0,0,7777,8888,540,960,240\n"
+        "2,LD-2,0,0,0,0,0,540,960,240\n"
+        "쓰레기줄\n")
+ld.subprocess = types.SimpleNamespace(run=lambda *a, **k: _P(_txt))
+try:
+    _rows = ld.ld_rows("x")
+    _compat = ld.ld_list("x")
+finally:
+    ld.subprocess = sys.modules["subprocess"]
+ck("행 3개(쓰레기 무시)", len(_rows) == 3, str(_rows))
+ck("started=1 · pid 읽음", _rows[0]["started"] is True and _rows[0]["pids"] == [4444, 5555],
+   str(_rows[0]))
+ck("started=0 인데 pid 있음(= hang) 을 구분한다",
+   _rows[1]["started"] is False and _rows[1]["pids"] == [7777, 8888], str(_rows[1]))
+ck("started=0 · pid 0 은 프로세스 없음",
+   _rows[2]["started"] is False and _rows[2]["pids"] == [], str(_rows[2]))
+ck("ld_list 3튜플 호환 유지",
+   _compat == [("0", "LD-0", True), ("1", "LD-1", False), ("2", "LD-2", False)],
+   str(_compat))
+
+print("=== I. _harvest_all_locked 이 함대를 보장하고 수확한다 ===")
 _ens = []
 _sv_ens, _sv_li, _sv_h1, _sv_fa = (ld.ensure_ldplayer, ld.list_instances,
                                    ld.harvest_one, ld.find_adb)
 ld.find_adb = lambda x=None: "adb"
 ld.list_instances = lambda a: ["dev-0"]          # 예전 코드라면 여기서 끝났다
 ld.ensure_ldplayer = lambda a, **k: (_ens.append(1), ["dev-0", "dev-1"])[1]
-ld.harvest_one = lambda a, s, **k: None          # 수확 결과 없음 → 병합 안 함
+ld.harvest_one = lambda a, s, **k: None
 try:
     _res = ld._harvest_all_locked("./nope.json", None, None, True, lambda m: None)
     ck("기기가 보여도 함대 보장을 부른다", _ens == [1], str(_ens))
@@ -316,7 +443,7 @@ ck("함대 기동 전에 조기반환하는 list_instances 경로가 없다",
    "list_instances" not in ld._harvest_all_locked.__code__.co_names,
    str(ld._harvest_all_locked.__code__.co_names))
 
-print("=== G2. 프로세스 락 의미가 그대로다 ===")
+print("=== I2. 프로세스 락 의미가 그대로다 ===")
 _order = []
 _sv_inner = ld._harvest_all_locked
 
