@@ -49,7 +49,7 @@ python main.py --headless
 |---|---|---|
 | HKCU `Run\LDPlayerBoot` | `powershell -File C:\karrot\ldboot.ps1` | 로그온 시 함대 순차 기동 |
 | `C:\karrot\ldboot.ps1` | 리포 사본(`delivery\integrated\manual_gui\ldboot.ps1`)을 부르는 shim | 자동실행이 보는 고정 경로 |
-| 작업 `karrotgui` | `pythonw main.py` (작업 폴더 = 앱 폴더), **트리거 없음** | `ldboot.ps1` 이 마지막에 `schtasks /run /tn karrotgui` 로 호출 |
+| 작업 `karrotgui` | `pythonw main.py --watchdog` (작업 폴더 = 앱 폴더), **트리거 없음** | `ldboot.ps1` 이 마지막에 `schtasks /run /tn karrotgui` 로 호출. `--watchdog` 이 크래시 시 앱을 되살린다 |
 
 왜 이 모양인가:
 

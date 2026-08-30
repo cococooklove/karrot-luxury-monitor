@@ -207,11 +207,15 @@ try {
 try {
   $pyw = Join-Path (Split-Path (Get-Command python -ErrorAction Stop).Source) "pythonw.exe"
   if (-not (Test-Path $pyw)) { $pyw = "pythonw.exe" }
-  $act = New-ScheduledTaskAction -Execute $pyw -Argument "main.py" -WorkingDirectory $app
+  # --watchdog: 앱을 자식으로 띄우고 비정상 종료면 되살린다(정상 종료면 같이 끝난다).
+  # 이게 빠지면 앱이 크래시했을 때 아무도 다시 띄우지 않는다.
+  $act = New-ScheduledTaskAction -Execute $pyw -Argument "main.py --watchdog" -WorkingDirectory $app
   $prin = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+  # IgnoreNew: 이미 돌고 있으면 두 번째 인스턴스를 만들지 않는다. 손으로 schtasks /run 을
+  # 다시 눌러도 수확을 다투는 프로세스가 둘로 늘지 않는다.
   $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
   Register-ScheduledTask -TaskName "karrotgui" -Action $act -Principal $prin -Settings $set -Force | Out-Null
-  Log ("  task karrotgui: pythonw main.py  (작업 폴더 " + $app + ")")
+  Log ("  task karrotgui: pythonw main.py --watchdog  (작업 폴더 " + $app + ")")
 } catch {
   Write-Host ("[install] karrotgui 작업 등록 실패(수동 등록 필요): " + $_.Exception.Message) -ForegroundColor Yellow
 }
