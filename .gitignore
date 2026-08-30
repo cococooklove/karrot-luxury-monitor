@@ -58,3 +58,7 @@ dist/
 .playwright-mcp/
 .claude/settings.local.json
 .DS_Store
+
+# ── 작업 격리 ──
+.claude/worktrees/
+.superpowers/
