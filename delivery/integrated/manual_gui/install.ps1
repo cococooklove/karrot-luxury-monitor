@@ -38,8 +38,18 @@ $keep = @("accounts.json", "notify.json", "credentials.json", "settings.txt",
           "data\config.json", "data\watch.db", "data\alert_settings.json",
           "data\keyword_routes.json", "data\sweep_queue.json",
           "data\watch_budget.json")
-$stash = "$env:TEMP\karrot_keep"
-if (Test-Path $stash) { Remove-Item $stash -Recurse -Force }
+# 백업 폴더는 실행마다 새로 만든다. 예전에는 고정 경로를 먼저 지웠는데,
+# 앞선 실행이 백업을 마치고 삭제 도중 실패해 C:\karrot 이 반쯤 파인 상태였다면
+# 재실행이 멀쩡한 백업을 지우고 파인 트리에서 다시 백업해 자격증명을 영영
+# 잃는다. 지난 백업은 절대 건드리지 않는다.
+$stash = "$env:TEMP\karrot_keep_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+New-Item -ItemType Directory -Force -Path $stash | Out-Null
+$prior = @(Get-ChildItem "$env:TEMP" -Directory -Filter "karrot_keep*" -EA 0 |
+           Where-Object { $_.FullName -ne $stash })
+if ($prior.Count) {
+  Log ("  지난 백업 " + $prior.Count + "개가 남아 있습니다(지우지 않음): " +
+       ($prior[-1].FullName))
+}
 $saved = @()
 if (Test-Path C:\karrot) {
   foreach ($rel in $keep) {
@@ -55,8 +65,48 @@ if (Test-Path C:\karrot) {
 }
 
 Invoke-WebRequest "https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip" -OutFile $zip
-if (Test-Path C:\karrot) { Remove-Item C:\karrot -Recurse -Force -ErrorAction SilentlyContinue }
-if (Test-Path C:\karrot) { Fail "C:\karrot in use (close other shells/programs using it) and retry" }
+
+# 지우기 **전에** 점유를 확인한다. Remove-Item -Recurse -Force 는 지울 수 있는
+# 것만 지우고 잠긴 것은 조용히 건너뛰므로, 먼저 지우고 나중에 확인하면 실패할
+# 때마다 C:\karrot 이 반쯤 파인 채로 남는다.
+function Get-KarrotHolders {
+  $hold = @()
+  # 실행 파일이 C:\karrot 안에 있는 프로세스
+  $hold += Get-Process -ErrorAction SilentlyContinue |
+           Where-Object { $_.Path -like "C:\karrot\*" } |
+           ForEach-Object { "{0} (pid {1})" -f $_.ProcessName, $_.Id }
+  # C:\karrot 안의 스크립트를 실행 중인 python/pythonw
+  $hold += Get-CimInstance Win32_Process -ErrorAction SilentlyContinue `
+             -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+           Where-Object { $_.CommandLine -and $_.CommandLine -like "*karrot*" } |
+           ForEach-Object { "python (pid {0}): {1}" -f $_.ProcessId, $_.CommandLine }
+  $hold
+}
+
+if (Test-Path C:\karrot) {
+  $holders = @(Get-KarrotHolders)
+  if ($holders.Count) {
+    Write-Host "[install][FAIL] C:\karrot 을 다음이 사용 중입니다:" -ForegroundColor Red
+    $holders | ForEach-Object { Write-Host ("  - " + $_) -ForegroundColor Yellow }
+    Write-Host ("[install] 백업은 그대로 있습니다: " + $stash) -ForegroundColor Green
+    Write-Host "[install] 위 프로세스를 끄고 다시 실행하세요. 모니터라면 창을 닫거나:" -ForegroundColor Yellow
+    Write-Host '[install]   Get-Process python,pythonw -EA 0 | Stop-Process -Force' -ForegroundColor Yellow
+    exit 1
+  }
+  # 프로세스는 안 잡혔는데 탐색기·백신·다른 셸이 잡고 있을 수 있다. 통째로
+  # 지우는 대신 옆으로 밀어 본다 — 실패하면 아무것도 안 지운 상태로 멈춘다.
+  $old = "C:\karrot_old_" + (Get-Date -Format "yyyyMMdd_HHmmss")
+  try { Move-Item C:\karrot $old -ErrorAction Stop }
+  catch {
+    Write-Host "[install][FAIL] C:\karrot 을 옮길 수 없습니다(잠김). 아무것도 지우지 않았습니다." -ForegroundColor Red
+    Write-Host ("[install] 사유: " + $_.Exception.Message) -ForegroundColor Yellow
+    Write-Host "[install] 탐색기 창·다른 PowerShell·백신 실시간 검사를 확인하세요." -ForegroundColor Yellow
+    Write-Host ("[install] 백업은 그대로 있습니다: " + $stash) -ForegroundColor Green
+    exit 1
+  }
+  Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path $old) { Log ("  옛 폴더 일부가 남았습니다(무해): " + $old) }
+}
 if (Test-Path C:\karrot_tmp) { Remove-Item C:\karrot_tmp -Recurse -Force }
 Expand-Archive $zip -DestinationPath C:\karrot_tmp -Force
 Move-Item C:\karrot_tmp\karrot-luxury-monitor-master C:\karrot
@@ -64,18 +114,36 @@ Remove-Item C:\karrot_tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 $app = "C:\karrot\$appRel"
 
-# 빼돌린 것 되돌리기. 실패하면 여기서 멈춘다 — 자격증명 없이 돌려봐야
-# 폴링 0건이고, 조용히 넘어가면 원인을 찾는 데 한참 걸린다.
-if ($saved.Count) {
-  foreach ($rel in $saved) {
-    $src = Join-Path $stash $rel
-    $dst = Join-Path $app $rel
-    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
-    Copy-Item $src $dst -Force
-    if (-not (Test-Path $dst)) { Fail ("복원 실패: " + $rel + "  (백업본: " + $src + ")") }
+# 빼돌린 것 되돌리기. 이번 백업에 없으면 지난 백업들에서 최신 것을 찾는다 —
+# 앞선 실행이 백업 후 삭제에서 실패해 트리가 파였다면, 이번 백업에는 그 파일이
+# 아예 없다. 그 경우 지난 백업이 유일한 사본이다.
+$stashes = @(Get-ChildItem "$env:TEMP" -Directory -Filter "karrot_keep*" -EA 0 |
+             Sort-Object Name -Descending)
+$restored = @(); $missing = @()
+foreach ($rel in $keep) {
+  $src = $null
+  foreach ($s in $stashes) {
+    $cand = Join-Path $s.FullName $rel
+    if (Test-Path $cand) { $src = $cand; break }
   }
-  Log ("  기존 설정 " + $saved.Count + "개 복원 완료")
+  if (-not $src) { $missing += $rel; continue }
+  $dst = Join-Path $app $rel
+  New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+  Copy-Item $src $dst -Force
+  if (-not (Test-Path $dst)) { Fail ("복원 실패: " + $rel + "  (백업본: " + $src + ")") }
+  $restored += $rel
+  if ($src -notlike "$stash*") { Log ("  지난 백업에서 복구: " + $rel) }
+}
+if ($restored.Count) {
+  Log ("  기존 설정 " + $restored.Count + "개 복원: " + ($restored -join ", "))
   Log ("  백업 사본은 남겨둔다: " + $stash)
+}
+# accounts.json / data\config.json 없이는 폴링이 0건이다. 조용히 넘어가면
+# '설치는 됐는데 아무것도 안 잡힘'의 원인을 찾는 데 한참 걸린다.
+foreach ($critical in @("accounts.json", "data\config.json")) {
+  if ($missing -contains $critical) {
+    Write-Host ("[install] 주의: " + $critical + " 이 없습니다 — 백업에도 없었습니다.") -ForegroundColor Yellow
+  }
 }
 Set-Location $app
 
