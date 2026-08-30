@@ -81,6 +81,126 @@ def watch_status_text(active, next_check_at, now):
     return f"추적 중 {active}건 · 다음 점검 {when}"
 
 
+STATE_ICONS = {
+    "new": "🆕 신규",
+    "tracking": "● 추적중",
+    "down": "↓ 인하",
+    "up": "↑ 인상",
+    "paused": "⏸ 추적중단",
+    "ended": "✓ 종료",
+}
+
+# 필터 버튼이 고르는 값. all 은 전부.
+LISTING_FILTERS = ("all", "new", "down", "ended")
+
+
+def _delta_text(first_price, price):
+    """최초 감지가 대비 증감. 기준선을 모르면 '-'."""
+    if not first_price or not isinstance(price, int) or not isinstance(first_price, int):
+        return "-"
+    d = price - first_price
+    if d == 0:
+        return "0원 (0.0%)"
+    pct = d * 100.0 / first_price
+    return f"{d:+,}원 ({pct:+.1f}%)"
+
+
+def _ts_text(ts):
+    import time as _t
+    if not ts:
+        return "-"
+    try:
+        return _t.strftime("%m/%d %H:%M", _t.localtime(int(ts)))
+    except Exception:
+        return "-"
+
+
+def listing_display_rows(rows, now, state_filter="all"):
+    """watch 행 목록 → 매물 표에 그릴 형태. 최초 감지 내림차순.
+
+    위젯을 모르는 순수 함수로 두어 GUI 없이 검증한다."""
+    from daangn_ext import article_watch as _aw
+    out = []
+    for r in rows or []:
+        # 중복 판정만을 위한 묘비(백필이 세운 tier=dead·제목 없음)는 보여줄 게
+        # 없다. 걸러내지 않으면 표에 빈 줄로 뜬다. evicted 는 되살아나므로
+        # 여기 해당하지 않는다.
+        if (r.get("tier") or "") == _aw.TIER_DEAD and not (r.get("title") or ""):
+            continue
+        state = _aw.state_for(r, now)
+        if state_filter in ("new", "down", "ended") and state != state_filter:
+            continue
+        out.append({
+            "id": str(r.get("id") or ""),
+            "state": state,
+            "icon": STATE_ICONS.get(state, state),
+            "keyword": r.get("keyword") or "",
+            "title": (r.get("title") or "")[:60],
+            "region": r.get("region") or "",
+            "price": r.get("price") or 0,
+            "delta_text": _delta_text(r.get("first_price"), r.get("price")),
+            "last_change_text": _ts_text(r.get("last_change")),
+            "first_seen_text": _ts_text(r.get("first_seen")),
+            "url": r.get("url") or "",
+        })
+    order = {str(r.get("id") or ""): int(r.get("first_seen") or 0)
+             for r in rows or []}
+    out.sort(key=lambda x: order.get(x["id"], 0), reverse=True)
+    return out
+
+
+SLOT_CAP_KEY = "keyword_slot_cap"
+
+
+def sweep_found_to_match(payload, keyword):
+    """AutoMonitor.found 페이로드 → add_from_matches 가 받는 형태.
+
+    두 소스를 같은 문으로 들여보내야 매물 표가 하나로 유지된다."""
+    aid = payload.get("id") if payload else None
+    if not aid:
+        return None
+    from daangn_ext.article_watch import parse_iso
+    return {"article_id": str(aid),
+            "title": payload.get("title") or "",
+            "price": payload.get("price") or 0,
+            "region": payload.get("region") or "",
+            "url": payload.get("url") or "",
+            "time": parse_iso(payload.get("boostedAt")),
+            "keyword": keyword or ""}
+
+
+def dedupe_new_matches(matches, watch_store, fallback):
+    """폴링 결과에서 아직 안 본 매치만 고른다 → (fresh, dropped).
+
+    watch 테이블이 '본 매물'의 진실이다 — dead 행을 지우지 않으므로 판매완료·
+    삭제된 매물이 다시 떠도 재알림하지 않는다.
+
+    다만 watch 는 article_id 로만 키를 잡는다(add_from_matches). 그래서
+    article_id 가 없는 매치(알림 인박스 id 만 있는 payload)나 저장소를 못 연
+    경우는 저장소에 물어봐야 영원히 None 이 돌아온다 — 폴링마다 재알림이다.
+    그 두 경우만 프로세스 안의 fallback 집합으로 막는다. GUI·헤드리스가 같은
+    문을 쓰게 한 곳에 둔다(따로 두면 한쪽만 고쳐진다).
+
+    fallback 은 이 함수가 갱신한다. dropped 는 키가 아예 없어 버린 건수다.
+    """
+    fresh, dropped = [], 0
+    for m in matches or []:
+        art = str((m or {}).get("article_id") or "")
+        key = art or str((m or {}).get("id") or "")
+        if not key:
+            dropped += 1
+            continue
+        if art and watch_store is not None:
+            if watch_store.get(art) is not None:
+                continue
+        elif key in fallback:
+            continue
+        else:
+            fallback.add(key)
+        fresh.append(m)
+    return fresh, dropped
+
+
 def headless_watch_due(last_sweep, now, interval):
     """헤드리스 루프에서 이번 회에 스윕할 차례인지.
 
@@ -461,10 +581,10 @@ QPushButton { background: #221C16; color: #E8DFCC; border: 1px solid #473E2B; bo
 QPushButton:hover { background: #2C2519; border-color: #C6A968; color: #FAF5EA; }
 QPushButton:pressed { background: #1C1710; }
 QPushButton:disabled { color: #7E7563; border-color: #2A231B; background: #17130E; }
-QPushButton#startBtn, QPushButton#autoStartBtn { border: none; color: #14100A; padding: 10px 24px; font-size: 15px; font-weight: 800;
+QPushButton#startBtn { border: none; color: #14100A; padding: 10px 24px; font-size: 15px; font-weight: 800;
   background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #D9BE82, stop:1 #C0A05F); }
-QPushButton#startBtn:hover, QPushButton#autoStartBtn:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E6CB8E, stop:1 #CBAB68); }
-QPushButton#startBtn:pressed, QPushButton#autoStartBtn:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #C0A05F, stop:1 #A88C52); }
+QPushButton#startBtn:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E6CB8E, stop:1 #CBAB68); }
+QPushButton#startBtn:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #C0A05F, stop:1 #A88C52); }
 
 QCheckBox { color: #CFC5B0; spacing: 8px; font-size: 15px; min-height: 24px; background: transparent; }
 QCheckBox::indicator { width: 19px; height: 19px; border: 1.5px solid #4A3F2E; border-radius: 6px; background: #221C16; }
@@ -609,9 +729,9 @@ class MainWindow(QMainWindow):
         self.takeCentralWidget()                    # 기존 중앙위젯 버림(위젯은 재사용)
         self.tabs = QtWidgets.QTabWidget(self)
         self.tabs.addTab(self._scroll(self._build_manual_tab()), "수동 검색")
+        # 검색 스윕 스레드 핸들 — 탭은 없어졌지만 엔진은 라우터가 부린다.
         self.auto_monitor = None
-        self.tabs.addTab(self._scroll(self._build_auto_tab()), "자동 모니터")
-        self.tabs.addTab(self._scroll(self._build_alert_tab()), "키워드 알림")
+        self.tabs.addTab(self._scroll(self._build_alert_tab()), "매물 감시")
         # 에뮬레이터는 실제 창을 끼워넣으므로 스크롤로 감싸지 않는다(크기 = 탭 영역).
         self.tabs.addTab(self._build_emul_tab(), "에뮬레이터")
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -1020,6 +1140,19 @@ class MainWindow(QMainWindow):
             dl.addWidget(wdg)
         v.addWidget(dash)
 
+        self._watch_label = QtWidgets.QLabel("추적 중 0건")
+        self._watch_label.setStyleSheet("color:#C4B79A; font-size:13px;")
+
+        # ── 컨트롤 바: 토글 하나 + 상태칩 ──
+        top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
+        self.watchToggleBtn = QtWidgets.QPushButton("▶ 감시 시작")
+        self.watchToggleBtn.setObjectName("startBtn")
+        self.watchToggleBtn.setCheckable(True)
+        self.watchToggleBtn.clicked.connect(self.on_watch_toggle)
+        top.addWidget(self.watchToggleBtn)
+        top.addWidget(self._watch_label, 1)
+        v.addLayout(top)
+
         # 등록 폼
         form = QtWidgets.QGroupBox("키워드 등록"); fl = QtWidgets.QVBoxLayout(form)
         r0 = QtWidgets.QHBoxLayout()
@@ -1031,11 +1164,12 @@ class MainWindow(QMainWindow):
         fl.addLayout(r0)
         r1 = QtWidgets.QHBoxLayout()
         self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
-        self.alertBulkBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 일괄(현재계정)")
+        # 단일계정 일괄등록은 없앴다 — register_all 은 전 계정에 같은 키워드를 쓰고
+        # 라우터 capacity() 도 함대 기준이라, 한 계정만 건드리면 집계가 조용히 어긋난다.
         self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 전계정등록(전국)")
         self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
-        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkBtn); r1.addWidget(self.alertBulkAllBtn)
+        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkAllBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
         v.addWidget(form)
@@ -1045,8 +1179,9 @@ class MainWindow(QMainWindow):
         v.addWidget(self.alertSubLabel)
 
         # 등록 목록
-        self.alertTable = QtWidgets.QTableWidget(0, 4, w)
-        self.alertTable.setHorizontalHeaderLabels(["키워드", "가격범위", "제외", "id"])
+        self.alertTable = QtWidgets.QTableWidget(0, 5, w)
+        self.alertTable.setHorizontalHeaderLabels(
+            ["키워드", "경로", "가격범위", "제외", "id"])
         self.alertTable.verticalHeader().setVisible(False)
         self.alertTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.alertTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1061,12 +1196,9 @@ class MainWindow(QMainWindow):
         r2.addWidget(self.alertDelBtn); r2.addWidget(self.alertDelAllBtn); r2.addStretch(1)
         v.addLayout(r2)
 
-        # ── 신규 매칭 (토큰 폴링, 앱/푸시 불필요) ──
-        v.addWidget(QtWidgets.QLabel("── 신규 명품 매칭 (토큰 폴링으로 수신 · 앱/LDPlayer 상시ON 불필요) ──"))
-        r3 = QtWidgets.QHBoxLayout()
+        # ── 고급 패널에 들어갈 위젯(진단·튜닝) ──
         self.alertPollBtn = QtWidgets.QPushButton("매칭 조회(현재계정)")
         self.alertPollAllBtn = QtWidgets.QPushButton("전계정 매칭(전국)"); self.alertPollAllBtn.setObjectName("startBtn")
-        self.alertAutoPollBtn = QtWidgets.QPushButton("자동 폴링 시작")
         self.alertCoverageBtn = QtWidgets.QPushButton("커버 동네 집계")
         self.alertFleetBtn = QtWidgets.QPushButton("계정 현황")
         self.alertFleetBtn.setToolTip("계정별 동네·토큰만료·핵심여부·폴링실패·밴격리 — 팜 운영 한 눈에")
@@ -1091,57 +1223,78 @@ class MainWindow(QMainWindow):
             "24시간 무인운영 시 야간 과다요청 억제.")
         self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
         self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
-        # 액션행
-        r3.addWidget(self.alertPollBtn); r3.addWidget(self.alertPollAllBtn)
-        r3.addWidget(self.alertAutoPollBtn); r3.addWidget(self.alertCoverageBtn)
-        r3.addWidget(self.alertFleetBtn); r3.addWidget(self.alertTgTestBtn)
-        r3.addStretch(1)
-        v.addLayout(r3)
-        # 옵션행(주기·커버모드·자동시작·야간감속)
-        r3b = QtWidgets.QHBoxLayout()
-        r3b.addWidget(QtWidgets.QLabel("주기")); r3b.addWidget(self.alertPollInterval)
-        r3b.addSpacing(12); r3b.addWidget(QtWidgets.QLabel("커버")); r3b.addWidget(self.alertCoverMode)
-        r3b.addSpacing(12); r3b.addWidget(self.alertAutoStartChk)
-        r3b.addWidget(self.alertBootChk); r3b.addWidget(self.alertCrashChk)
-        r3b.addWidget(self.alertNightChk)
-        r3b.addStretch(1)
-        v.addLayout(r3b)
+        # ── 고급 (접힘) ──
+        # 평소엔 토글 하나면 된다. 진단·튜닝이 필요할 때만 편다.
+        self.advancedBox = QtWidgets.QGroupBox("고급")
+        self.advancedBox.setCheckable(True)
+        self.advancedBox.setChecked(False)
+        av = QtWidgets.QVBoxLayout(self.advancedBox)
+        self.advancedBox.toggled.connect(self._sync_advanced_visible)
 
-        self.matchTable = QtWidgets.QTableWidget(0, 7, w)
-        self.matchTable.setHorizontalHeaderLabels(["사진", "시각", "키워드", "제목", "가격", "지역", "계정"])
-        self.matchTable.verticalHeader().setVisible(False)
-        self.matchTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.matchTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.matchTable.horizontalHeader().setSectionResizeMode(
-            3, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.matchTable.setColumnWidth(0, 64)
-        self.matchTable.setIconSize(QtCore.QSize(56, 56))
-        self.matchTable.verticalHeader().setDefaultSectionSize(60)
-        self.matchTable.setMinimumHeight(260)
-        self.matchTable.itemDoubleClicked.connect(self.on_match_open)
-        v.addWidget(self.matchTable, 1)
-        self._thumb_threads = []
+        a1 = QtWidgets.QHBoxLayout()
+        a1.addWidget(self.alertPollBtn); a1.addWidget(self.alertPollAllBtn)
+        a1.addWidget(self.alertCoverageBtn); a1.addWidget(self.alertFleetBtn)
+        a1.addWidget(self.alertTgTestBtn); a1.addStretch(1)
+        av.addLayout(a1)
 
-        # ── 가격 추적 현황 ──
-        watch_box = QtWidgets.QGroupBox("가격 추적")
-        watch_v = QtWidgets.QVBoxLayout(watch_box)
-        self._watch_label = QtWidgets.QLabel("추적 중 0건")
-        self._watch_list = QtWidgets.QListWidget()
-        self._watch_list.setMaximumHeight(140)
-        watch_v.addWidget(self._watch_label)
-        watch_v.addWidget(self._watch_list)
-        v.addWidget(watch_box)
+        a2 = QtWidgets.QHBoxLayout()
+        a2.addWidget(QtWidgets.QLabel("주기")); a2.addWidget(self.alertPollInterval)
+        a2.addSpacing(12); a2.addWidget(QtWidgets.QLabel("커버"))
+        a2.addWidget(self.alertCoverMode)
+        a2.addSpacing(12); a2.addWidget(self.alertAutoStartChk)
+        a2.addWidget(self.alertBootChk); a2.addWidget(self.alertCrashChk)
+        a2.addWidget(self.alertNightChk); a2.addStretch(1)
+        av.addLayout(a2)
+
+        av.addWidget(self._build_sweep_settings())
+        # 체크 해제는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨겨야 하고,
+        # setChecked(False) 는 toggled 를 쏘지 않으므로 한 번은 손으로 부른다.
+        self._sync_advanced_visible(self.advancedBox.isChecked())
+        v.addWidget(self.advancedBox)
+
+        # ── 매물 (신규·추적을 한 표에) ──
+        v.addWidget(QtWidgets.QLabel(
+            "── 매물 (앱 알림·검색 스윕이 같은 표로 들어온다) ──"))
+        fbar = QtWidgets.QHBoxLayout(); fbar.setSpacing(6)
+        self.listingFilter = QtWidgets.QButtonGroup(w)
+        for i, (key, label) in enumerate(
+                (("all", "전체"), ("new", "🆕 신규"),
+                 ("down", "↓ 인하"), ("ended", "✓ 종료"))):
+            b = QtWidgets.QPushButton(label); b.setCheckable(True)
+            b.setChecked(key == "all")
+            b.setProperty("filterKey", key)
+            self.listingFilter.addButton(b, i)
+            fbar.addWidget(b)
+        fbar.addStretch(1)
+        self.listingFilter.setExclusive(True)
+        self.listingFilter.buttonClicked.connect(
+            lambda _b: self._refresh_listing_table())
+        v.addLayout(fbar)
+
+        self.listingTable = QtWidgets.QTableWidget(0, 8, w)
+        self.listingTable.setHorizontalHeaderLabels(
+            ["상태", "키워드", "제목", "지역", "현재가", "Δ최초가",
+             "마지막변동", "최초감지"])
+        self.listingTable.verticalHeader().setVisible(False)
+        self.listingTable.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.listingTable.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.listingTable.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.listingTable.setMinimumHeight(320)
+        self.listingTable.setSortingEnabled(True)
+        self.listingTable.itemDoubleClicked.connect(self.on_listing_open)
+        v.addWidget(self.listingTable, 1)
 
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
         v.addWidget(self.alertLog)
 
         self.alertAddBtn.clicked.connect(self.on_alert_add)
-        self.alertBulkBtn.clicked.connect(self.on_alert_bulk)
         self.alertRefreshBtn.clicked.connect(self.on_alert_refresh)
         self.alertDelBtn.clicked.connect(self.on_alert_delete)
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
         self.alertPollBtn.clicked.connect(self.on_alert_poll)
-        self.alertAutoPollBtn.clicked.connect(self.on_alert_autopoll)
         self.alertBulkAllBtn.clicked.connect(self.on_alert_bulk_all)
         self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
         self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
@@ -1149,13 +1302,15 @@ class MainWindow(QMainWindow):
         self.alertTgTestBtn.clicked.connect(self.on_alert_tg_test)
         self._alert_worker = None
         self._match_links = {}
-        self._match_seen = self._load_match_seen()
         self._last_harvest_ts = 0
         self._last_poll_ts = 0
         self._last_new = 0
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
         # ── 워치리스트(가격변동 추적) ──
+        # 중복 판정은 watch 테이블이 한다. 저장소를 못 열었거나 article_id 가
+        # 없는 매치는 테이블에 행이 생길 수 없으므로 이 집합으로만 막는다.
+        self._match_seen_fallback = set()
         self._watch_store = None
         self._watch_tracker = None
         self._watch_budget = None
@@ -1175,6 +1330,41 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._watch_init_error = str(e)[:200]
             print("워치리스트 초기화 실패:", self._watch_init_error)
+        # ── 키워드 라우터 · 감시 컨트롤러 ──
+        self._router = None
+        self._supervisor = None
+        self._sweep_queue = None
+        self._sweep_kws = None          # 지금 도는 스윕이 떠 있는 키워드 집합
+        try:
+            from daangn_ext.sweep_queue import SweepQueue
+            from daangn_ext.keyword_router import KeywordRouter, DEFAULT_SLOT_CAP
+            from daangn_ext.supervisor import SupervisorController, SupervisorPolicy
+            self._sweep_queue = SweepQueue("./data/sweep_queue.json")
+            cap = int(self._load_alert_settings().get(SLOT_CAP_KEY)
+                      or DEFAULT_SLOT_CAP)
+            self._router = KeywordRouter(self._alert_fleet(), self._sweep_queue,
+                                         slot_cap=cap)
+            # 워치 타이머가 없으면(워치리스트 초기화 실패) 컨트롤러를 세우지 않는다 —
+            # start() 가 None.start() 로 죽는다. 감시 자체를 막고 이유를 남긴다.
+            if self._watch_timer is None:
+                raise RuntimeError(
+                    f"워치 타이머 없음 — {self._watch_init_error or '워치리스트 초기화 실패'}")
+            policy = SupervisorPolicy(lambda: int(self.alertPollInterval.value()),
+                                      self._night_factor,
+                                      sweep_interval=WATCH_SWEEP_INTERVAL)
+            self._supervisor = SupervisorController(
+                policy, self._alert_poll_timer, self._watch_timer,
+                self._sweep_queue,
+                start_search_sweep=self._start_search_sweep,
+                stop_search_sweep=self._stop_search_sweep)
+        except Exception as e:
+            self.alertLog.append(f"[감시] 초기화 실패: {str(e)[:120]}")
+        if self._supervisor is None:
+            self.watchToggleBtn.setEnabled(False)
+            self.watchToggleBtn.setToolTip(
+                "감시 컨트롤러 초기화 실패 — 로그 확인 후 재실행하세요")
+        self.alertPollInterval.valueChanged.connect(
+            lambda _v: self._supervisor.retune() if self._supervisor else None)
         # 실시간 헬스줄(토큰/수확/폴링) — 무인 신뢰 위해 5초마다 갱신
         self._alert_health_timer = QtCore.QTimer(self)
         self._alert_health_timer.timeout.connect(self._refresh_alert_health)
@@ -1217,6 +1407,16 @@ class MainWindow(QMainWindow):
             QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
         return w
+
+    def _sync_advanced_visible(self, on):
+        """체크형 QGroupBox 는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨긴다.
+
+        qt_ 로 시작하는 이름은 Qt 내부 위젯(콤보 팝업 스크롤 컨테이너 등)이라
+        건드리지 않는다 — 표시 여부를 Qt 가 스스로 관리한다."""
+        for c in self.advancedBox.findChildren(QtWidgets.QWidget):
+            if c.objectName().startswith("qt_"):
+                continue
+            c.setVisible(bool(on))
 
     _ALERT_SETTINGS_FILE = "./data/alert_settings.json"
 
@@ -1295,10 +1495,10 @@ class MainWindow(QMainWindow):
             self.alertLog.append(f"[부팅 자동실행] 실패: {str(e)[:60]}")
 
     def _autostart_poll(self):
-        """실행 시 자동폴링 — 타이머 꺼져 있을 때만 시작(중복 방지)."""
-        if not self._alert_poll_timer.isActive():
-            self.alertLog.append("[자동폴링] 실행 시 자동 시작")
-            self.on_alert_autopoll()
+        """실행 시 자동감시 — 이미 돌고 있으면 건드리지 않는다(중복 방지)."""
+        if self._supervisor and not self._supervisor.is_running():
+            self.alertLog.append("[감시] 실행 시 자동 시작")
+            self.on_watch_toggle()
 
     def _refresh_alert_health(self):
         """토큰/자동수확/자동폴링 실시간 헬스 한 줄. 무인 운영 신뢰의 핵심 지표."""
@@ -1543,28 +1743,51 @@ class MainWindow(QMainWindow):
         s = (s or "").strip().replace(",", "")
         return int(s) if s.isdigit() else None
 
+    _ROUTE_NAMES = {"app": "앱 알림", "sweep": "검색 스윕"}
+
+    def _log_route(self, res):
+        """라우터 결과 한 줄. route 는 None 일 수 있다(빈 키워드)."""
+        name = self._ROUTE_NAMES.get(res.get("route"), "배정 안 됨")
+        self.alertLog.append(
+            f"[키워드] {res.get('keyword')} → {name} ({res.get('reason')})")
+
     def on_alert_add(self):
         kw = self.alertKeyword.text().strip()
         if not kw:
             self.alert("키워드를 입력하세요"); return
+        if not self._router:
+            self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
         mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
         excl = [x for x in self.alertExclude.text().replace(" ", "").split(",") if x]
+        co = self._core_only()
+        # 라우터가 앱 슬롯/스윕 대기열 중 하나로 배정한다. 사용자는 고르지 않는다.
         def job(log):
-            api = self._alert_api()
-            if api.is_banned(kw):
-                log(f"'{kw}' 는 차단 키워드 — 등록불가"); return None
-            api.register(kw, mn, mx, excl); log(f"'{kw}' 등록 ✓")
-            return api.list()
-        self._alert_run(job, self._alert_populate)
+            res = self._router.add(kw, mn, mx, excl, core_only=co, log=log)
+            return {"route": res, "list": self._safe_alert_list(log)}
+        self._alert_run(job, self._alert_route_done)
 
-    def on_alert_bulk(self):
-        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
-        def job(log):
-            api = self._alert_api()
-            res = api.register_many(LUXURY_BRANDS, mn, mx, log=log)
-            log(f"완료 — 등록 {len(res['added'])} · 스킵 {len(res['skipped'])} · 실패 {len(res['failed'])}")
-            return api.list()
-        self._alert_run(job, self._alert_populate)
+    def _safe_alert_list(self, log):
+        """현재 계정의 등록 목록. 토큰이 없으면 None — 등록 자체는 이미 끝났다."""
+        try:
+            return self._alert_api().list()
+        except Exception as e:
+            log(f"[목록] 조회 실패: {str(e)[:80]}")
+            return None
+
+    def _alert_route_done(self, payload):
+        if not payload:
+            return
+        if payload.get("route"):
+            self._log_route(payload["route"])
+        self._alert_populate(payload.get("list"))
+
+    def _alert_routes_done(self, payload):
+        """라우터 여러 건 결과 → 경로 로그 + 목록 갱신."""
+        if not payload:
+            return
+        for r in payload.get("routes") or []:
+            self._log_route(r)
+        self._alert_populate(payload.get("list"))
 
     def on_alert_refresh(self):
         def job(log):
@@ -1577,10 +1800,24 @@ class MainWindow(QMainWindow):
         row = self.alertTable.currentRow()
         if row < 0:
             self.alert("삭제할 행을 선택하세요"); return
-        item = self.alertTable.item(row, 3)
+        item = self.alertTable.item(row, 4)          # id 열(경로 열이 끼어 4번)
+        kw_item = self.alertTable.item(row, 0)
         if not item:
             return
         uid = item.text()
+        kw = kw_item.text() if kw_item else ""
+        # 라우터에서도 뺀다 — 안 그러면 슬롯만 먹은 채로 남는다.
+        if self._router and kw:
+            try:
+                self._router.remove(kw)
+            except Exception as e:
+                # 삼키면 슬롯이 영영 샌다 — 이 호출이 막으려던 바로 그 실패다.
+                self.alertLog.append(
+                    f"[라우터] {kw} 배정 해제 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
+        if not uid:                                   # 스윕 대기열 행 — 앱 id 가 없다
+            self.alertLog.append(f"[키워드] {kw} 검색 스윕 대기열에서 제거")
+            self.on_alert_refresh()
+            return
         def job(log):
             api = self._alert_api()
             ok = api.delete(uid); log(f"삭제 {'✓' if ok else '실패'} id={uid}")
@@ -1591,27 +1828,96 @@ class MainWindow(QMainWindow):
         if QtWidgets.QMessageBox.question(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?") \
                 != QtWidgets.QMessageBox.StandardButton.Yes:
             return
+        # 라우터 배정도 함께 비운다 — 남겨두면 슬롯이 찬 채로 전부 스윕행이 된다.
+        if self._router:
+            try:
+                for r in list(self._router.routes()):
+                    self._router.remove(r["keyword"])
+            except Exception as e:
+                self.alertLog.append(
+                    f"[라우터] 배정 비우기 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
         def job(log):
             api = self._alert_api()
             n = api.delete_all(log=log); log(f"총 {n}건 삭제")
             return api.list()
         self._alert_run(job, self._alert_populate)
 
+    def _routes_map(self):
+        try:
+            return {r["keyword"]: r for r in (self._router.routes() if self._router
+                                              else [])}
+        except Exception:
+            return {}
+
+    def _alert_row(self, r, keyword, route, price, exclude, uid):
+        """표 한 줄. 경로/사유는 라우터가 남긴 진단값이다."""
+        name = self._ROUTE_NAMES.get((route or {}).get("route"), "-")
+        vals = [keyword, name, price, exclude, uid]
+        for c, val in enumerate(vals):
+            cell = QtWidgets.QTableWidgetItem(val)
+            if c == 1 and route:
+                cell.setToolTip(str(route.get("reason") or ""))
+            self.alertTable.setItem(r, c, cell)
+
+    def _queue_entries(self):
+        """스윕 대기열 엔트리. SweepQueue 는 __len__ 이 있어 비면 falsy 다 —
+        존재 여부는 is not None 으로 본다."""
+        try:
+            return (self._sweep_queue.entries()
+                    if self._sweep_queue is not None else [])
+        except Exception:
+            return []
+
     def _alert_populate(self, data):
-        if not data:
+        """등록 목록 그리기.
+
+        토큰이 없어 앱 목록을 못 읽어도(data 가 None) 대기열은 그린다 — 방금 스윕으로
+        밀린 키워드가 안 보이면 사용자는 등록이 삼켜진 줄 안다. 대신 앱 목록을 못
+        읽었다는 사실을 로그에 남겨, 짧아진 표를 '키워드가 사라졌다'로 읽지 않게 한다."""
+        entries = self._queue_entries()
+        if not data and not entries:
             return
-        kws = data.get("user_keywords") or []
+        if not data:
+            self.alertLog.append(
+                "[목록] 앱 등록 목록을 못 읽었습니다 — 검색 스윕 대기열만 표시합니다")
+        kws = (data or {}).get("user_keywords") or []
+        # 이 브랜치 이전에 일괄등록된 키워드는 routes 파일에 없다. 첫 실행에서
+        # 그걸 인정하지 않으면 라우터는 함대가 비었다고 믿고 이미 꽉 찬 서버
+        # 한도에 계속 등록을 시도한다.
+        if self._router is not None and kws:
+            try:
+                seeded = self._router.seed_from_server(
+                    [k.get("keyword") for k in kws])
+                if seeded:
+                    self.alertLog.append(
+                        f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
+            except Exception as e:
+                self.alertLog.append(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
+        routes = self._routes_map()
         self.alertTable.setRowCount(0)
+        shown = set()
         for k in kws:
             r = self.alertTable.rowCount(); self.alertTable.insertRow(r)
             price = ""
             if k.get("min_price") or k.get("max_price"):
                 price = f"{k.get('min_price') or ''}~{k.get('max_price') or ''}"
-            vals = [k.get("keyword", ""), price,
-                    ",".join(k.get("exclude_keywords") or []), str(k.get("id", ""))]
-            for c, val in enumerate(vals):
-                self.alertTable.setItem(r, c, QtWidgets.QTableWidgetItem(val))
-        subs = data.get("subscription_infos") or []
+            kw = k.get("keyword", "")
+            shown.add(kw)
+            self._alert_row(r, kw, routes.get(kw), price,
+                            ",".join(k.get("exclude_keywords") or []),
+                            str(k.get("id", "")))
+        # 스윕으로 밀린 키워드는 앱 목록에 없다 — 여기 안 보이면 사용자는
+        # 등록이 삼켜진 줄 안다. 대기열에서 끌어와 함께 그린다.
+        for e in entries:
+            if e["keyword"] in shown:
+                continue
+            r = self.alertTable.rowCount(); self.alertTable.insertRow(r)
+            price = ""
+            if e.get("min") or e.get("max"):
+                price = f"{e.get('min') or ''}~{e.get('max') or ''}"
+            self._alert_row(r, e["keyword"], routes.get(e["keyword"]), price,
+                            ",".join(e.get("exclude") or []), "")
+        subs = (data or {}).get("subscription_infos") or []
         if subs:
             txt = " · ".join(f"{s.get('name')}({s.get('ranged_regions_count')}지역"
                              + (",알림ON" if s.get('enable_notification') else ",알림OFF") + ")"
@@ -1642,25 +1948,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def on_alert_autopoll(self):
-        if self._alert_poll_timer.isActive():
-            self._alert_poll_timer.stop()
-            if self._watch_timer:
-                self._watch_timer.stop()
+    def on_watch_toggle(self):
+        """감시 토글 — 폴링·워치 스윕·검색 스윕이 한 수명을 공유한다."""
+        if not self._supervisor:
+            self.alertLog.append("[감시] 컨트롤러가 없습니다")
+            self.watchToggleBtn.setChecked(False)
+            return
+        if self._supervisor.is_running():
+            self._supervisor.stop()
             self._set_sleep_block(False)
-            self.alertAutoPollBtn.setText("자동 폴링 시작")
-            self.alertLog.append("[자동폴링] 정지")
+            self.watchToggleBtn.setText("▶ 감시 시작")
+            self.watchToggleBtn.setChecked(False)
+            self.alertLog.append("[감시] 정지")
         else:
-            iv = self.alertPollInterval.value() * self._night_factor()
-            self._alert_poll_timer.start(iv * 1000)
-            if self._watch_timer:
-                self._watch_timer.start(WATCH_SWEEP_INTERVAL * 1000)
+            self._supervisor.start()
             self._set_sleep_block(True)
-            self.alertAutoPollBtn.setText("자동 폴링 정지")
+            self.watchToggleBtn.setText("■ 감시 정지")
+            self.watchToggleBtn.setChecked(True)
             nf = self._night_factor()
             night = f" · 야간감속 ×{nf}" if nf > 1 else ""
-            self.alertLog.append(f"[자동폴링] 시작 · {iv}초 주기 · 전계정(전국){night} · 절전차단")
-            self.on_alert_poll_all()
+            self.alertLog.append(
+                f"[감시] 시작 · 폴링 {self.alertPollInterval.value()}초{night} · 절전차단")
+            self.on_alert_poll_all()      # 첫 회차는 기다리지 않는다
 
     def _match_populate(self, matches):
         import time as _t
@@ -1668,44 +1977,15 @@ class MainWindow(QMainWindow):
         if matches is None:
             self._last_new = 0
             return
-        new = 0
-        new_items = []
-        thumb_jobs = []
-        for m in matches:
-            key = str(m.get("id") or m.get("article_id") or m.get("title"))
-            if key in self._match_seen:
-                continue
-            self._match_seen.add(key); new += 1
-            new_items.append(m)
-            r = self.matchTable.rowCount(); self.matchTable.insertRow(r)
-            try:
-                ts = _t.strftime("%m/%d %H:%M", _t.localtime(int(m.get("time") or 0)))
-            except Exception:
-                ts = ""
-            # 0=사진(아이콘), URL 은 사진셀 UserRole 에 저장(더블클릭 매물열기)
-            photo = QtWidgets.QTableWidgetItem()
-            photo.setData(QtCore.Qt.ItemDataRole.UserRole, m.get("url") or "")
-            self.matchTable.setItem(r, 0, photo)
-            if m.get("image"):
-                thumb_jobs.append((photo, m.get("image")))
-            vals = [ts, m.get("keyword") or "", (m.get("title") or "")[:60],
-                    str(m.get("price") or ""), m.get("region") or "", m.get("_account") or ""]
-            for c, val in enumerate(vals, start=1):
-                cell = QtWidgets.QTableWidgetItem(val)
-                self.matchTable.setItem(r, c, cell)
-            self.matchTable.sortItems(1, QtCore.Qt.SortOrder.DescendingOrder)
-        if thumb_jobs:
-            th = _ThumbThread(thumb_jobs)
-            th.loaded.connect(self._set_thumb)
-            th.finished.connect(lambda t=th: self._thumb_threads.remove(t)
-                                if t in self._thumb_threads else None)
-            self._thumb_threads.append(th)
-            th.start()
+        new_items, dropped = dedupe_new_matches(
+            matches, self._watch_store, self._match_seen_fallback)
+        new = len(new_items)
         self._last_new = new
+        if dropped:
+            self.alertLog.append(f"[매칭] id 없는 payload {dropped}건 건너뜀")
         if new:
-            self.alertLog.append(f"[매칭] 신규 {new}건 추가 (누적 {len(self._match_seen)})")
+            self.alertLog.append(f"[매칭] 신규 {new}건 추가")
             self._notify_matches(new_items)
-            self._save_match_seen()
             try:
                 added = self._watch_tracker.add_from_matches(new_items) \
                     if self._watch_tracker else 0
@@ -1713,29 +1993,9 @@ class MainWindow(QMainWindow):
                     self.alertLog.append(f"[가격추적] {added}건 추적 시작")
             except Exception as e:
                 self.alertLog.append(f"[가격추적] 등록 실패: {str(e)[:80]}")
+            self._refresh_listing_table()
         try:
             self._refresh_alert_health()
-        except Exception:
-            pass
-
-    _MATCH_SEEN_FILE = "./data/match_seen.json"
-
-    def _load_match_seen(self):
-        import json as _json, os as _os
-        try:
-            with open(self._MATCH_SEEN_FILE, encoding="utf-8") as _f:
-                return set(_json.load(_f))
-        except Exception:
-            return set()
-
-    def _save_match_seen(self):
-        import json as _json, os as _os
-        try:
-            _os.makedirs(_os.path.dirname(self._MATCH_SEEN_FILE), exist_ok=True)
-            # 최근 5000개만 유지(무한증가 방지)
-            keep = list(self._match_seen)[-5000:]
-            with open(self._MATCH_SEEN_FILE, "w", encoding="utf-8") as _f:
-                _json.dump(keep, _f)
         except Exception:
             pass
 
@@ -1774,6 +2034,7 @@ class MainWindow(QMainWindow):
         self._watch_next_due = int(next_due)
         if events:
             self._notify_watch_events(events)
+        self._refresh_listing_table()
 
     def _notify_watch_events(self, events):
         lines = watch_event_lines(events)
@@ -1781,9 +2042,7 @@ class MainWindow(QMainWindow):
             return
         for line in lines:
             self.alertLog.append(f"[가격추적] {line}")
-            self._watch_list.insertItem(0, line)
-        while self._watch_list.count() > 20:
-            self._watch_list.takeItem(self._watch_list.count() - 1)
+        self._refresh_listing_table()
         nt = getattr(self, "_notify", {}) or {}
         if not ((nt.get("tg_token") and nt.get("tg_chat")) or nt.get("sheet_url")):
             return
@@ -1793,6 +2052,65 @@ class MainWindow(QMainWindow):
                             if t in self._watch_threads else None)
         self._watch_threads.append(th)
         th.start()
+
+    def _listing_filter_key(self):
+        b = self.listingFilter.checkedButton()
+        return b.property("filterKey") if b else "all"
+
+    def _refresh_listing_table(self):
+        """저장소에서 읽어 표를 다시 그린다. 행 수가 수백 단위라 전면 갱신으로 족하다."""
+        if not getattr(self, "_watch_store", None):
+            return
+        import time as _t
+        try:
+            rows = listing_display_rows(self._watch_store.listing_rows(),
+                                        int(_t.time()), self._listing_filter_key())
+        except Exception as e:
+            self.alertLog.append(f"[매물표] 갱신 실패: {str(e)[:80]}")
+            return
+        self.listingTable.setSortingEnabled(False)
+        self.listingTable.setRowCount(0)
+        for r in rows:
+            i = self.listingTable.rowCount()
+            self.listingTable.insertRow(i)
+            vals = [r["icon"], r["keyword"], r["title"], r["region"],
+                    f"{r['price']:,}" if r["price"] else "-",
+                    r["delta_text"], r["last_change_text"], r["first_seen_text"]]
+            for c, val in enumerate(vals):
+                cell = QtWidgets.QTableWidgetItem(val)
+                if c == 0:
+                    cell.setData(QtCore.Qt.ItemDataRole.UserRole, r["url"])
+                    cell.setData(QtCore.Qt.ItemDataRole.UserRole + 1, r["id"])
+                self.listingTable.setItem(i, c, cell)
+        self.listingTable.setSortingEnabled(True)
+
+    def on_listing_open(self, item):
+        """더블클릭 → 가격 이력 + 매물 링크."""
+        cell0 = self.listingTable.item(item.row(), 0)
+        if cell0 is None:
+            return
+        url = cell0.data(QtCore.Qt.ItemDataRole.UserRole) or ""
+        aid = cell0.data(QtCore.Qt.ItemDataRole.UserRole + 1) or ""
+        hist = []
+        try:
+            hist = self._watch_store.price_history(str(aid))
+        except Exception:
+            pass
+        import time as _t
+        lines = [f"{_t.strftime('%m/%d %H:%M', _t.localtime(h['ts']))}  "
+                 f"{h['price']:,}원" for h in hist] or ["가격 이력 없음"]
+        dlg = QtWidgets.QMessageBox(self)
+        dlg.setWindowTitle("가격 이력")
+        dlg.setText("\n".join(lines))
+        if url:
+            open_btn = dlg.addButton("매물 열기",
+                                     QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        else:
+            open_btn = None
+        dlg.addButton(QtWidgets.QMessageBox.StandardButton.Close)
+        dlg.exec()
+        if open_btn is not None and dlg.clickedButton() is open_btn:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
     def _set_thumb(self, item, data):
         """다운로드된 썸네일 바이트 → 아이콘(메인스레드서 안전하게 setIcon)."""
@@ -1805,14 +2123,6 @@ class MainWindow(QMainWindow):
                     QtCore.Qt.TransformationMode.SmoothTransformation)))
         except Exception:
             pass
-
-    def on_match_open(self, item):
-        cell0 = self.matchTable.item(item.row(), 0)   # URL 은 사진셀(col0) UserRole
-        url = cell0.data(QtCore.Qt.ItemDataRole.UserRole) if cell0 else ""
-        if url:
-            from PyQt6.QtGui import QDesktopServices
-            from PyQt6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl(url))
 
     # ── 전국(전 계정) 멀티계정 ──
     def _multi(self, harvest=False):
@@ -1827,6 +2137,13 @@ class MainWindow(QMainWindow):
                 pass
         return MultiAccountAlerts("./accounts.json", "./data/config.json")
 
+    def _alert_fleet(self):
+        """전계정 알림 함대. 라우터와 폴링이 같은 생성 경로를 쓰게 한 곳으로 모은다.
+
+        MultiAccountAlerts 는 accounts.json 을 호출 때마다 다시 읽는다 —
+        인스턴스를 들고 있어도 수확으로 갱신된 토큰이 그대로 반영된다."""
+        return self._multi()
+
     def _core_only(self):
         """커버 모드 = 핵심지역 집중이면 True. (콤보 currentData)"""
         try:
@@ -1837,10 +2154,38 @@ class MainWindow(QMainWindow):
     def on_alert_bulk_all(self):
         mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
         co = self._core_only()
+        if not self._router:
+            self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
         def job(log):
-            self._multi().register_all(LUXURY_BRANDS, mn, mx, log=log, core_only=co)
-            return None
-        self._alert_run(job)
+            res = self._router.add_many(LUXURY_BRANDS, mn, mx, core_only=co, log=log)
+            return {"routes": res, "list": self._safe_alert_list(log)}
+        self._alert_run(job, self._alert_routes_done)
+
+    @staticmethod
+    def _condition_groups(conditions):
+        """엑셀 조건 → [(키워드들, min, max, exclude)]. 필터가 같은 행끼리 묶는다.
+
+        라우터는 한 호출에 필터 하나만 받는다. 행마다 가격·제외가 다르면 그룹이
+        갈라지고, 같으면 한 번에 들어간다."""
+        groups = {}
+        for c in conditions or []:
+            kw = str((c or {}).get("keyword") or "").strip()
+            if not kw:
+                continue
+            key = (c.get("min"), c.get("max"), tuple(c.get("exclude") or []))
+            groups.setdefault(key, [])
+            if kw not in groups[key]:
+                groups[key].append(kw)
+        return [(kws, k[0], k[1], list(k[2])) for k, kws in groups.items()]
+
+    def _route_conditions(self, conditions, core_only=False, log=None):
+        """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다."""
+        log = log or self.alertLog.append
+        out = []
+        for kws, mn, mx, excl in self._condition_groups(conditions):
+            out.extend(self._router.add_many(kws, mn, mx, excl,
+                                             core_only=core_only, log=log) or [])
+        return out
 
     def _night_factor(self):
         """야간 감속 배수 — 새벽0~7시 ×3, 늦밤22~24·이른7~9시 ×2, 그외 ×1."""
@@ -1855,12 +2200,19 @@ class MainWindow(QMainWindow):
         return 1
 
     def _auto_poll_tick(self):
-        """자동폴링 타이머 틱 — 시간대별 주기 재조정(밴회피) 후 폴링.
+        """자동폴링 타이머 틱 — 간격 재조정은 컨트롤러가, 승격은 라우터가 맡는다.
         이전 폴링이 아직 진행 중이면 조용히 스킵(무인: 모달 팝업 금지)."""
-        base = self.alertPollInterval.value()
-        iv_ms = base * self._night_factor() * 1000
-        if self._alert_poll_timer.interval() != iv_ms:
-            self._alert_poll_timer.setInterval(iv_ms)
+        if self._supervisor:
+            self._supervisor.retune()
+        if self._router:
+            try:
+                promoted = self._router.rebalance(core_only=self._core_only(),
+                                                  log=self.alertLog.append)
+                for p in promoted:
+                    self.alertLog.append(f"[라우터] {p['keyword']} → 앱 알림 승격")
+            except Exception as e:
+                self.alertLog.append(f"[라우터] 승격 실패: {str(e)[:80]}")
+        self._resync_search_sweep()
         if self._alert_worker and self._alert_worker.isRunning():
             self.alertLog.append("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
             return
@@ -1869,7 +2221,7 @@ class MainWindow(QMainWindow):
     def on_alert_poll_all(self):
         co = self._core_only()
         def job(log):
-            return self._multi().poll_all(log=log, core_only=co)
+            return self._alert_fleet().poll_all(log=log, core_only=co)
         self._alert_run(job, self._match_populate)
 
     def on_alert_coverage(self):
@@ -1992,35 +2344,35 @@ class MainWindow(QMainWindow):
                 for it in getattr(self, "auto_area_leaves", [])
                 if it.checkState(0) == Qt.CheckState.Checked]
 
-    def _build_auto_tab(self):
-        w = QtWidgets.QWidget(self)
-        outer = QtWidgets.QHBoxLayout(w)
-        split = QtWidgets.QSplitter(Qt.Orientation.Horizontal, w)
-        split.setChildrenCollapsible(False); split.setHandleWidth(6)
-        outer.addWidget(split)
-        self.autoAreaTree = self._build_auto_area_tree(w)
-        split.addWidget(self._tree_panel(self.autoAreaTree, self.auto_area_leaves))
-        right = QtWidgets.QWidget(w)
-        lay = QtWidgets.QVBoxLayout(right)
-        lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(12)
-        split.addWidget(right)
-        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
-        split.setSizes([260, 900])
+    def _build_sweep_settings(self):
+        """검색 스윕 설정 — 자동 모니터 탭에서 이사. 값 의미와 위젯 종류는 그대로다.
 
-        self.autoKeyword = QtWidgets.QLineEdit(w); self.autoKeyword.setPlaceholderText("검색 키워드")
-        self.autoExtra = QtWidgets.QLineEdit(w); self.autoExtra.setPlaceholderText("추가 키워드")
-        self.autoExclude = QtWidgets.QLineEdit(w); self.autoExclude.setPlaceholderText("제외 키워드")
-        self.autoMin = QtWidgets.QLineEdit(w); self.autoMin.setPlaceholderText("최소가"); self.autoMin.setFixedWidth(96)
-        self.autoMax = QtWidgets.QLineEdit(w); self.autoMax.setPlaceholderText("최대가"); self.autoMax.setFixedWidth(96)
-        self.autoDays = QtWidgets.QSpinBox(w); self.autoDays.setRange(0, 365); self.autoDays.setValue(7); self.autoDays.setFixedWidth(72)
+        여기 있는 값은 앱 슬롯에 못 들어가 스윕으로 밀린 키워드에만 쓰인다.
+        키워드 입력은 없다 — 라우터가 정한다."""
+        box = QtWidgets.QGroupBox("검색 스윕")
+        gv = QtWidgets.QVBoxLayout(box)
+        gv.addWidget(QtWidgets.QLabel(
+            "앱 알림 슬롯이 찼을 때 이 조건으로 지역을 훑어 커버한다."))
+
+        # 지역 — 미선택이면 전국(동 단위)
+        self.autoAreaTree = self._build_auto_area_tree(box)
+        area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
+        area.setMaximumHeight(280)
+        gv.addWidget(area)
+
+        self.autoExtra = QtWidgets.QLineEdit(box); self.autoExtra.setPlaceholderText("추가 키워드")
+        self.autoExclude = QtWidgets.QLineEdit(box); self.autoExclude.setPlaceholderText("제외 키워드")
+        self.autoMin = QtWidgets.QLineEdit(box); self.autoMin.setPlaceholderText("최소가"); self.autoMin.setFixedWidth(96)
+        self.autoMax = QtWidgets.QLineEdit(box); self.autoMax.setPlaceholderText("최대가"); self.autoMax.setFixedWidth(96)
+        self.autoDays = QtWidgets.QSpinBox(box); self.autoDays.setRange(0, 365); self.autoDays.setValue(7); self.autoDays.setFixedWidth(72)
         # 사이클 휴식(초) — 하한 10s: 그 아래는 무휴식 폴링 = 봇 패턴 → 차단
-        self.autoRestMin = QtWidgets.QSpinBox(w); self.autoRestMin.setRange(10, 3600); self.autoRestMin.setValue(30); self.autoRestMin.setFixedWidth(72)
-        self.autoRestMax = QtWidgets.QSpinBox(w); self.autoRestMax.setRange(10, 3600); self.autoRestMax.setValue(90); self.autoRestMax.setFixedWidth(72)
+        self.autoRestMin = QtWidgets.QSpinBox(box); self.autoRestMin.setRange(10, 3600); self.autoRestMin.setValue(30); self.autoRestMin.setFixedWidth(72)
+        self.autoRestMax = QtWidgets.QSpinBox(box); self.autoRestMax.setRange(10, 3600); self.autoRestMax.setValue(90); self.autoRestMax.setFixedWidth(72)
         # 지역 간 휴식(초) — 전국 구단위 수백 요청 사이 간격. 0.3s 미만 연타 = IP 스로틀
-        self.autoGapMin = QtWidgets.QDoubleSpinBox(w); self.autoGapMin.setRange(0.3, 10.0)
+        self.autoGapMin = QtWidgets.QDoubleSpinBox(box); self.autoGapMin.setRange(0.3, 10.0)
         self.autoGapMin.setDecimals(1); self.autoGapMin.setSingleStep(0.1)
         self.autoGapMin.setValue(0.4); self.autoGapMin.setFixedWidth(72)
-        self.autoGapMax = QtWidgets.QDoubleSpinBox(w); self.autoGapMax.setRange(0.3, 10.0)
+        self.autoGapMax = QtWidgets.QDoubleSpinBox(box); self.autoGapMax.setRange(0.3, 10.0)
         self.autoGapMax.setDecimals(1); self.autoGapMax.setSingleStep(0.1)
         self.autoGapMax.setValue(1.2); self.autoGapMax.setFixedWidth(72)
         # min<=max 강제 — 뒤집힌 범위 입력 자체를 막는다
@@ -2035,114 +2387,60 @@ class MainWindow(QMainWindow):
         # 레인 = 동시에 도는 수집 갈래. 프록시를 샤딩해 나눠 쓰므로 프록시 수를 넘을 수 없고,
         # 레인당 IP 가 3개 미만이면 빈응답 시 교체할 곳이 없어 오히려 느려진다.
         # 0 = 자동(프록시 수 ÷ 3). 실측: 레인4 = 순차 대비 2.5배, 매물 손실 0.
-        self.autoLanes = QtWidgets.QSpinBox(w)
+        self.autoLanes = QtWidgets.QSpinBox(box)
         self.autoLanes.setRange(0, 16); self.autoLanes.setValue(0)
         self.autoLanes.setSpecialValueText("자동"); self.autoLanes.setFixedWidth(72)
         self.autoLanes.setToolTip(
             "동시 수집 갈래(레인) 수. 0=자동(프록시 수 ÷ 3).\n"
             "레인은 프록시를 나눠 갖는다 — 같은 IP 로 동시요청하면 전부 빈응답이 된다.\n"
             "프록시가 부족하면 지정값보다 낮게 자동 조정된다.")
-        self.autoTokenRefresh = QtWidgets.QCheckBox("토큰 갱신", w)
+        self.autoTokenRefresh = QtWidgets.QCheckBox("토큰 갱신", box)
         self.autoTokenRefresh.setChecked(True)   # 기본 ON — LDPlayer 자동수확(제로컨피그)
         self.autoTokenRefresh.setToolTip(
             "체크 시 LDPlayer 정품앱이 갱신한 access 토큰을 자동 수확(WAF 우회). "
             "LDPlayer 실행+로그인 상태면 별도 설정 불필요.")
         self._notify = self._load_notify()
-        self.auto_conditions = []
 
-        # 슬림 필터 카드 (3줄)
-        fc = QtWidgets.QGroupBox(w); fc.setTitle("")
-        fv = QtWidgets.QVBoxLayout(fc); fv.setContentsMargins(14, 12, 14, 12); fv.setSpacing(8)
-        r0 = QtWidgets.QHBoxLayout(); r0.setSpacing(8)
-        r0.addWidget(self.autoKeyword, 3)
-        r0.addWidget(self.autoMin); r0.addWidget(QtWidgets.QLabel("~")); r0.addWidget(self.autoMax)
-        r1 = QtWidgets.QHBoxLayout(); r1.setSpacing(8)
-        r1.addWidget(self.autoExtra, 1); r1.addWidget(self.autoExclude, 1)
-        r1.addSpacing(10); r1.addWidget(self.autoTokenRefresh)
-        r2 = QtWidgets.QHBoxLayout(); r2.setSpacing(8)
-        r2.addWidget(QtWidgets.QLabel("끌올")); r2.addWidget(self.autoDays); r2.addWidget(QtWidgets.QLabel("일 이내"))
-        r2.addSpacing(16)
-        r2.addWidget(QtWidgets.QLabel("휴식")); r2.addWidget(self.autoRestMin)
-        r2.addWidget(QtWidgets.QLabel("~")); r2.addWidget(self.autoRestMax); r2.addWidget(QtWidgets.QLabel("초"))
-        r2.addSpacing(16)
-        r2.addWidget(QtWidgets.QLabel("지역 간")); r2.addWidget(self.autoGapMin)
-        r2.addWidget(QtWidgets.QLabel("~")); r2.addWidget(self.autoGapMax); r2.addWidget(QtWidgets.QLabel("초"))
-        r2.addSpacing(16)
-        r2.addWidget(QtWidgets.QLabel("레인")); r2.addWidget(self.autoLanes)
-        r2.addStretch(1)
-        fv.addLayout(r0); fv.addLayout(r1); fv.addLayout(r2)
-        lay.addWidget(fc)
+        s0 = QtWidgets.QHBoxLayout(); s0.setSpacing(8)
+        s0.addWidget(QtWidgets.QLabel("가격"))
+        s0.addWidget(self.autoMin); s0.addWidget(QtWidgets.QLabel("~")); s0.addWidget(self.autoMax)
+        s0.addStretch(1)
+        s1 = QtWidgets.QHBoxLayout(); s1.setSpacing(8)
+        s1.addWidget(self.autoExtra, 1); s1.addWidget(self.autoExclude, 1)
+        s1.addSpacing(10); s1.addWidget(self.autoTokenRefresh)
+        s2 = QtWidgets.QHBoxLayout(); s2.setSpacing(8)
+        s2.addWidget(QtWidgets.QLabel("끌올")); s2.addWidget(self.autoDays); s2.addWidget(QtWidgets.QLabel("일 이내"))
+        s2.addSpacing(16)
+        s2.addWidget(QtWidgets.QLabel("휴식")); s2.addWidget(self.autoRestMin)
+        s2.addWidget(QtWidgets.QLabel("~")); s2.addWidget(self.autoRestMax); s2.addWidget(QtWidgets.QLabel("초"))
+        s2.addSpacing(16)
+        s2.addWidget(QtWidgets.QLabel("지역 간")); s2.addWidget(self.autoGapMin)
+        s2.addWidget(QtWidgets.QLabel("~")); s2.addWidget(self.autoGapMax); s2.addWidget(QtWidgets.QLabel("초"))
+        s2.addSpacing(16)
+        s2.addWidget(QtWidgets.QLabel("레인")); s2.addWidget(self.autoLanes)
+        s2.addStretch(1)
+        gv.addLayout(s0); gv.addLayout(s1); gv.addLayout(s2)
 
-        # 액션 바 (한 줄)
+        # 액션 바 — 시작 버튼은 없다. 스윕은 감시 토글이 켜고 끈다.
         bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
-        self.autoExcelBtn = QtWidgets.QPushButton("엑셀 조건", w)
+        self.autoExcelBtn = QtWidgets.QPushButton("엑셀 조건", box)
         self.autoExcelBtn.clicked.connect(self.on_auto_excel_clicked)
-        self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", w)
+        self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", box)
         self.autoNotifyBtn.clicked.connect(self.on_auto_notify_clicked)
-        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", w)
+        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", box)
         self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
-        self.autoProxyViewBtn = QtWidgets.QPushButton("프록시 목록", w)
+        self.autoProxyViewBtn = QtWidgets.QPushButton("프록시 목록", box)
         self.autoProxyViewBtn.clicked.connect(self.on_proxy_view_clicked)
-        self.autoStartBtn = QtWidgets.QPushButton("자동 모니터 시작", w)
-        self.autoStartBtn.setObjectName("autoStartBtn")
-        self.autoStartBtn.clicked.connect(self.on_auto_start_clicked)
         for b in (self.autoExcelBtn, self.autoNotifyBtn, self.autoAccountsBtn,
-                  self.autoProxyViewBtn, self.autoStartBtn):
+                  self.autoProxyViewBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
         bar.addWidget(self.autoExcelBtn); bar.addWidget(self.autoNotifyBtn)
         bar.addWidget(self.autoAccountsBtn); bar.addWidget(self.autoProxyViewBtn)
-        bar.addStretch(1); bar.addWidget(self.autoStartBtn)
-        lay.addLayout(bar)
+        bar.addStretch(1)
+        gv.addLayout(bar)
+        return box
 
-        # 상태 + 진행바
-        self.autoStatus = QtWidgets.QLabel("대기 중", w)
-        self.autoStatus.setStyleSheet("color:#C4B79A; font-size:14px;")
-        self.autoProgress = QtWidgets.QProgressBar(w)
-        self.autoProgress.setRange(0, 0); self.autoProgress.setVisible(False)
-        self.autoProgress.setMaximumHeight(6); self.autoProgress.setTextVisible(False)
-        lay.addWidget(self.autoStatus)
-        lay.addWidget(self.autoProgress)
-
-        # 결과 테이블 (대형)
-        self.autoTable = QtWidgets.QTableWidget(0, 5, w)
-        self.autoTable.setHorizontalHeaderLabels(["지역", "제목", "가격", "끌올", "상태"])
-        self.autoTable.verticalHeader().setVisible(False)
-        self.autoTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.autoTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.autoTable.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.autoTable.horizontalHeader().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.autoTable.itemSelectionChanged.connect(self.on_auto_row_selected)
-        self.autoTable.setMinimumHeight(340)
-        self._auto_rows = []
-        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#F0D48C; font-size:16px; letter-spacing:1px;")
-        lay.addWidget(rl0)
-        lay.addWidget(self.autoTable, 1)
-
-        # 로그(작게)
-        self.autoLog = QtWidgets.QTextEdit(w); self.autoLog.setReadOnly(True)
-        self.autoLog.setMaximumHeight(96)
-        lay.addWidget(self.autoLog, 0)
-
-        # 우측: 상세 (수동과 동일)
-        detail = QtWidgets.QWidget(w); dl = QtWidgets.QVBoxLayout(detail)
-        dl.setContentsMargins(8, 4, 4, 4)
-        dl.addWidget(QtWidgets.QLabel("상세", w))
-        self.autoDetailImg = QtWidgets.QLabel(detail)
-        self.autoDetailImg.setFixedSize(256, 256); self.autoDetailImg.setScaledContents(True)
-        self.autoDetailView = QtWidgets.QTextBrowser(detail)
-        self.autoDetailView.setOpenLinks(False)
-        self.autoDetailView.anchorClicked.connect(lambda u: QDesktopServices.openUrl(u))
-        dl.addWidget(self.autoDetailImg, 0, Qt.AlignmentFlag.AlignHCenter)
-        dl.addWidget(self.autoDetailView, 1)
-        split.addWidget(detail)
-        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1); split.setStretchFactor(2, 0)
-        split.setSizes([240, 620, 300])
-        return w
-
-    def on_auto_status(self, text):
-        self.autoStatus.setText(text)
 
     # ── 알림 설정 저장/불러오기 ──
     NOTIFY_FILE = "./notify.json"
@@ -2266,56 +2564,6 @@ class MainWindow(QMainWindow):
         cancel.clicked.connect(dlg.reject)
         dlg.exec()
 
-    def on_auto_found(self, item):
-        r = self.autoTable.rowCount()
-        self.autoTable.insertRow(r)
-        try:
-            price_txt = f"{int(item['price']):,}"
-        except Exception:
-            price_txt = str(item.get("price", ""))
-        vals = [item.get("region", ""), item.get("title", ""), price_txt,
-                str(item.get("boostedAt", ""))[:16], item.get("status", "")]
-        for c, v in enumerate(vals):
-            cell = QtWidgets.QTableWidgetItem(str(v))
-            if item.get("status") == "가격변동":
-                cell.setForeground(QtCore.Qt.GlobalColor.red)
-            self.autoTable.setItem(r, c, cell)
-        self._auto_rows.append(item)
-
-    def on_auto_row_selected(self):
-        rows = self.autoTable.selectionModel().selectedRows()
-        if not rows:
-            return
-        i = rows[0].row()
-        if i >= len(self._auto_rows):
-            return
-        it = self._auto_rows[i]
-        from daangn.model import Product
-        from daangn.detail import render_to_html
-        try:
-            b = datetime.fromisoformat(it["boostedAt"]) if it.get("boostedAt") else datetime.now()
-        except Exception:
-            b = datetime.now()
-        p = Product(no=i + 1, name=it.get("title", ""), searched_keyword="",
-                    price=str(it.get("price", "0")), priceCurrency="KRW",
-                    description=it.get("desc", ""), image=it.get("image", ""),
-                    url=it.get("url", ""), boostedAt=b, area=it.get("region", ""))
-        self.autoDetailView.setHtml(render_to_html(p))
-        self.autoDetailImg.clear()
-        if it.get("image"):
-            self._auto_img_thread = CancelableImageDownloader(self, it["image"], str(uuid4()))
-
-            def _done(data, token):
-                try:
-                    img = PILImage.open(BytesIO(data))
-                    img = image_contain_resize(img, (256, 256))
-                    buf = BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
-                    qp = QPixmap(); qp.loadFromData(buf.getvalue())
-                    self.autoDetailImg.setPixmap(qp)
-                except Exception:
-                    pass
-            self._auto_img_thread.finished.connect(_done)
-            self._auto_img_thread.start()
 
     def _refresh_proxy_labels(self):
         n = len(self._collect_proxies())
@@ -2519,15 +2767,32 @@ class MainWindow(QMainWindow):
             if not p:
                 return
             try:
-                self.auto_conditions = load_conditions_from_excel(p)
-                cats = {c.get("category") or "-" for c in self.auto_conditions}
-                self.autoLog.append(
-                    f"[엑셀] 조건 {len(self.auto_conditions)}개 로드 (대분류 {len(cats)}종)")
-                QtWidgets.QMessageBox.information(
-                    dlg, "불러옴", f"조건 {len(self.auto_conditions)}개 로드됨.")
-                dlg.accept()
+                conds = load_conditions_from_excel(p)
             except Exception as e:
                 QtWidgets.QMessageBox.warning(dlg, "오류", f"엑셀 로드 오류:\n{e}")
+                return
+            if not self._router:
+                self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
+            cats = {c.get("category") or "-" for c in conds}
+            self.alertLog.append(
+                f"[엑셀] 조건 {len(conds)}개 로드 (대분류 {len(cats)}종) — 라우터로 배정")
+            # 추가키워드·끌올일수·대분류는 라우터가 표현하지 못한다. 앱 알림은 그
+            # 셋을 애초에 못 받고, 스윕행 키워드는 고급 패널의 추가/끌올 값을 쓴다.
+            dropped = sorted({n for c in conds for n, v in
+                              (("추가키워드", c.get("extra")), ("끌올일수", c.get("days")),
+                               ("대분류", c.get("category"))) if v})
+            if dropped:
+                self.alertLog.append(
+                    f"[엑셀] 라우터가 못 받는 항목 무시: {', '.join(dropped)}")
+            co = self._core_only()
+
+            def job(log):
+                res = self._route_conditions(conds, core_only=co, log=log)
+                return {"routes": res, "list": self._safe_alert_list(log)}
+            self._alert_run(job, self._alert_routes_done)
+            QtWidgets.QMessageBox.information(
+                dlg, "불러옴", f"조건 {len(conds)}개를 라우터로 배정 중입니다.")
+            dlg.accept()
 
         sampleBtn.clicked.connect(do_sample)
         loadBtn.clicked.connect(do_load)
@@ -2559,34 +2824,12 @@ class MainWindow(QMainWindow):
         proxies = list(self.controller.proxies) + self._account_proxies()
         return [p for p in dict.fromkeys(proxies) if p]
 
-    def on_auto_start_clicked(self):
-        from daangn.auto_monitor import AutoMonitor
-        if self.auto_monitor and self.auto_monitor.isRunning():
-            self.auto_monitor.stop()
-            self.autoStartBtn.setText("정지 중…"); self.autoStartBtn.setEnabled(False)
-            self.autoLog.append("[정지 요청] 진행 중 요청 마무리 후 정지 (최대 8초)…")
+    def _auto_cfg_base(self):
+        """검색 스윕 공통 cfg — 옛 on_auto_start_clicked 에서 그대로 떼어냈다.
 
-            def _finish():
-                self.autoStartBtn.setText("자동 모니터 시작"); self.autoStartBtn.setEnabled(True)
-                self.autoLog.append("[정지됨]")
-            self.auto_monitor.finished.connect(_finish)
-            return
-        import re
-        splt = lambda t: [x for x in re.split(r"[,\s]+", t.strip()) if x]
-        if not self.auto_conditions and not self.autoKeyword.text().strip():
-            self.alert("자동: 키워드 또는 엑셀 조건이 필요합니다")
-            return
-        # 초기 토큰은 워커스레드의 token_provider 가 획득(LDPlayer 부팅+수확은 오래 걸려
-        # 메인스레드서 하면 GUI 프리징). 체크 시 provider 가 첫 사이클 시작서 확보.
-        token = None
+        keyword/extra 는 넣지 않는다. 대기열 키워드를 _sweep_cfg 가 conditions 로
+        채우기 때문이다. 나머지 값(속도·프록시·계정·알림)은 의미가 그대로다."""
         cfg = {
-            "conditions": self.auto_conditions or None,     # 엑셀 다중조건 우선
-            "keyword": self.autoKeyword.text().strip(),
-            "extra": splt(self.autoExtra.text()),
-            "exclude": splt(self.autoExclude.text()),
-            "min": int(self.autoMin.text()) if self.autoMin.text().strip().isdigit() else None,
-            "max": int(self.autoMax.text()) if self.autoMax.text().strip().isdigit() else None,
-            "days": self.autoDays.value() or None,
             "rest_min": self.autoRestMin.value(),
             "rest_max": self.autoRestMax.value(),
             "gap_min": self.autoGapMin.value(),
@@ -2599,7 +2842,9 @@ class MainWindow(QMainWindow):
             "proxies": self._collect_proxies(),
             # 실행 중 프록시 추가/삭제 반영용 (조건 루프마다 재조회)
             "proxy_provider": self._collect_proxies,
-            "access_token": token,
+            # 초기 토큰은 워커스레드의 token_provider 가 획득(LDPlayer 부팅+수확은
+            # 오래 걸려 메인스레드서 하면 GUI 프리징).
+            "access_token": None,
             # 사이클마다 최신 access 재조회(자동수확 연동). 스레드세이프(GUI 미접근).
             "token_provider": self._harvest_token_quiet if self.autoTokenRefresh.isChecked() else None,
             # 계정 안정화(밴회피): 사이클마다 계정 라운드로빈 + 계정별 고정프록시(없으면 KR네이티브)
@@ -2614,22 +2859,135 @@ class MainWindow(QMainWindow):
         sel = self._selected_auto_regions()
         if sel:
             cfg["scope"] = "regions"; cfg["regions"] = sel
-            self.autoLog.append(f"[지역] 선택 {len(sel)}개 동")
         else:
             cfg["scope"] = "nationwide"
-            self.autoLog.append("[지역] 전국(동 단위)")
-        self.auto_monitor = AutoMonitor(self, cfg)
-        self.auto_monitor.log.connect(lambda m: (self.autoLog.append(m), print("[자동]", m)))
-        self.auto_monitor.found.connect(self.on_auto_found)
-        self.auto_monitor.status.connect(self.on_auto_status)
-        self.auto_monitor.finished.connect(
-            lambda: (self.autoProgress.setVisible(False),
-                     self.autoStatus.setText("정지됨")))
-        # 새 검색 = 결과 테이블 초기화 + 진행바 표시
-        self.autoTable.setRowCount(0); self._auto_rows = []
-        self.autoProgress.setVisible(True); self.autoStatus.setText("시작 중…")
-        self.auto_monitor.start()
-        self.autoStartBtn.setText("자동 모니터 정지")
+        return cfg
+
+    @staticmethod
+    def _splt(text):
+        """쉼표·공백 구분 → 리스트. 옛 on_auto_start_clicked 의 splt 와 같다."""
+        import re
+        return [x for x in re.split(r"[,\s]+", (text or "").strip()) if x]
+
+    @staticmethod
+    def _num(text):
+        text = (text or "").strip().replace(",", "")
+        return int(text) if text.isdigit() else None
+
+    def _sweep_cfg(self):
+        """스윕 큐의 키워드로 AutoMonitor cfg 를 만든다. 지역·속도는 고급 패널 값.
+
+        가격·제외는 등록 당시 사용자가 넣은 값(큐 엔트리)을 우선한다 — 고급 패널
+        값은 엔트리에 없을 때의 기본값이다."""
+        panel_min = self._num(self.autoMin.text())
+        panel_max = self._num(self.autoMax.text())
+        panel_excl = self._splt(self.autoExclude.text())
+        extra = self._splt(self.autoExtra.text())
+        days = self.autoDays.value() or None
+        conditions = []
+        for e in self._queue_entries():
+            conditions.append({
+                "keyword": e["keyword"],
+                "extra": extra,
+                "exclude": list(e.get("exclude") or []) or panel_excl,
+                "min": e.get("min") if e.get("min") is not None else panel_min,
+                "max": e.get("max") if e.get("max") is not None else panel_max,
+                "days": days,
+            })
+        cfg = dict(self._auto_cfg_base())
+        cfg["conditions"] = conditions
+        return cfg
+
+    def _start_search_sweep(self):
+        if self.auto_monitor is not None and self.auto_monitor.isRunning():
+            # stop() 은 비동기다(최대 8초). 그 안에 다시 켜면 여기서 조용히 막혔다 —
+            # 재시작이 통째로 사라지는 것처럼 보이므로 로그를 남긴다.
+            self.alertLog.append(
+                "[검색스윕] 아직 정지 중 — 이번 시작 요청은 건너뜁니다(다음 틱 재시도)")
+            return
+        try:
+            cfg = self._sweep_cfg()
+            if not cfg.get("conditions"):
+                # conditions 가 비면 AutoMonitor 가 cfg["keyword"] 로 떨어져 KeyError.
+                # 컨트롤러의 큐 검사에 기대지 않고 여기서 직접 막는다.
+                self.alertLog.append("[검색스윕] 대기열이 비어 시작하지 않습니다")
+                return
+            from daangn.auto_monitor import AutoMonitor
+            self.auto_monitor = AutoMonitor(self, cfg)
+            self.auto_monitor.log.connect(self.alertLog.append)
+            self.auto_monitor.found.connect(self._on_sweep_found)
+            self.auto_monitor.start()
+            # 이 스윕이 어떤 키워드 집합으로 떠 있는지 기억한다 — cfg 는 스냅샷이다.
+            self._sweep_kws = {c["keyword"] for c in cfg["conditions"]}
+            self.alertLog.append(
+                f"[검색스윕] 시작 — 키워드 {len(self._sweep_kws)}개")
+        except Exception as e:
+            self.alertLog.append(f"[검색스윕] 시작 실패: {str(e)[:120]}")
+
+    def _stop_search_sweep(self):
+        am = self.auto_monitor
+        self._sweep_kws = None
+        if am is not None and am.isRunning():
+            am.stop()
+            self.alertLog.append("[검색스윕] 정지 요청")
+
+    def _resync_search_sweep(self):
+        """돌고 있는 스윕이 낡은 키워드 집합인지 보고, 다르면 갈아끼운다.
+
+        cfg 는 AutoMonitor 를 만들 때 한 번 찍은 스냅샷이다. 감시 중에 키워드가
+        큐로 밀려오면 아무도 그걸 훑지 않고, 반대로 rebalance 가 앱으로 승격시키면
+        스윕이 이미 앱이 보는 키워드를 계속 훑어 요청을 두 번 쓴다.
+
+        폴링 틱에서만 부른다 — 등록이 몰아쳐도 재시작은 폴링 주기당 한 번을 넘지 않는다."""
+        if not (self._supervisor and self._supervisor.is_running()):
+            return
+        if self._sweep_queue is None:
+            return
+        try:
+            want = set(self._sweep_queue.keywords())
+        except Exception:
+            return
+        have = getattr(self, "_sweep_kws", None)
+        am = self.auto_monitor
+        running = am is not None and am.isRunning()
+        if have is None:
+            # 아직 안 떴거나 정지 요청 뒤 — 큐가 찼고 스레드가 빠졌으면 띄운다.
+            if want and not running:
+                self._start_search_sweep()
+            return
+        if want == have and (running or not want):
+            return
+        if want == have:
+            # AutoMonitor.run 은 루프 전체를 except 로 감싸므로 치명오류가 나면
+            # 스레드만 조용히 빠진다. _sweep_kws 는 남아 있어 want == have 가
+            # 계속 성립하고, 스윕은 세션 내내 죽은 채로 방치된다.
+            self.alertLog.append(
+                f"[검색스윕] 스레드가 죽어 있음 — 키워드 {len(want)}개로 되살립니다")
+        else:
+            self.alertLog.append(
+                f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
+        self._stop_search_sweep()          # _sweep_kws 를 None 으로 되돌린다
+        if want:
+            self._start_search_sweep()     # 아직 정지 중이면 다음 틱이 이어받는다
+
+    def _on_sweep_found(self, payload):
+        """검색 스윕이 찾은 매물도 앱 알림과 같은 문으로 워치리스트에 들어간다."""
+        kw = ""
+        try:
+            kws = self._sweep_queue.keywords()
+            title = payload.get("title") or ""
+            kw = next((k for k in kws if k in title), kws[0] if kws else "")
+        except Exception:
+            pass
+        norm = sweep_found_to_match(payload, kw)
+        if not norm or not self._watch_tracker:
+            return
+        try:
+            if self._watch_tracker.add_from_matches([norm], source="sweep"):
+                self._refresh_listing_table()
+        except Exception as e:
+            self.alertLog.append(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
+
 
     def _init_state(self):
         self.worker_thread: CancelableImageDownloader | None = None
@@ -3716,6 +4074,7 @@ def _run_headless():
     import sys as _sys, json as _json, os as _os, time as _time
     _chdir_app_dir()
     from daangn_ext.keyword_alert_api import MultiAccountAlerts, token_remaining
+    from daangn_ext.supervisor import SupervisorPolicy
 
     def log(m):
         print(f"[{_time.strftime('%H:%M:%S')}] {m}", flush=True)
@@ -3743,36 +4102,18 @@ def _run_headless():
         except Exception:
             return {}
 
-    SEEN_FP = "./data/match_seen.json"
-    def _load_seen():
-        try:
-            with open(SEEN_FP, encoding="utf-8") as f:
-                data = _json.load(f)
-            # 순서 보존 dedup(FIFO 유지)
-            out, s = [], set()
-            for k in data:
-                if k not in s:
-                    s.add(k); out.append(k)
-            return out
-        except Exception:
-            return []
-    def _save_seen(order):
-        try:
-            _os.makedirs(_os.path.dirname(SEEN_FP), exist_ok=True)
-            tmp = SEEN_FP + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                _json.dump(order[-5000:], f)
-            _os.replace(tmp, SEEN_FP)
-        except Exception:
-            pass
-
-    def _night_factor(nights_on):
-        if not nights_on:
+    def _night_factor_live():
+        if not bool(_settings().get("night")):
             return 1
         h = _time.localtime().tm_hour
         if 0 <= h < 7: return 3
         if 22 <= h < 24 or 7 <= h < 9: return 2
         return 1
+
+    # GUI 와 같은 간격 정책 공유 — 야간 감속 배수가 폴링·워치 스윕 양쪽에
+    # 같은 곳(SupervisorPolicy)에서 계산되게 한다(따로 계산하면 둘이 갈라진다).
+    policy = SupervisorPolicy(lambda: interval, _night_factor_live,
+                              sweep_interval=WATCH_SWEEP_INTERVAL)
 
     def _notify(items, nt):
         if not items:
@@ -3831,9 +4172,6 @@ def _run_headless():
                 log(f"[구글시트] 실패: {str(e)[:60]}")
 
     log("=== 헤드리스 무인 모니터 시작 ===")
-    seen_order = _load_seen()          # FIFO 순서 리스트
-    seen = set(seen_order)             # 빠른 조회
-    SEEN_CAP = 20000                   # 메모리 상한(무한증가 방지, 오래된 것 FIFO 축출)
     last_harvest = 0.0
     watch_store = watch_tracker = watch_budget = None
     last_watch_sweep = 0.0
@@ -3844,6 +4182,9 @@ def _run_headless():
         watch_budget = article_watch.AccountBudget("./accounts.json")
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
+    # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).
+    # 저장소를 못 열었거나 article_id 없는 매치만 이 집합으로 막는다.
+    fallback_seen = set()
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
     if "--register" in argv:
@@ -3859,7 +4200,6 @@ def _run_headless():
     while True:
         st = _settings()
         core_only = bool(st.get("core_only"))
-        nights = bool(st.get("night"))
         now = _time.time()
         # 자동수확(20분 주기)
         if do_harvest and now - last_harvest > 1200:
@@ -3880,17 +4220,9 @@ def _run_headless():
             matches = m.poll_all(core_only=core_only, log=log)
         except Exception as e:
             log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
-        fresh = []
-        for idx, x in enumerate(matches):
-            base = x.get("id") or x.get("article_id") or x.get("title")
-            k = str(base) if base else f"_noid_{now:.0f}_{idx}"   # 키 없으면 고유화(오탐 dedup 방지)
-            if k in seen: continue
-            seen.add(k); seen_order.append(k); fresh.append(x)
-        # 메모리 상한: 초과분 FIFO 축출(오래된 것부터)
-        if len(seen_order) > SEEN_CAP:
-            drop = seen_order[:-SEEN_CAP]
-            seen.difference_update(drop)
-            del seen_order[:-SEEN_CAP]
+        fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
+        if dropped:
+            log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
         if fresh:
             log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
             _notify(fresh, _notify_cfg())
@@ -3900,17 +4232,19 @@ def _run_headless():
                     log(f"[가격추적] {added}건 추적 시작")
             except Exception as e:
                 log(f"[가격추적] 등록 실패: {str(e)[:80]}")
-            _save_seen(seen_order)
         else:
             log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
-        # 워치리스트 스윕 — 폴링과 같은 스레드에서 10분 간격으로만
+        # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
         if watch_tracker and watch_budget and \
-                headless_watch_due(last_watch_sweep, now, WATCH_SWEEP_INTERVAL):
+                headless_watch_due(last_watch_sweep, now, policy.sweep_ms() // 1000):
             last_watch_sweep = now
             try:
                 dropped = watch_tracker.enforce_cap()
                 if dropped:
                     log(f"[가격추적] 상한 초과 {dropped}건 추적 중단")
+                # 예산은 GUI(_WatchSweepThread)와 같이 생짜 WATCH_SWEEP_INTERVAL 로 계산한다.
+                # 스윕 "빈도"만 야간에 느려지고, 한 번 돌 때의 회차 예산 크기는 안 커진다 —
+                # GUI 와 다르게 계산하면 두 런타임이 다시 갈라진다.
                 budget = watch_sweep_budget(watch_store.active_count(),
                                             WATCH_SWEEP_INTERVAL)
                 if budget:
@@ -3926,7 +4260,7 @@ def _run_headless():
                 log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
         if once:
             log("--once 완료"); break
-        eff = interval * _night_factor(nights)
+        eff = policy.poll_ms() // 1000
         log(f"다음 폴링 {eff}초 후")
         try:
             _time.sleep(eff)

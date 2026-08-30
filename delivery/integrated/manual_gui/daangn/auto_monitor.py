@@ -154,6 +154,7 @@ class AutoMonitor(QThread):
              "가격변동" if changed is not None else "신규"])
         # 결과 테이블용
         self.found.emit({
+            "id": article.get("id"),
             "region": region, "title": title, "price": price, "url": url,
             "image": article.get("thumbnail", ""), "desc": article.get("content", ""),
             "boostedAt": article.get("boostedAt", ""),

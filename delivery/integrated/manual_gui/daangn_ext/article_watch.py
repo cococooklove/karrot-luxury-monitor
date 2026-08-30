@@ -118,7 +118,13 @@ class ArticleDetailAPI:
 
 
 _COLUMNS = ("id", "title", "region", "url", "price", "status", "republish_count",
-            "published_at", "first_seen", "last_check", "next_check", "tier", "fail")
+            "published_at", "first_seen", "last_check", "next_check", "tier", "fail",
+            "keyword", "source", "first_price", "last_change", "last_delta")
+
+# 나중에 붙은 컬럼 — 기존 DB 에는 없으므로 열 때마다 ADD COLUMN 을 시도한다.
+_ADDED_COLUMNS = (("keyword", "TEXT"), ("source", "TEXT"),
+                  ("first_price", "INTEGER"), ("last_change", "INTEGER"),
+                  ("last_delta", "INTEGER"))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS watch (
@@ -134,9 +140,22 @@ CREATE TABLE IF NOT EXISTS watch (
     last_check INTEGER,
     next_check INTEGER,
     tier TEXT,
-    fail INTEGER
+    fail INTEGER,
+    keyword TEXT,
+    source TEXT,
+    first_price INTEGER,
+    last_change INTEGER,
+    last_delta INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_watch_due ON watch (tier, next_check);
+
+CREATE TABLE IF NOT EXISTS price_history (
+    article_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    price INTEGER NOT NULL,
+    PRIMARY KEY (article_id, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_price_hist ON price_history (article_id, ts DESC);
 """
 
 
@@ -151,6 +170,35 @@ class WatchStore:
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
         self._db.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """나중에 붙은 컬럼을 기존 DB 에 채운다. 이미 있으면 조용히 넘어간다.
+
+        별도 마이그레이션 러너를 두지 않는 이유는 컬럼 추가가 전부이고,
+        sqlite 의 ADD COLUMN 은 되돌릴 일이 없기 때문이다."""
+        for name, typ in _ADDED_COLUMNS:
+            try:
+                self._db.execute(f"ALTER TABLE watch ADD COLUMN {name} {typ}")
+            except sqlite3.OperationalError:
+                pass                    # duplicate column name
+        self._db.commit()
+
+    def add_price(self, article_id: str, ts: int, price: int) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO price_history (article_id, ts, price) "
+            "VALUES (?,?,?)", (str(article_id), int(ts), int(price)))
+        self._db.commit()
+
+    def price_history(self, article_id: str) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT ts, price FROM price_history WHERE article_id=? ORDER BY ts ASC",
+            (str(article_id),)).fetchall()
+        return [{"ts": r["ts"], "price": r["price"]} for r in rows]
+
+    def listing_rows(self) -> list[dict]:
+        rows = self._db.execute("SELECT * FROM watch").fetchall()
+        return [dict(r) for r in rows]
 
     def upsert(self, row: dict) -> None:
         vals = [row.get(c) for c in _COLUMNS]
@@ -217,6 +265,44 @@ def tier_for(published_at: int, now: int) -> str:
 
 def interval_for(tier: str) -> int:
     return {TIER_FRESH: FRESH_INTERVAL, TIER_AGED: AGED_INTERVAL}.get(tier, 0)
+
+
+STATE_NEW = "new"
+STATE_TRACKING = "tracking"
+STATE_DOWN = "down"
+STATE_UP = "up"
+STATE_PAUSED = "paused"
+STATE_ENDED = "ended"
+
+NEW_WINDOW = 24 * 3600
+CHANGE_WINDOW = 24 * 3600
+
+
+def state_for(row: dict, now: int) -> str:
+    """표에 보여줄 상태. 저장하지 않고 매번 파생한다.
+
+    tier 와 state 를 둘 다 저장하면 한쪽만 갱신되는 버그가 난다. tier 가 일정
+    정책의 진실이고, state 는 그것을 사람이 읽는 형태로 옮긴 것뿐이다.
+
+    최근 가격 변동이 '신규'보다 우선한다 — 갓 올라온 매물이 값을 내렸으면
+    그게 더 볼 만한 사실이다."""
+    tier = row.get("tier") or ""
+    if tier == TIER_DEAD:
+        return STATE_ENDED
+    if tier == TIER_EVICTED:
+        return STATE_PAUSED
+    now = int(now)
+    lc = int(row.get("last_change") or 0)
+    if lc and now - lc < CHANGE_WINDOW:
+        delta = int(row.get("last_delta") or 0)
+        if delta < 0:
+            return STATE_DOWN
+        if delta > 0:
+            return STATE_UP
+    fs = int(row.get("first_seen") or 0)
+    if fs and now - fs < NEW_WINDOW:
+        return STATE_NEW
+    return STATE_TRACKING
 
 
 def _ev(kind, old_row, new_row, old, new, now):
@@ -297,7 +383,7 @@ class WatchTracker:
     def _now(self, now=None) -> int:
         return int(now if now is not None else self._now_fn())
 
-    def add_from_matches(self, matches, now=None) -> int:
+    def add_from_matches(self, matches, now=None, source="app") -> int:
         now = self._now(now)
         added = 0
         for m in matches or []:
@@ -315,14 +401,13 @@ class WatchTracker:
             except (TypeError, ValueError):
                 published = 0
             tier = tier_for(published, now)
-            if tier == TIER_DEAD:
-                continue
+            price = parse_price_text(m.get("price"))
             self.store.upsert({
                 "id": aid,
                 "title": m.get("title") or "",
                 "region": m.get("region") or "",
                 "url": m.get("url") or "",
-                "price": parse_price_text(m.get("price")),
+                "price": price,
                 "status": STATUS_ONGOING,
                 "republish_count": 0,
                 "published_at": published,
@@ -331,7 +416,21 @@ class WatchTracker:
                 "next_check": now + interval_for(tier),
                 "tier": tier,
                 "fail": 0,
+                "keyword": m.get("keyword") or "",
+                "source": source,
+                # 씨앗 가격은 알림 표시 문자열에서 왔다. Δ 의 기준선으로 쓰되,
+                # 첫 실측 조회가 이 값을 덮어쓰지 않게 price 와 따로 둔다.
+                "first_price": price,
+                "last_change": 0,
+                "last_delta": 0,
             })
+            # 14일 넘은 매물은 추적하지 않는다. 그래도 행은 남긴다 — 행이 없으면
+            # 다음 폴링마다 '처음 본 매물'이 되어 같은 매물을 계속 재알림한다.
+            # 묘비일 뿐 구독이 아니므로 added 에는 세지 않는다.
+            if tier == TIER_DEAD:
+                continue
+            if price:
+                self.store.add_price(aid, now, price)
             added += 1
         return added
 
@@ -384,13 +483,17 @@ class WatchTracker:
         tier = tier_for(new.get("published_at") or old.get("published_at") or 0, now)
         if new.get("status") == STATUS_CLOSED:
             tier = TIER_DEAD
+        price = new.get("price") if isinstance(new.get("price"), int) \
+            else old.get("price")
+        old_price = old.get("price")
+        changed = (isinstance(price, int) and isinstance(old_price, int)
+                   and price != old_price and not seeding)
         self.store.upsert({
             "id": str(article_id),
             "title": new.get("title") or old.get("title"),
             "region": new.get("region") or old.get("region"),
             "url": new.get("url") or old.get("url"),
-            "price": new.get("price") if isinstance(new.get("price"), int)
-                     else old.get("price"),
+            "price": price,
             "status": new.get("status"),
             "republish_count": new.get("republish_count") or 0,
             "published_at": new.get("published_at") or old.get("published_at") or 0,
@@ -399,7 +502,16 @@ class WatchTracker:
             "next_check": now + interval_for(tier),
             "tier": tier,
             "fail": 0,
+            "keyword": old.get("keyword") or "",
+            "source": old.get("source") or "app",
+            # 씨앗 단계에서 first_price 가 비어 있으면(구버전 행) 첫 실측을 기준선으로 삼는다.
+            "first_price": old.get("first_price") or price,
+            "last_change": now if changed else (old.get("last_change") or 0),
+            "last_delta": (price - old_price) if changed
+                          else (old.get("last_delta") or 0),
         })
+        if changed:
+            self.store.add_price(str(article_id), now, price)
         return events
 
     def _note_failure(self, old, article_id, now) -> list[dict]:
