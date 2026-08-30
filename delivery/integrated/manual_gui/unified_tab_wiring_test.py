@@ -286,6 +286,114 @@ if _win is not None:
        and _win.alertTable.columnCount() == 5)
     # close() 는 부르지 않는다 — closeEvent 가 모달 확인창을 띄워 offscreen 에서 멈춘다.
 
+# ── 중복 판정(dedupe_new_matches) ──
+# match_seen.json 을 없앤 자리다. 여기가 틀리면 같은 매물을 폴링마다 재알림한다.
+print("=== 중복 판정 ===")
+
+
+class _FakeStore:
+    """id 로 행을 돌려주는 최소 watch 저장소."""
+
+    def __init__(self, ids=()):
+        self.ids = set(ids)
+        self.asked = []
+
+    def get(self, aid):
+        self.asked.append(aid)
+        return {"id": aid, "tier": "dead"} if aid in self.ids else None
+
+
+# 1) 키 순서: watch 는 article_id 로 키를 잡는다. 알림 인박스 id 를 먼저 보면
+#    저장소가 절대 가질 수 없는 키로 물어보게 된다.
+_st = _FakeStore({"777"})
+_fb = set()
+_fresh, _dropped = m.dedupe_new_matches(
+    [{"article_id": "777", "id": "inbox-1", "title": "이미 본 매물"}], _st, _fb)
+ck("article_id 로 물어본다", _st.asked == ["777"], str(_st.asked))
+ck("저장소에 있으면 신규 아님", _fresh == [] and _dropped == 0, str(_fresh))
+
+# 2) 저장소에 없으면 신규다. fallback 에는 넣지 않는다 — add_from_matches 가
+#    행(묘비 포함)을 쓰므로 다음 회차엔 저장소가 답한다.
+_st2 = _FakeStore()
+_fb2 = set()
+_fresh2, _ = m.dedupe_new_matches(
+    [{"article_id": "888", "id": "inbox-2"}], _st2, _fb2)
+ck("저장소에 없으면 신규", [x["article_id"] for x in _fresh2] == ["888"],
+   str(_fresh2))
+ck("저장소가 있으면 fallback 안 씀", _fb2 == set(), str(_fb2))
+
+# 3) article_id 없는 payload: 저장소는 인박스 id 를 절대 못 가지므로 물어보면
+#    영원히 None 이다. fallback 으로만 막는다.
+_st3 = _FakeStore()
+_fb3 = set()
+_NOART = [{"id": "inbox-9", "title": "article_id 없음"}]
+_f3a, _ = m.dedupe_new_matches(_NOART, _st3, _fb3)
+_f3b, _ = m.dedupe_new_matches(_NOART, _st3, _fb3)
+ck("article_id 없어도 첫 회는 신규", len(_f3a) == 1, str(_f3a))
+ck("article_id 없으면 저장소에 안 물어본다", _st3.asked == [], str(_st3.asked))
+ck("article_id 없으면 fallback 이 재알림 막는다", _f3b == [], str(_f3b))
+ck("fallback 에 인박스 id 가 들어간다", _fb3 == {"inbox-9"}, str(_fb3))
+
+# 4) 저장소를 못 연 경우(None): fallback 이 유일한 방어선이다.
+_fb4 = set()
+_M4 = [{"article_id": "555", "id": "inbox-5"}]
+_f4a, _ = m.dedupe_new_matches(_M4, None, _fb4)
+_f4b, _ = m.dedupe_new_matches(_M4, None, _fb4)
+ck("저장소 없어도 첫 회는 신규", len(_f4a) == 1, str(_f4a))
+ck("저장소 없으면 두 번째는 안 알린다", _f4b == [], str(_f4b))
+ck("저장소 없을 땐 article_id 로 fallback", _fb4 == {"555"}, str(_fb4))
+
+# 5) 키가 아예 없는 payload 는 버리되 건수를 돌려준다(로그로 보이게).
+_f5, _d5 = m.dedupe_new_matches([{"title": "키 없음"}], _FakeStore(), set())
+ck("키 없으면 버린다", _f5 == [], str(_f5))
+ck("버린 건수를 돌려준다", _d5 == 1, str(_d5))
+
+if _win is not None:
+    # ── _match_populate 가 그 문을 실제로 쓰는가 ──
+    _sv = (_win._watch_store, _win._watch_tracker, _win._match_seen_fallback)
+    _notified = []
+    _win._notify_matches = lambda items: _notified.append(list(items))
+    _win._refresh_listing_table = lambda: None
+    _win._refresh_alert_health = lambda: None
+    _win._watch_tracker = None
+    _win._watch_store = _FakeStore({"777"})
+    _win._match_seen_fallback = set()
+    _win.alertLog.clear()
+    _win._match_populate([{"article_id": "777", "id": "inbox-1"},
+                          {"article_id": "888", "id": "inbox-2"},
+                          {"title": "키 없음"}])
+    ck("본 매물은 빼고 신규만 알린다",
+       [x.get("article_id") for x in (_notified[0] if _notified else [])] == ["888"],
+       str(_notified))
+    ck("_last_new 는 신규 건수", _win._last_new == 1, str(_win._last_new))
+    ck("버린 payload 를 로그에 남긴다",
+       "id 없는 payload" in _win.alertLog.toPlainText(),
+       _win.alertLog.toPlainText().strip()[:80])
+
+    # 저장소를 못 연 창(=None)이어도 같은 매물을 두 번 알리지 않는다.
+    _win._watch_store = None
+    _win._match_seen_fallback = set()
+    _notified.clear()
+    _win._match_populate([{"article_id": "999", "id": "inbox-3"}])
+    _win._match_populate([{"article_id": "999", "id": "inbox-3"}])
+    ck("저장소 없어도 한 번만 알린다", len(_notified) == 1, str(_notified))
+    for _n in ("_notify_matches", "_refresh_listing_table", "_refresh_alert_health"):
+        _win.__dict__.pop(_n, None)
+    (_win._watch_store, _win._watch_tracker, _win._match_seen_fallback) = _sv
+    _win.alertLog.clear()
+
+# 헤드리스도 같은 문을 쓴다 — 소스에 옛 FIFO 가 남아 있으면 갈라진 것이다.
+import inspect as _inspect
+
+_src = _inspect.getsource(m._run_headless)
+ck("헤드리스가 dedupe_new_matches 를 쓴다", "dedupe_new_matches(" in _src)
+ck("헤드리스에 fallback 집합이 있다", "fallback_seen = set()" in _src)
+ck("헤드리스 옛 FIFO 제거", not any(
+    s in _src for s in ("SEEN_FP", "seen_order", "SEEN_CAP", "_save_seen")))
+ck("GUI 에 match_seen 파일 코드 없음",
+   not any(hasattr(m.MainWindow, n) for n in
+           ("_MATCH_SEEN_FILE", "_load_match_seen", "_save_match_seen")))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

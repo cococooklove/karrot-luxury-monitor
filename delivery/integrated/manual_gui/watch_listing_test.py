@@ -168,10 +168,19 @@ ck("오래된 매치는 추적수에 안 셈", tr4.add_from_matches(OLD, now=NOW
 r99 = st4.get("99")
 ck("그래도 행은 남는다", r99 is not None)
 ck("등급은 dead", r99 and r99["tier"] == aw.TIER_DEAD, str(r99 and r99.get("tier")))
-ck("dead 는 active 아님", st4.active_count() == 0, str(st4.active_count()))
-ck("dead 는 due 없음", st4.due(NOW + 10 * DAY, 10) == [], str(st4.due(NOW, 10)))
+# 빈 DB 에서도 참인 명제라 행 존재와 묶어서 확인한다 — 안 그러면 묘비가 없어도
+# 통과하는 검사가 된다.
+ck("묘비가 있는데도 active 아님",
+   r99 is not None and st4.active_count() == 0, str(st4.active_count()))
+ck("묘비가 있는데도 due 없음",
+   r99 is not None and st4.due(NOW + 10 * DAY, 10) == [], str(st4.due(NOW, 10)))
 ck("두 번째 투입도 0 — 재알림 안 남", tr4.add_from_matches(OLD, now=NOW + 60) == 0)
-ck("묘비는 그대로 dead", st4.get("99")["tier"] == aw.TIER_DEAD)
+r99b = st4.get("99")
+ck("묘비는 그대로 dead",
+   r99b is not None and r99b["tier"] == aw.TIER_DEAD, str(r99b))
+# 씨앗 가격만 있고 이력은 안 쌓는다 — 추적이 아니라 묘비다.
+ck("묘비는 가격 이력 안 남김", st4.price_history("99") == [],
+   str(st4.price_history("99")))
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

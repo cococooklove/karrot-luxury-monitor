@@ -20,9 +20,12 @@ try:
 except Exception as e:
     print("dashboard err", e)
 
-# 매칭 (렌더용 — seen 초기화해 항상 표시, 영속파일 오염 방지)
-w._match_seen = set()
-w._save_match_seen = lambda: None
+# 매칭 (렌더용 — 중복 판정을 끊어 항상 표시, 실제 watch.db 오염 방지)
+# 중복 판정은 이제 watch 테이블이 한다. 저장소를 떼면 프로세스 안의 fallback
+# 집합만 보므로, 샘플 매물이 매번 새로 그려지고 DB 에는 아무것도 안 쓴다.
+w._watch_store = None
+w._watch_tracker = None
+w._match_seen_fallback = set()
 w._notify_matches = lambda items: None            # 렌더 중 텔레그램 발송 방지
 LIVE = os.environ.get("RENDER_LIVE") == "1"
 try:

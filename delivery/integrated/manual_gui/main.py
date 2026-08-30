@@ -164,6 +164,38 @@ def sweep_found_to_match(payload, keyword):
             "keyword": keyword or ""}
 
 
+def dedupe_new_matches(matches, watch_store, fallback):
+    """폴링 결과에서 아직 안 본 매치만 고른다 → (fresh, dropped).
+
+    watch 테이블이 '본 매물'의 진실이다 — dead 행을 지우지 않으므로 판매완료·
+    삭제된 매물이 다시 떠도 재알림하지 않는다.
+
+    다만 watch 는 article_id 로만 키를 잡는다(add_from_matches). 그래서
+    article_id 가 없는 매치(알림 인박스 id 만 있는 payload)나 저장소를 못 연
+    경우는 저장소에 물어봐야 영원히 None 이 돌아온다 — 폴링마다 재알림이다.
+    그 두 경우만 프로세스 안의 fallback 집합으로 막는다. GUI·헤드리스가 같은
+    문을 쓰게 한 곳에 둔다(따로 두면 한쪽만 고쳐진다).
+
+    fallback 은 이 함수가 갱신한다. dropped 는 키가 아예 없어 버린 건수다.
+    """
+    fresh, dropped = [], 0
+    for m in matches or []:
+        art = str((m or {}).get("article_id") or "")
+        key = art or str((m or {}).get("id") or "")
+        if not key:
+            dropped += 1
+            continue
+        if art and watch_store is not None:
+            if watch_store.get(art) is not None:
+                continue
+        elif key in fallback:
+            continue
+        else:
+            fallback.add(key)
+        fresh.append(m)
+    return fresh, dropped
+
+
 def headless_watch_due(last_sweep, now, interval):
     """헤드리스 루프에서 이번 회에 스윕할 차례인지.
 
@@ -1271,6 +1303,9 @@ class MainWindow(QMainWindow):
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
         # ── 워치리스트(가격변동 추적) ──
+        # 중복 판정은 watch 테이블이 한다. 저장소를 못 열었거나 article_id 가
+        # 없는 매치는 테이블에 행이 생길 수 없으므로 이 집합으로만 막는다.
+        self._match_seen_fallback = set()
         self._watch_store = None
         self._watch_tracker = None
         self._watch_budget = None
@@ -1925,19 +1960,12 @@ class MainWindow(QMainWindow):
         if matches is None:
             self._last_new = 0
             return
-        new = 0
-        new_items = []
-        for m in matches:
-            aid = str(m.get("article_id") or m.get("id") or "")
-            if not aid:
-                continue
-            # watch 테이블이 '본 매물'의 진실이다 — dead 행을 지우지 않으므로
-            # 판매완료·삭제된 매물이 다시 떠도 재알림하지 않는다.
-            if self._watch_store and self._watch_store.get(aid) is not None:
-                continue
-            new += 1
-            new_items.append(m)
+        new_items, dropped = dedupe_new_matches(
+            matches, self._watch_store, self._match_seen_fallback)
+        new = len(new_items)
         self._last_new = new
+        if dropped:
+            self.alertLog.append(f"[매칭] id 없는 payload {dropped}건 건너뜀")
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가")
             self._notify_matches(new_items)
@@ -4131,7 +4159,7 @@ def _run_headless():
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
     # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).
-    # 저장소가 없을 때만 이 프로세스 안에서 쓰는 대체 집합으로 재알림을 막는다.
+    # 저장소를 못 열었거나 article_id 없는 매치만 이 집합으로 막는다.
     fallback_seen = set()
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
     # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
@@ -4168,19 +4196,9 @@ def _run_headless():
             matches = m.poll_all(core_only=core_only, log=log)
         except Exception as e:
             log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
-        fresh = []
-        for x in matches:
-            aid = str(x.get("article_id") or x.get("id") or "")
-            if not aid:
-                continue
-            if watch_store is not None:
-                if watch_store.get(aid) is not None:
-                    continue
-            elif aid in fallback_seen:
-                continue
-            else:
-                fallback_seen.add(aid)
-            fresh.append(x)
+        fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
+        if dropped:
+            log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
         if fresh:
             log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
             _notify(fresh, _notify_cfg())
