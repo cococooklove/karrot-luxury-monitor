@@ -492,14 +492,19 @@ def dedupe_new_matches(matches, watch_store, fallback):
     삭제된 매물이 다시 떠도 재알림하지 않는다.
 
     다만 watch 는 article_id 로만 키를 잡는다(add_from_matches). 그래서
-    article_id 가 없는 매치(알림 인박스 id 만 있는 payload)나 저장소를 못 연
-    경우는 저장소에 물어봐야 영원히 None 이 돌아온다 — 폴링마다 재알림이다.
-    그 두 경우만 프로세스 안의 fallback 집합으로 막는다. GUI·헤드리스가 같은
-    문을 쓰게 한 곳에 둔다(따로 두면 한쪽만 고쳐진다).
+    article_id 가 없는 매치(광고 등 알림 인박스 id 만 있는 payload)는 저장소에
+    물어봐야 영원히 None 이 돌아온다 — 폴링마다 재알림이다. 그 키는 같은 DB 의
+    seen_key 테이블이 받는다(watch 행이 아니다 — 매물이 아니므로 표에도 안 뜨고
+    조회 대상도 아니다). 재시작해도 남는다.
+
+    프로세스 안의 fallback 집합은 저장소를 아예 못 연 경우의 마지막 방어선으로만
+    남는다(그때는 어차피 남길 곳이 없다). GUI·헤드리스가 같은 문을 쓰게 한 곳에
+    둔다(따로 두면 한쪽만 고쳐진다).
 
     fallback 은 이 함수가 갱신한다. dropped 는 키가 아예 없어 버린 건수다.
     """
     fresh, dropped = [], 0
+    durable = getattr(watch_store, "seen_key_add", None) if watch_store else None
     for m in matches or []:
         art = str((m or {}).get("article_id") or "")
         key = art or str((m or {}).get("id") or "")
@@ -508,6 +513,9 @@ def dedupe_new_matches(matches, watch_store, fallback):
             continue
         if art and watch_store is not None:
             if watch_store.get(art) is not None:
+                continue
+        elif durable is not None:
+            if not durable(key):        # 이미 기록된 키 — 재알림 금지
                 continue
         elif key in fallback:
             continue
@@ -1624,8 +1632,8 @@ class MainWindow(QMainWindow):
         self._alert_poll_timer = QtCore.QTimer(self)
         self._alert_poll_timer.timeout.connect(self._auto_poll_tick)  # 자동폴링=전국(전계정)
         # ── 워치리스트(가격변동 추적) ──
-        # 중복 판정은 watch 테이블이 한다. 저장소를 못 열었거나 article_id 가
-        # 없는 매치는 테이블에 행이 생길 수 없으므로 이 집합으로만 막는다.
+        # 중복 판정은 watch(article_id) + seen_key(인박스 id) 테이블이 한다.
+        # 이 집합은 저장소를 아예 못 열었을 때만 쓰는 마지막 방어선이다.
         self._match_seen_fallback = set()
         self._watch_store = None
         self._watch_tracker = None
@@ -4478,7 +4486,8 @@ def _run_headless():
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
     # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).
-    # 저장소를 못 열었거나 article_id 없는 매치만 이 집합으로 막는다.
+    # article_id 없는 매치는 같은 DB 의 seen_key 테이블이 받아 재시작해도 남는다.
+    # 이 집합은 저장소를 아예 못 열었을 때만 쓰는 마지막 방어선이다.
     fallback_seen = set()
     m = MultiAccountAlerts("./accounts.json", "./data/config.json")
 

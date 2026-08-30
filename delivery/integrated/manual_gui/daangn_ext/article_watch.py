@@ -160,7 +160,21 @@ CREATE TABLE IF NOT EXISTS price_history (
     PRIMARY KEY (article_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_price_hist ON price_history (article_id, ts DESC);
+
+-- article_id 가 없는 매치(광고 등 알림 인박스 id 만 있는 payload)의 중복 판정.
+-- watch 에 넣지 않는 이유: watch 행은 '추적 대상 매물'이고 listing_rows() 와
+-- add_from_matches 가 그렇게 다룬다. 인박스 id 는 매물이 아니므로 표에 뜨거나
+-- 조회 대상이 되면 안 된다. 그래서 같은 DB 안의 별도 테이블이다(파일을 또
+-- 만들면 match_seen.json 을 되살리는 셈이다).
+CREATE TABLE IF NOT EXISTS seen_key (
+    key TEXT PRIMARY KEY,
+    seen_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seen_key_at ON seen_key (seen_at DESC);
 """
+
+# 옛 match_seen.json 과 같은 상한. 무한히 자라는 게 그 파일을 접은 이유다.
+SEEN_KEY_CAP = 5000
 
 
 class WatchStore:
@@ -199,6 +213,43 @@ class WatchStore:
             "SELECT ts, price FROM price_history WHERE article_id=? ORDER BY ts ASC",
             (str(article_id),)).fetchall()
         return [{"ts": r["ts"], "price": r["price"]} for r in rows]
+
+    def seen_key_add(self, key, now=None, cap: int = SEEN_KEY_CAP) -> bool:
+        """처음 보는 키면 기록하고 True. 이미 본 키면 False(= 재알림 금지).
+
+        article_id 없는 매치 전용이다. 판정과 기록이 한 번의 INSERT 로 끝나야
+        같은 폴링 배치 안에 같은 키가 두 번 있어도 한 번만 새것이 된다."""
+        key = str(key or "")
+        if not key:
+            return False
+        ts = int(now if now is not None else time.time())
+        cur = self._db.execute(
+            "INSERT OR IGNORE INTO seen_key (key, seen_at) VALUES (?,?)", (key, ts))
+        fresh = cur.rowcount > 0
+        if fresh:
+            self._prune_seen_keys(cap)
+        self._db.commit()
+        return fresh
+
+    def _prune_seen_keys(self, cap: int = SEEN_KEY_CAP) -> int:
+        """상한 초과분을 오래된 것부터 버린다. 커밋은 호출자가 한다."""
+        cap = max(1, int(cap))
+        n = self._db.execute("SELECT COUNT(*) c FROM seen_key").fetchone()["c"]
+        if n <= cap:
+            return 0
+        self._db.execute(
+            "DELETE FROM seen_key WHERE key IN ("
+            "SELECT key FROM seen_key ORDER BY seen_at ASC, rowid ASC LIMIT ?)",
+            (n - cap,))
+        return n - cap
+
+    def seen_key_has(self, key) -> bool:
+        r = self._db.execute("SELECT 1 FROM seen_key WHERE key=?",
+                             (str(key or ""),)).fetchone()
+        return r is not None
+
+    def seen_key_count(self) -> int:
+        return self._db.execute("SELECT COUNT(*) c FROM seen_key").fetchone()["c"]
 
     def listing_rows(self) -> list[dict]:
         rows = self._db.execute("SELECT * FROM watch").fetchall()

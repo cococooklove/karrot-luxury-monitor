@@ -435,6 +435,32 @@ ck("저장소 없어도 첫 회는 신규", len(_f4a) == 1, str(_f4a))
 ck("저장소 없으면 두 번째는 안 알린다", _f4b == [], str(_f4b))
 ck("저장소 없을 땐 article_id 로 fallback", _fb4 == {"555"}, str(_fb4))
 
+# 4-b) 저장소가 seen_key 를 낼 수 있으면 article_id 없는 키는 거기에 남는다.
+#      프로세스 집합은 재시작하면 비므로 그것만으론 폴링마다 재알림이었다.
+import tempfile as _tf
+
+_dbp = os.path.join(_tf.mkdtemp(), "watch.db")
+_NOART2 = [{"id": "inbox-ad-1", "title": "광고 — articleId 없음"}]
+_store_a = aw.WatchStore(_dbp)
+_fb6 = set()
+_f6a, _ = m.dedupe_new_matches(_NOART2, _store_a, _fb6)
+ck("영속 저장소여도 첫 회는 신규", len(_f6a) == 1, str(_f6a))
+ck("영속 저장소가 있으면 프로세스 집합은 안 쓴다", _fb6 == set(), str(_fb6))
+_f6dup, _ = m.dedupe_new_matches(_NOART2 * 2, _store_a, _fb6)
+ck("같은 회차에 같은 키가 둘이어도 한 번만", _f6dup == [], str(_f6dup))
+_store_a.close()
+
+_store_b = aw.WatchStore(_dbp)                      # 재시작
+_f6b, _ = m.dedupe_new_matches(_NOART2, _store_b, set())
+ck("재시작해도 다시 안 알린다", _f6b == [], str(_f6b))
+ck("키는 매물 표에 안 뜬다",
+   m.listing_display_rows(_store_b.listing_rows(), NOW) == [],
+   str(_store_b.listing_rows()))
+ck("키는 추적 대상이 아니다",
+   aw.WatchTracker(_store_b).add_from_matches(_NOART2) == 0)
+ck("키가 watch 행이 되지도 않는다", _store_b.get("inbox-ad-1") is None)
+_store_b.close()
+
 # 5) 키가 아예 없는 payload 는 버리되 건수를 돌려준다(로그로 보이게).
 _f5, _d5 = m.dedupe_new_matches([{"title": "키 없음"}], _FakeStore(), set())
 ck("키 없으면 버린다", _f5 == [], str(_f5))
