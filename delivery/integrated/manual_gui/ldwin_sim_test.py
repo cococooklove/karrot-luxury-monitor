@@ -49,9 +49,20 @@ class FakeWin32:
         rect.right, rect.bottom = w["x"] + w["w"], w["y"] + w["h"]
         return 1
 
+    DESKTOP = 65536
+
+    def GetDesktopWindow(self):
+        return self.DESKTOP
+
     def GetParent(self, h):
+        """실제 Win32 규약: 부모가 없어도 WS_CHILD 가 남아 있으면 바탕화면
+        핸들을 돌려준다. 0 인지만 보는 코드는 여기서 걸린다."""
         w = self.windows.get(h)
-        return w["parent"] if w else 0
+        if not w:
+            return 0
+        if w["parent"] == 0 and w["style"] & ldwin.WS_CHILD:
+            return self.DESKTOP
+        return w["parent"]
 
     def SetParent(self, h, parent):
         w = self.windows.get(h)

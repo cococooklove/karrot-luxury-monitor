@@ -11,6 +11,11 @@ LDPlayer 는 인스턴스마다 별도 프로세스(dnplayer.exe)의 top-level �
   입력 큐를 붙이면 GUI 까지 같이 얼어붙는다. 대신 클릭 시 SetFocus 만 준다.
 - Windows 전용. 다른 OS 에서는 IS_WINDOWS=False 이고 모든 함수가 무해한
   기본값을 돌려준다(개발 머신에서 import 만 해도 죽지 않게).
+- **QApplication 을 만든 뒤에 쓸 것.** Qt 는 시작할 때 프로세스 DPI 인식을
+  PER_MONITOR_AWARE_V2 로 바꾸고, 그 전후로 GetWindowRect 좌표계가 달라진다
+  (200% 스케일 서버에서 정확히 2배 차이나는 걸 확인했다). Qt 전에 좌표를
+  기억해 두면 복원 때 창이 절반 크기로 튀어나온다. main.py 는 QApplication →
+  MainWindow → _build_emul_tab 순서라 안전하다.
 """
 
 import os
@@ -18,6 +23,14 @@ import subprocess
 import sys
 
 IS_WINDOWS = sys.platform.startswith("win")
+
+
+def _log(msg):
+    """콘솔 인코딩(cp949/cp1252)이 한글을 못 받아도 죽지 않게."""
+    try:
+        print(msg)
+    except Exception:
+        pass
 
 # ── ldconsole ────────────────────────────────────────────────────────────────
 
@@ -190,6 +203,8 @@ if IS_WINDOWS:
     _u32.PrintWindow.restype = wintypes.BOOL
     _u32.GetParent.argtypes = [wintypes.HWND]
     _u32.GetParent.restype = wintypes.HWND
+    _u32.GetDesktopWindow.argtypes = []
+    _u32.GetDesktopWindow.restype = wintypes.HWND
     _u32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
     _u32.GetWindow.restype = wintypes.HWND
     _u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
@@ -264,10 +279,16 @@ def _process_name(pid, cache):
 
 
 def player_windows():
-    """지금 살아 있는 LDPlayer 인스턴스 창 전부 — [{hwnd, pid, title}].
+    """지금 살아 있는 LDPlayer 인스턴스 창 전부 — [{hwnd, pid, title}]."""
+    return top_windows(exes=PLAYER_EXES)
+
+
+def top_windows(pid=None, exes=None, min_edge=MIN_PLAYER_EDGE):
+    """조건에 맞는 top-level 창 목록 — [{hwnd, pid, title}].
 
     숨겨졌거나 화면 밖으로 치워진 창도 포함한다(크래시 잔재 복구에 필요).
     소유자 있는 창(대화상자)·작은 창은 걸러 본체만 남긴다.
+    exes 를 주면 그 실행파일의 창만, pid 를 주면 그 프로세스의 창만 남긴다.
     """
     if not IS_WINDOWS:
         return []
@@ -281,17 +302,19 @@ def player_windows():
             rect = wintypes.RECT()
             if not _u32.GetWindowRect(hwnd, ctypes.byref(rect)):
                 return True
-            if (rect.right - rect.left < MIN_PLAYER_EDGE
-                    or rect.bottom - rect.top < MIN_PLAYER_EDGE):
+            if (rect.right - rect.left < min_edge
+                    or rect.bottom - rect.top < min_edge):
                 return True
-            pid = wintypes.DWORD(0)
-            _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if _process_name(pid.value, cache) not in PLAYER_EXES:
+            wpid = wintypes.DWORD(0)
+            _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if pid is not None and wpid.value != pid:
+                return True
+            if exes is not None and _process_name(wpid.value, cache) not in exes:
                 return True
             n = _u32.GetWindowTextLengthW(hwnd)
             buf = ctypes.create_unicode_buffer(n + 2)
             _u32.GetWindowTextW(hwnd, buf, n + 2)
-            found.append({"hwnd": int(hwnd), "pid": pid.value,
+            found.append({"hwnd": int(hwnd), "pid": wpid.value,
                           "title": buf.value.strip()})
         except Exception:
             pass
@@ -305,6 +328,37 @@ def is_window(hwnd):
     if not IS_WINDOWS or not hwnd:
         return False
     return bool(_u32.IsWindow(wintypes.HWND(hwnd)))
+
+
+def desktop_hwnd():
+    return int(_u32.GetDesktopWindow() or 0) if IS_WINDOWS else 0
+
+
+def _is_top_level(h):
+    """부모에서 떨어져 나왔는지 판정.
+
+    SetParent(hwnd, NULL) 뒤에도 WS_CHILD 가 아직 남아 있으면 GetParent 는
+    NULL 이 아니라 **바탕화면 핸들**을 돌려준다. 0 인지만 보면 성공을 실패로
+    오판한다(실제 서버에서 이 오판이 관측됐다). 바탕화면도 '부모 없음'으로 친다.
+    """
+    p = int(_u32.GetParent(h) or 0)
+    return p == 0 or p == int(_u32.GetDesktopWindow() or 0)
+
+
+def window_state(hwnd):
+    """진단용 창 상태 덤프 — 어디서 어긋났는지 보려면 이걸 찍는다."""
+    if not IS_WINDOWS or not is_window(hwnd):
+        return {"alive": False}
+    h = wintypes.HWND(hwnd)
+    rect = wintypes.RECT()
+    _u32.GetWindowRect(h, ctypes.byref(rect))
+    return {"alive": True,
+            "rect": (rect.left, rect.top, rect.right - rect.left,
+                     rect.bottom - rect.top),
+            "style": hex(_get_long(h, GWL_STYLE) & 0xFFFFFFFF),
+            "exstyle": hex(_get_long(h, GWL_EXSTYLE) & 0xFFFFFFFF),
+            "visible": bool(_u32.IsWindowVisible(h)),
+            "parent": int(_u32.GetParent(h) or 0)}
 
 
 def is_visible(hwnd):
@@ -480,12 +534,12 @@ class Embedder:
         x, y, w, h_ = self._home.get(hwnd, (80, 80, 900, 1600))
         hw = wintypes.HWND(hwnd)
         _u32.SetParent(hw, wintypes.HWND(0))
-        if int(_u32.GetParent(hw) or 0) != 0:
+        if not _is_top_level(hw):
             # 떼내기 실패 — 스타일까지 바꾸면 자식인 채 장식만 붙은 괴상한 창이
             # 된다. 기록을 되돌려 놓고(종료 때 한 번 더 시도) 그대로 둔다.
             self._saved[hwnd] = saved
-            print(f"[ldwin] SetParent 해제 실패 hwnd={hwnd} "
-                  f"err={ctypes.get_last_error()}")
+            _log(f"[ldwin] SetParent 해제 실패 hwnd={hwnd} "
+                 f"err={ctypes.get_last_error()}")
             return False
         _set_long(hw, GWL_STYLE, style)
         _set_long(hw, GWL_EXSTYLE, exstyle)
