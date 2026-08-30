@@ -62,6 +62,18 @@ q4 = SweepQueue(p4)
 q4.add("프라다", at=50)
 ck("디렉토리 자동 생성", os.path.exists(p4))
 
+# ── 반환값은 내부 상태를 공유하지 않는다 ──
+qm = SweepQueue(os.path.join(d, "mut.json"))
+qm.add("발렌시아가", exclude=["가품"], at=60)
+got = qm.entries()[0]
+got["exclude"].append("오염")
+ck("entries 의 exclude 변이가 큐에 안 샘",
+   qm.entries()[0]["exclude"] == ["가품"], str(qm.entries()[0]["exclude"]))
+got2 = qm.oldest(1)[0]
+got2["exclude"].append("오염2")
+ck("oldest 의 exclude 변이가 큐에 안 샘",
+   qm.oldest(1)[0]["exclude"] == ["가품"], str(qm.oldest(1)[0]["exclude"]))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

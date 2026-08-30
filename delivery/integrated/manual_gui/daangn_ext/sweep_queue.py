@@ -70,10 +70,17 @@ class SweepQueue:
         return [i["keyword"] for i in self._ordered()]
 
     def entries(self) -> list[dict]:
-        return [dict(i) for i in self._ordered()]
+        return [self._copy(i) for i in self._ordered()]
 
     def oldest(self, n: int) -> list[dict]:
-        return [dict(i) for i in self._ordered()[:max(0, int(n))]]
+        return [self._copy(i) for i in self._ordered()[:max(0, int(n))]]
+
+    @staticmethod
+    def _copy(item: dict) -> dict:
+        """exclude 는 리스트다 — dict(item) 만으로는 내부 상태를 그대로 넘겨준다."""
+        return {"keyword": item["keyword"], "min": item["min"],
+                "max": item["max"], "exclude": list(item["exclude"]),
+                "at": item["at"]}
 
     def _ordered(self) -> list[dict]:
         return sorted(self._items, key=lambda i: i.get("at") or 0)
