@@ -6,11 +6,28 @@
 #     끝내 안 뜬다. → 루프백 RDP 로 세션을 승격시킨 뒤에 기동한다.
 #  2) 인스턴스를 동시에 launch 하면 같은 증상으로 hang 한다. → 1개씩, 그리고 다음 것을
 #     띄우기 전에 adb 기기 수가 실제로 늘었는지 확인한다.
-$ld = "D:\LDPlayer\LDPlayer9"
-$adb = "$ld\adb.exe"
-$console = "$ld\ldconsole.exe"
 $log = "C:\karrot\ldboot.log"
 function W($m) { "$([DateTime]::Now.ToString('HH:mm:ss')) $m" | Out-File $log -Append -Encoding UTF8 }
+
+# LDPlayer 설치 경로는 서버마다 다르다(현행 운영 서버는 D:, 문서 예시는 C:).
+# 하드코딩하면 다른 서버로 그대로 옮겼을 때 launch 가 조용히 아무 일도 안 하고 끝난다.
+# → 후보 루트를 훑어 adb.exe + ldconsole.exe 가 실제로 있는 폴더를 찾는다.
+$ld = $null
+foreach ($root in @("D:\LDPlayer", "C:\LDPlayer", "C:\Program Files\LDPlayer", "C:\Program Files (x86)\LDPlayer")) {
+    if (-not (Test-Path $root)) { continue }
+    $cands = @($root) + @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+                          Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+    foreach ($c in $cands) {
+        if ((Test-Path "$c\adb.exe") -and ((Test-Path "$c\ldconsole.exe") -or (Test-Path "$c\dnconsole.exe"))) {
+            $ld = $c; break
+        }
+    }
+    if ($ld) { break }
+}
+if (-not $ld) { W "LDPlayer 설치 경로를 찾지 못했습니다 - 중단"; exit 1 }
+$adb = "$ld\adb.exe"
+$console = if (Test-Path "$ld\ldconsole.exe") { "$ld\ldconsole.exe" } else { "$ld\dnconsole.exe" }
+W "LDPlayer 경로: $ld"
 function DevCount { (& $adb devices | Select-String "device$").Count }
 W "=== ldboot 시작 ==="
 
