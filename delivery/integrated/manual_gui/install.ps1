@@ -1,4 +1,4 @@
-# Karrot monitor - one-shot server install (Windows Server). No git/winget needed.
+﻿# Karrot monitor - one-shot server install (Windows Server). No git/winget needed.
 # Run in RDP PowerShell:
 #   iwr <raw>/install.ps1 -OutFile $env:TEMP\ins.ps1; & $env:TEMP\ins.ps1
 $ErrorActionPreference = "Stop"
@@ -49,5 +49,14 @@ Log "4/4 Headless smoke (--once)"
 python main.py --headless --once --no-harvest
 if ($LASTEXITCODE -ne 0) { Fail ("headless smoke failed (exit " + $LASTEXITCODE + ")") }
 
+# 5) Desktop shortcuts (best-effort: RDP session with no desktop still installs fine)
+Log "5/5 Desktop shortcuts"
+try {
+  & "$app\make_shortcuts.ps1" -AppDir $app
+} catch {
+  Write-Host ("[install] shortcut skipped: " + $_.Exception.Message) -ForegroundColor Yellow
+}
+
 Write-Host ("[install] DONE. path: " + $app) -ForegroundColor Green
 Write-Host "[install] next: place notify.json/accounts.json/config.json + LDPlayer, then: python main.py --headless" -ForegroundColor Green
+Write-Host "[install] desktop icons: '당근 명품 모니터' (GUI) / '당근 모니터 (서버·무인)' (headless)" -ForegroundColor Green
