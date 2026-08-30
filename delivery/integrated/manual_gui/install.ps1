@@ -37,7 +37,10 @@ $keep = @("accounts.json", "notify.json", "credentials.json", "settings.txt",
           "proxies.txt", "auto_seen.db",
           "data\config.json", "data\watch.db", "data\alert_settings.json",
           "data\keyword_routes.json", "data\sweep_queue.json",
-          "data\watch_budget.json")
+          "data\watch_budget.json",
+          # 잃어도 다시 쌓이지만, account_state 를 잃으면 격리해 둔 정지 계정을
+          # 처음부터 다시 두드리고 account_regions 를 잃으면 커버 집계가 0 이 된다.
+          "data\account_state.json", "data\account_regions.json")
 # 백업 폴더는 실행마다 새로 만든다. 예전에는 고정 경로를 먼저 지웠는데,
 # 앞선 실행이 백업을 마치고 삭제 도중 실패해 C:\karrot 이 반쯤 파인 상태였다면
 # 재실행이 멀쩡한 백업을 지우고 파인 트리에서 다시 백업해 자격증명을 영영
