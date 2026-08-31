@@ -25,12 +25,48 @@ LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다"
 WATCH_SWEEP_INTERVAL = 600          # 워치리스트 스윕 주기(초)
 
 _WATCH_LABELS = {
+    "entered_range": "🎯 조건 진입(가격 인하)",
     "price_down": "↓ 가격 인하",
     "price_up": "↑ 가격 인상",
     "sold": "판매완료",
     "deleted": "삭제됨",
     "republished": "끌올",
 }
+
+
+def mark_range_entries(events, store, router):
+    """가격이 내려와 조건 범위에 '들어온' 이벤트를 따로 표시한다.
+
+    상한보다 비싸 알림을 보내지 않은 매물도 추적은 하고 있다(라우터가 당근에
+    여유 상한으로 등록해 둔 덕에 우리 시야에는 들어와 있다). 그 값이 내려와
+    조건 안으로 들어오면 그때 처음 알린다 — 처음 270만이던 매물이 250만이
+    되면 알려 달라는 요구가 이것이다.
+
+    판정 근거는 인하 전후 가격이다. 내리기 전에는 범위 밖이었고 내린 뒤
+    범위 안이면 '조건 진입'이다. 원래부터 범위 안이던 매물의 인하는 지금처럼
+    '가격 인하'로 남는다."""
+    if not events or store is None or router is None:
+        return events
+    out = []
+    for e in events:
+        if e.get("kind") != "price_down":
+            out.append(e)
+            continue
+        try:
+            row = store.get(e.get("id")) or {}
+            cond = router.condition_for(row.get("keyword"))
+            mx = cond.get("max")
+            mn = cond.get("min")
+            new, old = int(e.get("new") or 0), int(e.get("old") or 0)
+            if mx and new and old:
+                def inside(v):
+                    return (mn is None or v >= int(mn)) and v <= int(mx)
+                if inside(new) and not inside(old):
+                    e = dict(e, kind="entered_range")
+        except Exception:
+            pass
+        out.append(e)
+    return out
 
 
 def watch_event_lines(events):
@@ -43,7 +79,7 @@ def watch_event_lines(events):
         title = e.get("title") or e.get("id") or ""
         url = e.get("url") or ""
         kind = e.get("kind")
-        if kind in ("price_down", "price_up"):
+        if kind in ("price_down", "price_up", "entered_range"):
             body = f"{int(e.get('old') or 0):,}원 → {int(e.get('new') or 0):,}원"
         elif kind == "republished":
             body = f"{e.get('old')}회 → {e.get('new')}회"
@@ -662,9 +698,9 @@ def filter_by_conditions(matches, router, log=None):
     """
     items = list(matches or [])
     if not items or router is None:
-        return items, 0
+        return items, [], 0
     from daangn_ext.article_watch import parse_price_text
-    kept, cut = [], 0
+    kept, watch_only, cut = [], [], 0
     for m in items:
         try:
             cond = router.condition_for(m.get("keyword"))
@@ -674,6 +710,7 @@ def filter_by_conditions(matches, router, log=None):
             kept.append(m)
             continue
         title = (m.get("title") or "").lower()
+        over_max = False
         ok = all(str(x).lower() not in title for x in (cond.get("exclude") or []) if x)
         if ok:
             ok = all(str(x).lower() in title for x in (cond.get("extra") or []) if x)
@@ -684,13 +721,19 @@ def filter_by_conditions(matches, router, log=None):
                     ok = False
                 if cond.get("max") is not None and price > int(cond["max"]):
                     ok = False
+                    over_max = True
         if ok:
             kept.append(m)
+        elif over_max:
+            # 상한만 넘긴 매물은 버리지 않고 추적한다. 값이 내려오면
+            # mark_range_entries 가 '조건 진입'으로 알린다.
+            watch_only.append(m)
         else:
             cut += 1
-    if cut and log:
-        log(f"[매칭] 조건 불일치 {cut}건 제외")
-    return kept, cut
+    if log and (cut or watch_only):
+        log(f"[매칭] 조건 불일치 {cut}건 제외"
+            + (f" · 상한 초과 {len(watch_only)}건은 인하 대기로 추적" if watch_only else ""))
+    return kept, watch_only, cut
 
 
 def dedupe_new_matches(matches, watch_store, fallback):
@@ -2674,24 +2717,27 @@ class MainWindow(QMainWindow):
         if matches is None:
             self._last_new = 0
             return
-        matches, _ = filter_by_conditions(matches, getattr(self, "_router", None),
-                                          self.alertLog.append)
+        matches, watch_only, _ = filter_by_conditions(
+            matches, getattr(self, "_router", None), self.alertLog.append)
         new_items, dropped = dedupe_new_matches(
             matches, self._watch_store, self._match_seen_fallback)
         new = len(new_items)
         self._last_new = new
         if dropped:
             self.alertLog.append(f"[매칭] id 없는 payload {dropped}건 건너뜀")
+        # 추적 등록은 알림 여부와 무관하게 한다 — 상한을 넘겨 알리지 않은
+        # 매물도 값이 내려오는지 지켜봐야 '조건 진입'을 잡을 수 있다.
+        try:
+            added = self._watch_tracker.add_from_matches(new_items + watch_only) \
+                if self._watch_tracker else 0
+            if added:
+                self.alertLog.append(f"[가격추적] {added}건 추적 시작")
+        except Exception as e:
+            self.alertLog.append(f"[가격추적] 등록 실패: {str(e)[:80]}")
         if new:
             self.alertLog.append(f"[매칭] 신규 {new}건 추가")
             self._notify_matches(new_items)
-            try:
-                added = self._watch_tracker.add_from_matches(new_items) \
-                    if self._watch_tracker else 0
-                if added:
-                    self.alertLog.append(f"[가격추적] {added}건 추적 시작")
-            except Exception as e:
-                self.alertLog.append(f"[가격추적] 등록 실패: {str(e)[:80]}")
+        if new or watch_only:
             self._refresh_listing_table()
         try:
             self._refresh_alert_health()
@@ -2736,6 +2782,8 @@ class MainWindow(QMainWindow):
         self._refresh_listing_table()
 
     def _notify_watch_events(self, events):
+        events = mark_range_entries(events, self._watch_store,
+                                    getattr(self, "_router", None))
         lines = watch_event_lines(events)
         if not lines:
             return
@@ -5240,19 +5288,21 @@ def _run_headless():
                 matches = m.poll_all(core_only=core_only, log=log)
             except Exception as e:
                 log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
-            matches, _ = filter_by_conditions(matches, router, log)
+            matches, watch_only, _ = filter_by_conditions(matches, router, log)
             fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
             if dropped:
                 log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
+            # 알림 여부와 무관하게 추적한다(GUI 경로와 같은 이유).
+            try:
+                added = watch_tracker.add_from_matches(fresh + watch_only) \
+                    if watch_tracker else 0
+                if added:
+                    log(f"[가격추적] {added}건 추적 시작")
+            except Exception as e:
+                log(f"[가격추적] 등록 실패: {str(e)[:80]}")
             if fresh:
                 log(f"[매칭] 신규 {len(fresh)}건 (유효계정 {valid})")
                 _notify(fresh, _notify_cfg())
-                try:
-                    added = watch_tracker.add_from_matches(fresh) if watch_tracker else 0
-                    if added:
-                        log(f"[가격추적] {added}건 추적 시작")
-                except Exception as e:
-                    log(f"[가격추적] 등록 실패: {str(e)[:80]}")
             else:
                 log(f"[매칭] 신규 0 (유효계정 {valid}, 커버 {'핵심' if core_only else '전국'})")
             # 워치리스트 스윕 — 폴링과 같은 스레드에서 정책이 정한 간격으로만.
@@ -5270,8 +5320,9 @@ def _run_headless():
                                                 WATCH_SWEEP_INTERVAL)
                     if budget:
                         watch_budget.reload()
-                        lines = watch_event_lines(
-                            watch_tracker.sweep(watch_budget.next, budget))
+                        lines = watch_event_lines(mark_range_entries(
+                            watch_tracker.sweep(watch_budget.next, budget),
+                            watch_store, router))
                         if getattr(watch_tracker, "last_sweep_exhausted", False):
                             log("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
                         if lines:

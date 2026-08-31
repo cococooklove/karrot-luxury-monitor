@@ -241,6 +241,20 @@ class KeywordRouter:
         return n
 
     # ── 배정 ──
+    # 당근에는 상한을 이 배수만큼 넉넉히 걸어 등록한다. 상한을 그대로 넘기면
+    # 지금 비싼 매물은 당근이 알림 자체를 안 보내고, 나중에 값을 내려도 우리
+    # 시스템에 존재한 적이 없어 알 방법이 없다. 여유분은 알리지 않고 추적만
+    # 하다가, 값이 진짜 조건 안으로 들어오면 그때 처음 알린다.
+    WATCH_MARGIN = 1.5
+
+    @classmethod
+    def _reg_max(cls, max_price):
+        """당근에 실제로 보낼 상한(여유분 포함)."""
+        try:
+            return int(int(max_price) * cls.WATCH_MARGIN) if max_price else max_price
+        except (TypeError, ValueError):
+            return max_price
+
     @staticmethod
     def _cond(min_price, max_price, exclude, extra, days) -> dict:
         """앱 경로 키워드의 조건을 라우트 기록에 함께 남긴다.
@@ -283,7 +297,7 @@ class KeywordRouter:
                                   f"앱 슬롯 만원({cap_now['cap']})", log)
         try:
             res = self.alerts.register_all(
-                [keyword], min_price, max_price, exclude,
+                [keyword], min_price, self._reg_max(max_price), exclude,
                 log=log, core_only=core_only) or {}
         except Exception as e:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
@@ -361,7 +375,7 @@ class KeywordRouter:
         log = log or (lambda m: None)
         try:
             res = self.alerts.register_all(
-                batch, min_price, max_price, exclude,
+                batch, min_price, self._reg_max(max_price), exclude,
                 log=log, core_only=core_only) or {}
         except Exception:
             return set()            # 사유·백오프 기록은 개별 경로에 맡긴다
