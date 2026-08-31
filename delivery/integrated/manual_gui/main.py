@@ -2039,6 +2039,12 @@ class MainWindow(QMainWindow):
         self._alert_health_timer.timeout.connect(self._refresh_alert_health)
         self._alert_health_timer.start(5000)
         QtCore.QTimer.singleShot(500, self._refresh_alert_health)
+        # 저장된 매물을 켜자마자 그린다. watch.db 는 재시작에도 남지만(watch
+        # 테이블엔 DELETE 가 없다) 표를 채우는 트리거가 전부 이벤트뿐이라 —
+        # 필터 클릭·신규 매칭·스윕 완료 — 켜면 빈 표가 뜨고, 감시를 시작해
+        # 최대 30분(야간)을 기다려야 채워졌다. 사용자에겐 매물이 사라진
+        # 것으로 보인다. 생성자가 끝난 뒤 그리도록 미룬다.
+        QtCore.QTimer.singleShot(0, self._refresh_listing_table)
         # 실행 시 자동 폴링(무인): 설정 복원 + 저장 배선 + 지연 시작(토큰 수확 대기)
         try:
             self.alertAutoStartChk.setChecked(bool(self._load_alert_settings().get("autostart")))

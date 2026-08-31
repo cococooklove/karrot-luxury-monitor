@@ -70,6 +70,15 @@ ck("ended 필터",
 ck("알 수 없는 필터는 전부", len(m.listing_display_rows(mixed, NOW, "??")) == 3)
 ck("빈 입력", m.listing_display_rows([], NOW) == [])
 
+# ── 시작하자마자 저장된 매물을 그린다 ──
+# watch.db 는 재시작에도 남는다(watch 테이블엔 DELETE 가 없다). 그런데 표를
+# 채우는 트리거가 전부 이벤트(필터 클릭·신규 매칭·스윕 완료)뿐이라, 앱을 켜면
+# 빈 표가 뜨고 감시를 시작해 최대 30분(야간)을 기다려야 채워졌다. 사용자
+# 눈에는 매물이 사라진 것으로 보인다.
+ck("시작 시 매물 표를 채운다",
+   "_refresh_listing_table" in m.MainWindow._build_alert_tab.__code__.co_names,
+   "탭을 세울 때 호출되지 않음")
+
 # ── 백필이 세운 중복판정용 묘비(source=match_seen)는 표에 안 나온다 ──
 # 기준은 출처다. '제목이 비었다'로 거르면 제목 없이 들어온 실제 매물이 종료되는
 # 순간 표에서 조용히 사라진다.
