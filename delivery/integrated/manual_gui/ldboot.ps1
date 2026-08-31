@@ -36,11 +36,20 @@ function Probe($i) {
 # 반쯤 뜬 인스턴스를 확실히 지운다. quit 만으로는 안 죽는 경우가 있어 프로세스까지 본다.
 function Reset($i) {
     Start-Process -FilePath $console -ArgumentList @("quit", "--index", "$i") -WindowStyle Hidden -Wait
-    Start-Sleep 5
+    # LDPlayer 는 종료할 때 vms\config\leidian<N>.config 를 다시 쓴다. 그 도중에
+    # 강제 종료하면 파일이 잘린 채 남고, 해상도가 0 이 된 인스턴스는 다시는 안 뜬다.
+    # 실측(2026-08-30): index 1 이 이렇게 3945바이트 → 1015바이트로 잘려 죽었다.
+    # 그래서 스스로 사라질 시간을 충분히 준 뒤에만 손을 댄다.
+    for ($w = 0; $w -lt 30; $w += 3) {
+        Start-Sleep 3
+        $alive = (Get-CimInstance Win32_Process -Filter "name='dnplayer.exe'" |
+                  Where-Object { $_.CommandLine -match "index=$i\|" })
+        if (-not $alive) { return }
+    }
     $procid = (Get-CimInstance Win32_Process -Filter "name='dnplayer.exe'" |
                Where-Object { $_.CommandLine -match "index=$i\|" }).ProcessId
     if ($procid) {
-        W "index $i 잔여 프로세스 정리 (pid $procid)"
+        W "index $i 30초 안에 안 죽음 - 강제 종료 (pid $procid). 설정 파일이 손상될 수 있다"
         Stop-Process -Id $procid -Force -ErrorAction SilentlyContinue
         Start-Sleep 5
     }
