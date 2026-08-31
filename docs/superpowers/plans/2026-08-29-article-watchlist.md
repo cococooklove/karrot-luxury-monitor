@@ -1776,13 +1776,17 @@ print("OK")
 
 Mac 토큰은 만료돼 있으므로 서버에서 돈다. 서버에는 git 이 없으니 scp 로 올린다.
 
+> 이 저장소는 공개다. 서버 주소와 계정명은 `$KARROT_HOST`, SSH 키 경로는 `$KARROT_KEY`
+> 로 가려 뒀다. 실행 전에 셸에 채워 쓴다:
+> `export KARROT_HOST=<계정>@<서버주소>  KARROT_KEY=~/.ssh/<키파일>`
+
 ```bash
 cd /Users/younglee/당근부동산_숨고/delivery/integrated/manual_gui
-scp -i ~/.ssh/karrot_server daangn_ext/article_watch.py \
-    administrator@108.181.252.171:C:/karrot/delivery/integrated/manual_gui/daangn_ext/article_watch.py
-scp -i ~/.ssh/karrot_server tools/watch_smoke.py \
-    administrator@108.181.252.171:C:/karrot/delivery/integrated/manual_gui/tools/watch_smoke.py
-ssh -i ~/.ssh/karrot_server administrator@108.181.252.171 \
+scp -i $KARROT_KEY daangn_ext/article_watch.py \
+    $KARROT_HOST:C:/karrot/delivery/integrated/manual_gui/daangn_ext/article_watch.py
+scp -i $KARROT_KEY tools/watch_smoke.py \
+    $KARROT_HOST:C:/karrot/delivery/integrated/manual_gui/tools/watch_smoke.py
+ssh -i $KARROT_KEY $KARROT_HOST \
   "powershell -Command \"Set-Location C:\\karrot\\delivery\\integrated\\manual_gui; python -X utf8 tools\\watch_smoke.py\""
 ```
 
@@ -1791,7 +1795,7 @@ Expected: `matches=N`, `added=`, 각 매물에 `price=` `status=ongoing` `tier=f
 `NO_VALID_TOKEN` 이 나오면 먼저 수확한다.
 
 ```bash
-ssh -i ~/.ssh/karrot_server administrator@108.181.252.171 \
+ssh -i $KARROT_KEY $KARROT_HOST \
   "powershell -Command \"Set-Location C:\\karrot\\delivery\\integrated\\manual_gui; python -X utf8 -c \\\"import ld_autoharvest; print(ld_autoharvest.harvest_all('./accounts.json', nudge=True))\\\"\""
 ```
 
@@ -1800,16 +1804,16 @@ SSH 명령이 auto-mode 분류기에 막히면 같은 명령을 한 번 더 보�
 - [ ] **Step 3: Deploy main.py and restart the app**
 
 ```bash
-scp -i ~/.ssh/karrot_server main.py \
-    administrator@108.181.252.171:C:/karrot/delivery/integrated/manual_gui/main.py
+scp -i $KARROT_KEY main.py \
+    $KARROT_HOST:C:/karrot/delivery/integrated/manual_gui/main.py
 ```
 
 실행 중인 앱은 import 캐시 때문에 구모듈을 쓴다. 반영하려면 `pythonw` 를 죽이고 RDP 세션에서 다시 띄운다. SSH(세션0)에서는 GUI 가 뜨지 않는다.
 
 ```bash
-ssh -i ~/.ssh/karrot_server administrator@108.181.252.171 \
+ssh -i $KARROT_KEY $KARROT_HOST \
   "powershell -Command \"Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force\""
-ssh -i ~/.ssh/karrot_server administrator@108.181.252.171 "schtasks /run /tn karrotgui"
+ssh -i $KARROT_KEY $KARROT_HOST "schtasks /run /tn karrotgui"
 ```
 
 - [ ] **Step 4: Commit**
