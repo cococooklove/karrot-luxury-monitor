@@ -242,6 +242,40 @@ $u="$x\karrot-luxury-monitor-master\delivery\integrated\manual_gui\update.ps1"
 - `--watchdog` 이 앱을 되살리므로 정지는 재시도 루프로 한다. 그래도 안 죽으면
   중단하고 살아 있는 PID 를 찍는다 — 폴더가 잠긴 채 반쯤 지워지는 것보다 낫다.
 
+## 5-5. 원격 실행 (tools/srv.sh)
+
+맥에서 서버 PowerShell 을 직접 부린다. `~/.ssh/karrot_server` 키로 붙는다.
+
+```bash
+cd delivery/integrated/manual_gui
+tools/srv.sh run  '<powershell>'          # 짧은 작업, 포그라운드
+tools/srv.sh bg   <이름> '<powershell>'    # 길게 걸리는 작업, 즉시 반환
+tools/srv.sh wait <이름> [초]              # 끝날 때까지(기본 900초 마감)
+tools/srv.sh log  <이름> [줄수]
+tools/srv.sh clean <이름>                  # 작업·로그 삭제
+tools/srv.sh push <로컬> <원격> / pull <원격> <로컬>
+```
+
+호스트·키는 `KARROT_HOST` / `KARROT_KEY` 로 덮어쓴다.
+
+이 모양이 된 이유 — 전부 실측으로 부딪힌 것들이다:
+
+- **`Start-Process` 로 던지면 백그라운드가 안 된다.** ssh 세션이 닫힐 때 자식까지
+  같이 죽는다(로그 0바이트, 프로세스 없음). 그래서 `bg` 는 작업 스케줄러에
+  `srv_<이름>` 을 등록해 띄운다 — `karrotgui` 와 같은 방식이다.
+- **파이썬은 `-u` 없이 부르지 않는다.** 리다이렉트되면 stdout 이 블록버퍼라
+  끝날 때까지 로그가 비어 보이고, 그 사이 상황을 알 방법이 없다.
+- **끝을 표식으로 판정한다.** 러너가 마지막에 `__DONE__ exit=N` 을 찍고 `wait` 는
+  그 줄만 본다. 프로세스 목록으로 살았나 죽었나를 추측하지 않는다.
+- **무한 대기 경로를 만들지 않는다.** `wait` 는 항상 마감시한을 갖고, 넘기면
+  마지막 로그를 찍고 exit 2 로 끝난다. `exit=0` 이 아니면 exit 1 이다 —
+  표식이 찍혔다는 것만으로 성공이라 하지 않는다.
+- **UTF-8 을 양쪽에서 강제한다.** 감싸는 셸이 `Out-File -Encoding utf8` 로 쓰고
+  `log`/`wait` 는 `Get-Content -Encoding UTF8` 로 읽는다. 하나라도 빠지면 한글이
+  깨져 로그를 못 읽는다.
+- **인용부호는 base64 로 우회한다.** ssh → cmd → PowerShell 3단 인용은 쓰다 보면
+  반드시 깨진다. 명령 본문은 base64 로 넘겨 서버에서 디코드한다.
+
 ## 6. 테스트 순서
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
 2. 키워드 등록(계정당 최대 30개): 코드 `MultiAccountAlerts.register_all(LUXURY_BRANDS)` or GUI 1회
