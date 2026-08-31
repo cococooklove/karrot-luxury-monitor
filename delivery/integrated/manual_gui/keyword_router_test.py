@@ -765,6 +765,73 @@ ck("진짜 반환값으로도 free 가 0 으로 수렴", rT.capacity()["free"] =
 
 _kapi.time.sleep = _orig_sleep
 
+# ── 스윕으로 밀려도 추가키워드·끌올일수를 잃지 않는다 ──
+# 엑셀로 넣은 행별 조건은 앱 경로에만 보존되고 있었다. 슬롯이 차서 스윕으로
+# 밀리는 순간(정상 경로다) 조건이 통째로 사라져, 표에도 안 뜨고 스윕 필터에도
+# 안 걸렸다.
+alerts, q, r = mk(slot_cap=1)
+r.add("샤넬", 500000, 3000000, ["레플"], extra=["정품"], days=7)
+over = r.add("구찌", 100000, 200000, ["가품"], extra=["빈티지"], days=30)
+ck("슬롯 만원이면 스윕", over["route"] == "sweep", str(over))
+
+_cond = r.condition_for("구찌")
+ck("스윕 키워드도 cond 를 남긴다", _cond != {}, str(_cond))
+ck("스윕 cond 의 추가키워드", _cond.get("extra") == ["빈티지"], str(_cond))
+ck("스윕 cond 의 끌올일수", _cond.get("days") == 30, str(_cond))
+ck("스윕 cond 의 가격·제외도 그대로",
+   (_cond.get("min"), _cond.get("max"), _cond.get("exclude"))
+   == (100000, 200000, ["가품"]), str(_cond))
+
+_e = next(e for e in q.entries() if e["keyword"] == "구찌")
+ck("큐 엔트리가 추가키워드를 든다", _e.get("extra") == ["빈티지"], str(_e))
+ck("큐 엔트리가 끌올일수를 든다", _e.get("days") == 30, str(_e))
+ck("큐 엔트리 가격·제외는 그대로",
+   (_e.get("min"), _e.get("max"), _e.get("exclude"))
+   == (100000, 200000, ["가품"]), str(_e))
+
+# 승격(rebalance)에서도 잃지 않는다 — 큐 엔트리의 조건을 add 로 되돌려야 한다
+alerts2, q2, r2 = mk(slot_cap=1)
+r2.add("샤넬", extra=["정품"], days=7)
+r2.add("구찌", 100000, 200000, ["가품"], extra=["빈티지"], days=30)
+r2.slot_cap = 5                      # 자리가 났다
+_promoted = r2.rebalance()
+ck("승격됨", [p["keyword"] for p in _promoted] == ["구찌"], str(_promoted))
+_pc = r2.condition_for("구찌")
+ck("승격해도 추가키워드 유지", _pc.get("extra") == ["빈티지"], str(_pc))
+ck("승격해도 끌올일수 유지", _pc.get("days") == 30, str(_pc))
+
+# 옛 큐 파일(extra/days 없음)도 그대로 읽힌다
+_d = tempfile.mkdtemp()
+_qp = os.path.join(_d, "old.json")
+with open(_qp, "w", encoding="utf-8") as _f:
+    _f.write('[{"keyword":"에르메스","min":1,"max":2,"exclude":[],"at":1}]')
+_oldq = SweepQueue(_qp)
+_oe = _oldq.entries()[0]
+ck("옛 엔트리도 읽힌다", _oe["keyword"] == "에르메스", str(_oe))
+ck("옛 엔트리는 추가키워드 없음", _oe.get("extra") in (None, []), str(_oe))
+ck("옛 엔트리는 끌올일수 없음", _oe.get("days") is None, str(_oe))
+
+# ── 일괄등록이 엑셀 조건을 지우지 않는다 ──
+# add_many 는 이미 배정된 키워드도 add() 로 다시 태운다. '명품20 전계정등록'
+# 은 추가키워드·끌올을 안 넘기므로, 그대로 두면 엑셀로 넣어둔 조건이 겹치는
+# 브랜드마다 통째로 지워졌다.
+alerts3, q3, r3 = mk(slot_cap=10)
+r3.add("샤넬", 500000, 3000000, ["레플"], extra=["정품"], days=7)
+r3.add_many(["샤넬", "구찌"], 100000, 900000, ["가품"])
+_kept = r3.condition_for("샤넬")
+ck("일괄등록해도 추가키워드 유지", _kept.get("extra") == ["정품"], str(_kept))
+ck("일괄등록해도 끌올일수 유지", _kept.get("days") == 7, str(_kept))
+ck("일괄등록이 넘긴 가격은 새 값으로", _kept.get("min") == 100000, str(_kept))
+ck("일괄등록이 넘긴 제외도 새 값으로", _kept.get("exclude") == ["가품"], str(_kept))
+_new = r3.condition_for("구찌")
+ck("새 키워드는 조건 없이 들어간다", _new.get("extra") is None, str(_new))
+
+# 명시적으로 넘기면 덮어쓴다 — 보존은 '안 넘겼을 때'만이다
+r3.add("샤넬", 500000, 3000000, ["레플"], extra=["빈티지"], days=14)
+_ow = r3.condition_for("샤넬")
+ck("명시하면 추가키워드 덮어씀", _ow.get("extra") == ["빈티지"], str(_ow))
+ck("명시하면 끌올일수 덮어씀", _ow.get("days") == 14, str(_ow))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

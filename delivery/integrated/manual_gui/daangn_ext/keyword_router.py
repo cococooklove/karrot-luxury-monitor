@@ -291,17 +291,30 @@ class KeywordRouter:
         if not keyword:
             return {"keyword": keyword, "route": None, "reason": "빈 키워드"}
 
+        # 이미 배정된 키워드를 다시 태우는 경로가 여럿이다 — 일괄등록
+        # (add_many 는 배치에 못 넣은 것을 add 로 돌린다), 승격, 재시도.
+        # 그 호출들은 추가키워드·끌올일수를 안 넘기므로, 그대로 쓰면 엑셀로
+        # 넣어둔 조건이 '명품20 전계정등록' 한 번에 지워진다. 명시적으로
+        # 넘어온 값만 덮어쓰고, 안 넘어온 것은 이전 조건을 잇는다.
+        prev_cond = (self._routes.get(keyword) or {}).get("cond") or {}
+        if extra is None:
+            extra = prev_cond.get("extra")
+        if days is None:
+            days = prev_cond.get("days")
+
         cap_now = self.capacity()
         if cap_now["free"] <= 0:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
-                                  f"앱 슬롯 만원({cap_now['cap']})", log)
+                                  f"앱 슬롯 만원({cap_now['cap']})", log,
+                                  extra=extra, days=days)
         try:
             res = self.alerts.register_all(
                 [keyword], min_price, self._reg_max(max_price), exclude,
                 log=log, core_only=core_only) or {}
         except Exception as e:
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
-                                  f"등록 실패: {str(e)[:60]}", log, failed=True)
+                                  f"등록 실패: {str(e)[:60]}", log, failed=True,
+                                  extra=extra, days=days)
         # added 든 skipped 든 하나는 있어야 실제로 등록된 것이다. skipped 는 이미
         # 그 계정에 등록돼 있다는 뜻이라 성공으로 친다. 전부 0 이면 유효 계정이
         # 없었다는 뜻인데, 이때 app 으로 표시하면 슬롯만 먹고 아무데서도 감시되지
@@ -321,7 +334,7 @@ class KeywordRouter:
                 self._observe_measured_full(oc, cap_now["used"], log)
             return self._to_sweep(keyword, min_price, max_price, exclude, now,
                                   "앱 등록 실패(차단 키워드·유효 계정 없음)", log,
-                                  failed=True)
+                                  failed=True, extra=extra, days=days)
 
         self.queue.remove(keyword)
         self._routes[keyword] = {"route": ROUTE_APP, "reason": "앱 알림 등록",
@@ -398,9 +411,15 @@ class KeywordRouter:
         return set(batch)
 
     def _to_sweep(self, keyword, min_price, max_price, exclude, now, reason,
-                  log, failed: bool = False) -> dict:
+                  log, failed: bool = False, extra=None, days=None) -> dict:
+        """스윕으로 밀어낸다. 조건은 app 경로와 똑같이 보존한다.
+
+        슬롯이 차서 밀리는 것은 정상 경로다(엑셀 30개 넘기면 바로 여기로 온다).
+        여기서 조건을 안 남기면 사용자가 행마다 적은 추가키워드·끌올일수가
+        표에서도 사라지고 스윕 필터에도 안 걸린다."""
         prev = self._routes.get(keyword) or {}
-        entry = {"route": ROUTE_SWEEP, "reason": reason, "at": now}
+        entry = {"route": ROUTE_SWEEP, "reason": reason, "at": now,
+                 "cond": self._cond(min_price, max_price, exclude, extra, days)}
         if failed:
             # 실패 횟수만큼 지수적으로 물린다. 슬롯 만원처럼 시도조차 안 한
             # 경우는 실패가 아니므로 백오프를 새로 물리지 않는다.
@@ -411,7 +430,8 @@ class KeywordRouter:
         elif prev.get("retry_after"):
             entry["retry_n"] = int(prev.get("retry_n") or 1)
             entry["retry_after"] = int(prev["retry_after"])
-        self.queue.add(keyword, min_price, max_price, exclude, at=now)
+        self.queue.add(keyword, min_price, max_price, exclude, at=now,
+                       extra=extra, days=days)
         self._routes[keyword] = entry
         self._save()
         log(f"  {keyword}: 검색 스윕으로 — {reason}")
@@ -446,8 +466,11 @@ class KeywordRouter:
             kw = entry["keyword"]
             if self.retry_after(kw) > now:
                 continue            # 백오프 중 — 이번 틱은 요청을 쓰지 않는다
+            # 큐 엔트리가 든 조건을 그대로 되돌린다. 안 넘기면 승격되는
+            # 순간 추가키워드·끌올일수가 사라진다.
             res = self.add(kw, entry.get("min"), entry.get("max"),
-                           entry.get("exclude"), core_only=core_only, log=log)
+                           entry.get("exclude"), core_only=core_only, log=log,
+                           extra=entry.get("extra"), days=entry.get("days"))
             if res["route"] == ROUTE_APP:
                 out.append(res)
             else:

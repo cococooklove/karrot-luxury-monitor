@@ -131,8 +131,20 @@ ck("엔트리에 없으면 기본 min", c[1]["min"] == 50, str(c[1]))
 ck("엔트리에 없으면 기본 max", c[0]["max"] == 900, str(c[0]))
 ck("엔트리 exclude 우선", c[0]["exclude"] == ["가품"], str(c[0]))
 ck("엔트리 exclude 비면 기본", c[1]["exclude"] == ["레플"], str(c[1]))
-ck("extra 는 전 조건 공통", all(x["extra"] == ["빈티지"] for x in c))
-ck("days 전달", c[0]["days"] == 7)
+ck("엔트리에 없으면 기본 extra", all(x["extra"] == ["빈티지"] for x in c))
+ck("엔트리에 없으면 기본 days", c[0]["days"] == 7)
+
+# 엑셀 행별 추가키워드·끌올일수는 전역 패널값보다 우선해야 한다.
+# exclude·min·max 는 이미 엔트리를 우선하는데 이 둘만 전역값에 덮여,
+# 엑셀에 적은 행별 조건이 스윕에서 조용히 무시되고 있었다.
+E2 = [{"keyword": "롤렉스", "min": None, "max": None, "exclude": [],
+       "extra": ["정품"], "days": 30},
+      {"keyword": "구찌", "min": None, "max": None, "exclude": []}]
+c2 = m.sweep_conditions(E2, extra=["빈티지"], exclude=["레플"], days=7)
+ck("엔트리 extra 우선", c2[0]["extra"] == ["정품"], str(c2[0]))
+ck("엔트리 days 우선", c2[0]["days"] == 30, str(c2[0]))
+ck("엔트리에 없으면 기본 extra 로 폴백", c2[1]["extra"] == ["빈티지"], str(c2[1]))
+ck("엔트리에 없으면 기본 days 로 폴백", c2[1]["days"] == 7, str(c2[1]))
 ck("빈 입력 → 빈 목록", m.sweep_conditions([]) == [])
 ck("None → 빈 목록", m.sweep_conditions(None) == [])
 

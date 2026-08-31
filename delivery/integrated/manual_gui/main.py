@@ -151,6 +151,47 @@ def _ts_text(ts):
         return "-"
 
 
+ROUTE_NAMES = {"app": "앱 알림", "sweep": "검색 스윕"}
+
+# 등록 표의 열. 인덱스를 손으로 세면 열이 하나 끼는 순간 조용히 어긋난다
+# (실제로 삭제가 id 대신 다른 열을 읽을 뻔했다). 이름으로만 참조한다.
+ALERT_COLS = ["키워드", "경로", "가격범위", "제외", "추가", "끌올", "id"]
+ALERT_COL_KEYWORD = ALERT_COLS.index("키워드")
+ALERT_COL_ROUTE = ALERT_COLS.index("경로")
+ALERT_COL_DAYS = ALERT_COLS.index("끌올")
+ALERT_COL_ID = ALERT_COLS.index("id")
+
+# 끌올일수는 앱 알림 등록 body 에 넣을 필드가 없고 filter_by_conditions 도
+# 쓰지 않는다. 검색 스윕에서만 실제로 걸린다. 표에 값만 보이고 이 사실을 안
+# 적으면 앱 경로 키워드에도 걸려 있다고 믿게 된다.
+DAYS_APP_TIP = ("끌올일수는 앱 알림 경로에서는 적용되지 않습니다"
+                " — 검색 스윕으로 배정된 키워드에만 걸립니다")
+
+
+def alert_row_cells(keyword, route, price, exclude, uid):
+    """등록 표 한 줄 → (셀 값 7개, {열 인덱스: 툴팁}). 위젯을 모르는 순수 함수.
+
+    추가키워드·끌올일수는 엑셀 조건으로만 들어오고 라우터가 `cond` 에 넣어
+    둔다. 표에 안 그리면 사용자는 자기가 건 조건을 확인할 방법이 없다.
+
+    추가키워드는 앱 경로에서 filter_by_conditions 가 건다. 끌올일수는 스윕
+    경로에서만 걸리므로, 앱 경로에 값이 있으면 툴팁으로 그 사실을 붙인다 —
+    엑셀 로드 때 로그로 한 번 지나가고 마는 경고라, 표에서 다시 볼 수 없으면
+    걸려 있다고 믿게 된다."""
+    cond = (route or {}).get("cond") or {}
+    extra = ",".join(cond.get("extra") or []) or "-"
+    days_n = cond.get("days")
+    days = f"{days_n}일" if days_n else "-"
+    vals = [str(keyword or ""), ROUTE_NAMES.get((route or {}).get("route"), "-"),
+            str(price or ""), str(exclude or ""), extra, days, str(uid or "")]
+    tips = {}
+    if route:
+        tips[ALERT_COL_ROUTE] = str(route.get("reason") or "")
+    if days_n and (route or {}).get("route") == "app":
+        tips[ALERT_COL_DAYS] = DAYS_APP_TIP
+    return vals, tips
+
+
 def listing_display_rows(rows, now, state_filter="all"):
     """watch 행 목록 → 매물 표에 그릴 형태. 최초 감지 내림차순.
 
@@ -220,18 +261,27 @@ def sweep_conditions(entries, extra=None, exclude=None,
                      min_price=None, max_price=None, days=None):
     """스윕 대기열 엔트리 → SweepEngine cfg["conditions"].
 
-    가격·제외는 등록 당시 사용자가 넣은 값(엔트리)을 우선한다 — 넘어온 값은
-    엔트리에 없을 때의 기본값이다. 기본값의 **출처**만 런타임마다 다르고
-    (GUI=고급 패널 위젯, 헤드리스=alert_settings.json) 조립 규칙은 하나다."""
+    가격·제외·추가키워드·끌올일수 모두 등록 당시 사용자가 넣은 값(엔트리)을
+    우선한다 — 넘어온 값은 엔트리에 없을 때의 기본값이다. 기본값의 **출처**만
+    런타임마다 다르고 (GUI=고급 패널 위젯, 헤드리스=alert_settings.json)
+    조립 규칙은 하나다.
+
+    extra·days 만 엔트리를 무시하고 전역값으로 덮던 시절이 있었다. 엑셀에
+    행마다 적은 추가키워드·끌올일수가 스윕에서 조용히 사라져, 사용자는 자기가
+    건 조건이 걸린 줄 알았다.
+
+    '비었다'와 '안 적었다'는 구별하지 않는다 — 넷 다 비어 있으면 기본값으로
+    간다. 큐가 빈 값을 아예 안 싣기 때문에(SweepQueue._norm) 구별할 방법도
+    없고, exclude 가 원래 쓰던 규칙이기도 하다."""
     out = []
     for e in entries or []:
         out.append({
             "keyword": e["keyword"],
-            "extra": list(extra or []),
+            "extra": list(e.get("extra") or []) or list(extra or []),
             "exclude": list(e.get("exclude") or []) or list(exclude or []),
             "min": e.get("min") if e.get("min") is not None else min_price,
             "max": e.get("max") if e.get("max") is not None else max_price,
-            "days": days,
+            "days": e.get("days") or days,
         })
     return out
 
@@ -1783,14 +1833,18 @@ class MainWindow(QMainWindow):
         v.addWidget(self.alertSubLabel)
 
         # 등록 목록
-        self.alertTable = QtWidgets.QTableWidget(0, 5, w)
-        self.alertTable.setHorizontalHeaderLabels(
-            ["키워드", "경로", "가격범위", "제외", "id"])
+        self.alertTable = QtWidgets.QTableWidget(0, len(ALERT_COLS), w)
+        self.alertTable.setHorizontalHeaderLabels(ALERT_COLS)
         self.alertTable.verticalHeader().setVisible(False)
         self.alertTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.alertTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.alertTable.horizontalHeader().setSectionResizeMode(
-            0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        # 열이 7개다. 나머지를 기본 폭(~100px)으로 두면 끌올·id 가 가로
+        # 스크롤 뒤로 밀려, 방금 추가한 열이 안 보인다.
+        _hh = self.alertTable.horizontalHeader()
+        for _c in range(len(ALERT_COLS)):
+            _hh.setSectionResizeMode(
+                _c, QtWidgets.QHeaderView.ResizeMode.Stretch if _c == ALERT_COL_KEYWORD
+                else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.alertTable.setMinimumHeight(300)
         v.addWidget(self.alertTable, 1)
 
@@ -2483,7 +2537,7 @@ class MainWindow(QMainWindow):
         s = (s or "").strip().replace(",", "")
         return int(s) if s.isdigit() else None
 
-    _ROUTE_NAMES = {"app": "앱 알림", "sweep": "검색 스윕"}
+    _ROUTE_NAMES = ROUTE_NAMES
 
     def _log_route(self, res):
         """라우터 결과 한 줄. route 는 None 일 수 있다(빈 키워드)."""
@@ -2540,8 +2594,8 @@ class MainWindow(QMainWindow):
         row = self.alertTable.currentRow()
         if row < 0:
             self.alert("삭제할 행을 선택하세요"); return
-        item = self.alertTable.item(row, 4)          # id 열(경로 열이 끼어 4번)
-        kw_item = self.alertTable.item(row, 0)
+        item = self.alertTable.item(row, ALERT_COL_ID)
+        kw_item = self.alertTable.item(row, ALERT_COL_KEYWORD)
         if not item:
             return
         uid = item.text()
@@ -2590,13 +2644,12 @@ class MainWindow(QMainWindow):
             return {}
 
     def _alert_row(self, r, keyword, route, price, exclude, uid):
-        """표 한 줄. 경로/사유는 라우터가 남긴 진단값이다."""
-        name = self._ROUTE_NAMES.get((route or {}).get("route"), "-")
-        vals = [keyword, name, price, exclude, uid]
+        """표 한 줄. 값 구성은 alert_row_cells(순수 함수)가 한다."""
+        vals, tips = alert_row_cells(keyword, route, price, exclude, uid)
         for c, val in enumerate(vals):
             cell = QtWidgets.QTableWidgetItem(val)
-            if c == 1 and route:
-                cell.setToolTip(str(route.get("reason") or ""))
+            if c in tips:
+                cell.setToolTip(tips[c])
             self.alertTable.setItem(r, c, cell)
 
     def _queue_entries(self):

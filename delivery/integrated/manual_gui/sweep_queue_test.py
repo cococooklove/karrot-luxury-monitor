@@ -103,6 +103,36 @@ e = qt2.entries()[0]
 ck("touch 가 조건을 안 지움",
    (e["min"], e["max"], e["exclude"], e["at"]) == (100, 200, ["가품"], 77), str(e))
 
+# ── 추가키워드·끌올일수가 재시작을 견딘다 ──
+# _load / _copy / add 세 곳이 각자 키를 나열하고 있어, 하나만 고치면 나머지가
+# 조용히 걷어냈다. 파일에 썼다가 새 인스턴스로 다시 읽는 왕복으로 확인한다.
+dp = os.path.join(tempfile.mkdtemp(), "persist.json")
+qp = SweepQueue(dp)
+qp.add("샤넬", 100, 200, ["가품"], at=10, extra=["정품"], days=30)
+reopened = SweepQueue(dp).entries()[0]
+ck("재시작 후 추가키워드 유지", reopened.get("extra") == ["정품"], str(reopened))
+ck("재시작 후 끌올일수 유지", reopened.get("days") == 30, str(reopened))
+ck("재시작 후 가격·제외도 유지",
+   (reopened["min"], reopened["max"], reopened["exclude"]) == (100, 200, ["가품"]),
+   str(reopened))
+with open(dp, encoding="utf-8") as f:
+    raw = json.load(f)[0]
+ck("파일에 실제로 적힌다", (raw.get("extra"), raw.get("days")) == (["정품"], 30),
+   str(raw))
+
+# ── 같은 키워드를 다시 넣으면 조건이 갱신된다 ──
+# 엑셀을 고쳐 다시 불러오는 것은 정상 흐름이다. 갱신을 안 하면 표는 새 값을,
+# 스윕은 옛 값을 쓴다.
+qu = SweepQueue(os.path.join(tempfile.mkdtemp(), "upd.json"))
+qu.add("구찌", 1, 2, ["가품"], at=5, extra=["정품"], days=7)
+qu.add("구찌", 10, 20, ["레플"], at=9, extra=["빈티지"], days=30)
+ck("중복 키워드는 한 건", len(qu) == 1, str(qu.entries()))
+u = qu.entries()[0]
+ck("갱신된 추가키워드", u.get("extra") == ["빈티지"], str(u))
+ck("갱신된 끌올일수", u.get("days") == 30, str(u))
+ck("갱신된 가격·제외", (u["min"], u["max"], u["exclude"]) == (10, 20, ["레플"]), str(u))
+ck("대기 시각은 처음 것을 지킨다", u["at"] == 5, str(u))
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

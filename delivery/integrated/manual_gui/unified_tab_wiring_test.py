@@ -225,10 +225,15 @@ if _win is not None:
             self.calls = []
 
         def add_many(self, keywords, min_price=None, max_price=None,
-                     exclude=None, core_only=False, log=None):
+                     exclude=None, core_only=False, log=None,
+                     extra=None, days=None):
             self.calls.append((list(keywords), min_price, max_price,
-                               list(exclude or []), core_only))
-            return [{"keyword": k, "route": "app", "reason": "앱 알림 등록"}
+                               list(exclude or []), core_only,
+                               list(extra or []), days))
+            return [{"keyword": k, "route": "app", "reason": "앱 알림 등록",
+                     "cond": {"min": min_price, "max": max_price,
+                              "exclude": list(exclude or []),
+                              "extra": list(extra or []), "days": days}}
                     for k in keywords]
 
     _conds = [
@@ -236,19 +241,26 @@ if _win is not None:
          "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
         {"category": "가방", "keyword": "구찌", "extra": [],
          "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
+        {"category": "가방", "keyword": "프라다", "extra": [],
+         "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
         {"category": "시계", "keyword": "롤렉스", "extra": [],
          "exclude": [], "min": 1000000, "max": None, "days": 30},
         {"category": "", "keyword": "", "extra": [], "exclude": [],
          "min": None, "max": None, "days": None},          # 빈 키워드 = 버림
     ]
     _groups = _win._condition_groups(_conds)
-    ck("필터 같은 행은 한 그룹", len(_groups) == 2, str(_groups))
+    # 샤넬만 추가키워드가 다르다. 라우터는 한 호출에 필터 하나만 받으므로
+    # 여기서 묶어 버리면 구찌·프라다에도 '정품' 이 걸린다 → 갈라져야 맞다.
+    ck("추가키워드가 다르면 그룹이 갈린다", len(_groups) == 3, str(_groups))
     ck("빈 키워드 버림",
        all(kw for g in _groups for kw in g[0]), str(_groups))
-    _g0 = next(g for g in _groups if "샤넬" in g[0])
-    ck("그룹에 두 키워드", sorted(_g0[0]) == ["구찌", "샤넬"], str(_g0))
+    _g0 = next(g for g in _groups if "구찌" in g[0])
+    ck("필터가 같은 행은 한 그룹", sorted(_g0[0]) == ["구찌", "프라다"], str(_g0))
     ck("그룹이 행의 가격·제외를 그대로 든다",
        (_g0[1], _g0[2], _g0[3]) == (500000, 3000000, ["레플"]), str(_g0))
+    _gs = next(g for g in _groups if "샤넬" in g[0])
+    ck("그룹이 행의 추가키워드·끌올을 그대로 든다",
+       (_gs[4], _gs[5]) == (["정품"], 7), str(_gs))
 
     _fake = _FakeRouter()
     _real_router = _win._router
@@ -256,13 +268,16 @@ if _win is not None:
     _logged = []
     _res = _win._route_conditions(_conds, core_only=True, log=_logged.append)
     _win._router = _real_router
-    ck("엑셀 조건이 라우터 add_many 로 간다", len(_fake.calls) == 2,
+    ck("엑셀 조건이 라우터 add_many 로 간다", len(_fake.calls) == 3,
        str(_fake.calls))
     ck("core_only 전달", all(c[4] is True for c in _fake.calls))
     ck("모든 키워드 배정",
-       sorted(k for c in _fake.calls for k in c[0]) == ["구찌", "롤렉스", "샤넬"],
+       sorted(k for c in _fake.calls for k in c[0])
+       == ["구찌", "롤렉스", "샤넬", "프라다"], str(_fake.calls))
+    ck("추가키워드·끌올이 라우터까지 간다",
+       next(c for c in _fake.calls if "샤넬" in c[0])[5:] == (["정품"], 7),
        str(_fake.calls))
-    ck("라우터 결과를 돌려준다", len(_res) == 3, str(_res))
+    ck("라우터 결과를 돌려준다", len(_res) == 4, str(_res))
     ck("빈 조건이면 그룹 없음", _win._condition_groups([]) == [])
     _empty = _FakeRouter()
     _win._router = _empty
@@ -375,8 +390,9 @@ if _win is not None:
     ck("목록을 못 읽었다고 로그에 남긴다", "앱 등록 목록을 못 읽었" in _txt,
        _txt.strip()[:80])
     ck("대기열도 비면 표를 건드리지 않는다", _kept == 3, f"{_kept}행")
-    ck("경로 열 추가", getattr(_win, "alertTable", None) is not None
-       and _win.alertTable.columnCount() == 5)
+    ck("등록 표 열 = ALERT_COLS", getattr(_win, "alertTable", None) is not None
+       and _win.alertTable.columnCount() == len(m.ALERT_COLS),
+       str(m.ALERT_COLS))
 
     # ── 첫 실행에서 서버에 이미 있는 키워드를 앱 슬롯으로 인정한다 ──
     # routes 파일이 없으면 라우터는 used=0 으로 본다. 그대로 두면 이미 꽉 찬
