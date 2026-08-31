@@ -32,6 +32,19 @@ function Probe($i) {
     if (-not $done) { W "index $i 프로브 시한 초과(60s) - 응답 없음으로 처리" }
     return (($out -join " ") -match "PROBE_OK")
 }
+
+# 반쯤 뜬 인스턴스를 확실히 지운다. quit 만으로는 안 죽는 경우가 있어 프로세스까지 본다.
+function Reset($i) {
+    Start-Process -FilePath $console -ArgumentList @("quit", "--index", "$i") -WindowStyle Hidden -Wait
+    Start-Sleep 5
+    $procid = (Get-CimInstance Win32_Process -Filter "name='dnplayer.exe'" |
+               Where-Object { $_.CommandLine -match "index=$i\|" }).ProcessId
+    if ($procid) {
+        W "index $i 잔여 프로세스 정리 (pid $procid)"
+        Stop-Process -Id $procid -Force -ErrorAction SilentlyContinue
+        Start-Sleep 5
+    }
+}
 W "=== ldboot 시작 ==="
 
 # 부팅 직후 시스템 안정화 대기
@@ -153,13 +166,16 @@ if ($ld) {
     foreach ($i in $indexes) {
         W "index $i 확인"
         if (Probe $i) { W "index $i 이미 살아 있음 - 건너뜀"; Start-Sleep 2; continue }
+        # 프로브가 응답 없다고 답한 인덱스는 '안 떠 있는' 게 아니라 'VM 은 있는데 게스트가
+        # hang 한' 상태일 수 있다. 그 상태에서 launch 는 no-op 이라 3분을 기다렸다 실패한다.
+        # 실측(2026-08-30): index 2·3 모두 첫 launch 는 3분 14초 만에 실패, 프로세스를
+        # 죽이고 다시 띄우니 20초에 떴다. 그래서 처음부터 지우고 시작한다.
+        Reset $i
         $ok = $false
         for ($a = 0; $a -le $retry -and -not $ok; $a++) {
             if ($a -gt 0) {
                 W "index $i 기동 실패 - 재기동 $a/$retry"
-                $procid = (Get-CimInstance Win32_Process -Filter "name='dnplayer.exe'" | Where-Object { $_.CommandLine -match "index=$i\|" }).ProcessId
-                if ($procid) { Stop-Process -Id $procid -Force -ErrorAction SilentlyContinue }
-                Start-Sleep 10
+                Reset $i
             }
             W "launch index $i"
             # 출력을 파이프로 받지 않는다. 창 없는 세션에서 네이티브 명령의 출력 스트림이
