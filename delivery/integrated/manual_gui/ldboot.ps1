@@ -26,10 +26,10 @@ function Probe($i) {
         param($c, $idx)
         & $c adb --index $idx --command "shell echo PROBE_OK" 2>&1
     }
-    $done = Wait-Job $j -Timeout 30
+    $done = Wait-Job $j -Timeout 60
     $out = if ($done) { Receive-Job $j 2>$null } else { $null }
     Remove-Job $j -Force -ErrorAction SilentlyContinue
-    if (-not $done) { W "index $i 프로브 시한 초과(30s) - 응답 없음으로 처리" }
+    if (-not $done) { W "index $i 프로브 시한 초과(60s) - 응답 없음으로 처리" }
     return (($out -join " ") -match "PROBE_OK")
 }
 W "=== ldboot 시작 ==="
@@ -68,33 +68,20 @@ else {
 }
 
 if ($ld) {
-    # --- 1) 세션 활성화 ---
-    # LDPlayer 는 '활성' 세션이 없으면 VM 만 RUNNING 이고 게스트 커널이 끝내 안 뜬다.
-    # 실측(2026-08-30): 자동로그온 직후 세션은 어느 스테이션에도 안 붙어 Disc 로 남았고
-    # 그 상태에서 인스턴스가 하나도 기동되지 않았다. 사람이 RDP 로 붙어 세션이 Active 가
-    # 되자 같은 스크립트가 인스턴스당 20초에 다 띄웠다.
-    #
-    # tscon 으로 세션을 콘솔에 붙이는 게 정석이다. 실패하면 옛 방식(루프백 RDP)으로 넘어간다.
-    if ((quser 2>$null) -match "Active") {
-        W "세션 이미 활성 - 승격 생략"
+    # --- 1) RDP 세션 확인 ---
+    # LDPlayer 는 '실제 RDP 연결이 붙어 있는' 세션에서만 게스트를 띄운다. 2026-08-30
+    # 재부팅 2회로 실측했다:
+    #   세션 없음/Disc                     → VM 만 RUNNING, adb 기기 0
+    #   tscon 으로 콘솔에 붙여 Active 로 만듦 → 여전히 adb 기기 0
+    #   사람이 RDP 로 접속                  → 인스턴스당 20초에 전부 기동
+    # 그래서 판정은 'Active 인가'가 아니라 'rdp-tcp 세션인가'여야 한다. Active 로
+    # 판정했더니 tscon 이 만든 console-Active 를 통과시켜, 유일하게 듣는 루프백 RDP
+    # 승격을 건너뛰는 역효과가 났다.
+    $hasRdp = ((quser 2>$null) -match "rdp-tcp")
+    if ($hasRdp) {
+        W "RDP 세션 확인 - 기동 진행"
     }
     else {
-        $sid = (Get-Process -Id $PID).SessionId
-        W "세션 $sid 비활성 - tscon 으로 콘솔 연결 시도"
-        try {
-            Start-Process -FilePath "tscon.exe" -ArgumentList "$sid", "/dest:console" `
-                          -WindowStyle Hidden -Wait -ErrorAction Stop
-        } catch {
-            W "tscon 실행 실패: $($_.Exception.Message)"
-        }
-        Start-Sleep 10
-    }
-
-    if ((quser 2>$null) -match "Active") {
-        W "세션 활성 확인"
-    }
-    else {
-        W "tscon 으로 활성화 안 됨 - 루프백 RDP 로 재시도"
         $w = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
         if (-not $w.DefaultPassword) {
             W "DefaultPassword 없음 - RDP 승격 불가(콘솔 세션에서는 기동 실패함)"
@@ -134,15 +121,15 @@ if ($ld) {
                 Start-Process mstsc -ArgumentList "/v:$target", "/w:1920", "/h:1080"
                 for ($i = 0; $i -lt 12; $i++) {
                     Start-Sleep 5
-                    if ((quser 2>$null) -match "Active") { break }
+                    if ((quser 2>$null) -match "rdp-tcp") { break }
                 }
-                if ((quser 2>$null) -match "Active") { W "RDP 세션 승격 완료"; break }
+                if ((quser 2>$null) -match "rdp-tcp") { W "RDP 세션 승격 완료"; break }
                 taskkill /IM mstsc.exe /F 2>$null | Out-Null   # 실패 팝업 정리
                 Start-Sleep 10
             }
-            if (-not ((quser 2>$null) -match "Active")) { W "세션 활성화 실패 - 그대로 진행(기동 실패 예상). 사람이 RDP 로 한 번 붙으면 복구됨" }
             Start-Sleep 10
         }
+        $hasRdp = ((quser 2>$null) -match "rdp-tcp")
     }
 
     # --- 2) 인스턴스 순차 기동 ---
@@ -150,6 +137,15 @@ if ($ld) {
     # 2=정지7-0822, 3=정지9-0822, 4=정지11-0822, 5=정지13-0822.
     # index 1 은 이름만 기본값이지 계정 인스턴스가 맞다(karrot_token.ds 를 갖고 있다).
     $indexes = 1, 2, 3, 4, 5
+    if (-not $hasRdp) {
+        # 이 상태로 launch 하면 VM 만 뜨고 게스트가 안 올라온다. 인덱스마다 재시도까지
+        # 다 돌면 15분을 헛되이 태우고 결과도 같다 → 시도하지 않고 할 일만 남긴다.
+        W "!! RDP 세션이 없습니다 - 인스턴스 기동을 건너뜁니다."
+        W "!! LDPlayer 는 실제 RDP 연결이 붙은 세션에서만 게스트를 띄웁니다(실측)."
+        W "!! 사람이 RDP 로 접속한 뒤 아래를 실행하면 복구됩니다:"
+        W "!!   powershell -ExecutionPolicy Bypass -File C:\karrot\ldboot.ps1"
+        $indexes = @()
+    }
     $bootWait = 180     # 인스턴스당 최대 대기(초)
     $retry = 1          # 실패시 재기동 횟수
     W "순차 기동 시작 (대상 $($indexes.Count)개)"
