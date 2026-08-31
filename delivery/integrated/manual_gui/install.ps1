@@ -242,7 +242,11 @@ try {
 
 # 손으로 만들어 둔 옛 작업이 남아 있으면 순차 기동을 깨거나 앱을 중복 실행한다.
 # 지우는 건 사람이 판단할 일이라 여기서는 알리기만 한다.
+# ldrevive 는 index 3,4 를 quit→launch 하던 일회성 수동 복구 작업이었다.
+# 경고 목록에 없어서 2026-08-31 정리 때까지 남아 있었다 — 손으로 만든 작업은
+# 이름을 여기 적어 두지 않으면 아무도 다시 못 찾는다.
 $stale = @("karrotgui2","karrotgui3","karrotbat","ldboot","ldboot1","ldq1","rdpsess",
+           "ldrevive",
            "ldlaunch0","ldlaunch1","ldlaunch2","ldlaunch3","ldlaunch4","ldlaunch5")
 $found = @($stale | Where-Object { Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue })
 if ($found.Count) {
