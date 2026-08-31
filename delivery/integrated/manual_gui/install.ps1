@@ -1,6 +1,10 @@
 ﻿# Karrot monitor - one-shot server install (Windows Server). No git/winget needed.
 # Run in RDP PowerShell:
 #   iwr <raw>/install.ps1 -OutFile $env:TEMP\ins.ps1; & $env:TEMP\ins.ps1
+#
+# -ZipPath: 이미 받아 둔 master.zip 을 재사용한다. update.ps1 이 zip 을 먼저 받아
+#   그 안의 install.ps1 을 부르므로(raw CDN 캐시 회피), 같은 zip 을 두 번 받지 않는다.
+param([string]$ZipPath = "")
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 function Log($m){ Write-Host ("[install] " + $m) -ForegroundColor Cyan }
@@ -67,7 +71,12 @@ if (Test-Path C:\karrot) {
   if ($saved.Count) { Log ("  기존 설정 " + $saved.Count + "개 백업: " + ($saved -join ", ")) }
 }
 
-Invoke-WebRequest "https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip" -OutFile $zip
+if ($ZipPath -and (Test-Path $ZipPath)) {
+  $zip = $ZipPath
+  Log ("  ZIP 재사용: " + $zip)
+} else {
+  Invoke-WebRequest "https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip" -OutFile $zip
+}
 
 # 지우기 **전에** 점유를 확인한다. Remove-Item -Recurse -Force 는 지울 수 있는
 # 것만 지우고 잠긴 것은 조용히 건너뛰므로, 먼저 지우고 나중에 확인하면 실패할
@@ -229,6 +238,34 @@ if ($found.Count) {
   Write-Host ("[install] 주의: 겹치는 옛 작업이 남아 있습니다 - " + ($found -join ", ")) -ForegroundColor Yellow
   Write-Host "[install]   ldlaunch* 가 동시에 돌면 LDPlayer 가 hang 하고, karrotgui2/3 는 앱을 중복 실행합니다." -ForegroundColor Yellow
   Write-Host "[install]   확인 후 지우세요:  schtasks /delete /tn <이름> /f" -ForegroundColor Yellow
+}
+
+# 배포 각인 — 서버에는 git 이 없다(ZIP 설치). 이 파일이 없으면 "서버가 최신인가"에
+# 답할 방법이 로그인해서 소스를 눈으로 읽는 것뿐이다. $keep 에 넣지 않는다 —
+# 매 설치마다 새로 써야 하는 값이다.
+try {
+  $sha = "unknown"
+  try {
+    $c = Invoke-RestMethod "https://api.github.com/repos/cococooklove/karrot-luxury-monitor/commits/master" `
+           -Headers @{ "User-Agent" = "karrot-install" }
+    $sha = $c.sha
+  } catch {
+    Write-Host ("[install] 커밋 SHA 조회 실패(각인은 남긴다): " + $_.Exception.Message) -ForegroundColor Yellow
+  }
+  $short = if ($sha -eq "unknown") { "unknown" } else { $sha.Substring(0, 7) }
+  $stamp = [ordered]@{
+    sha        = $sha
+    short      = $short
+    installed  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    zip_reused = [bool]$ZipPath
+  }
+  # BOM 없는 UTF-8 — 파이썬이 읽어도 걸리지 않게. (PS 5.1 의 -Encoding UTF8 은 BOM 을 붙인다)
+  [System.IO.File]::WriteAllText((Join-Path $app "data\deployed.json"),
+                                 ($stamp | ConvertTo-Json),
+                                 (New-Object System.Text.UTF8Encoding $false))
+  Log ("  배포 각인: " + $short + "  (data\deployed.json)")
+} catch {
+  Write-Host ("[install] 배포 각인 실패(무해): " + $_.Exception.Message) -ForegroundColor Yellow
 }
 
 Write-Host ("[install] DONE. path: " + $app) -ForegroundColor Green
