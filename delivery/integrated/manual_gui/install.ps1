@@ -44,7 +44,11 @@ $keep = @("accounts.json", "notify.json", "credentials.json", "settings.txt",
           "data\watch_budget.json",
           # 잃어도 다시 쌓이지만, account_state 를 잃으면 격리해 둔 정지 계정을
           # 처음부터 다시 두드리고 account_regions 를 잃으면 커버 집계가 0 이 된다.
-          "data\account_state.json", "data\account_regions.json")
+          "data\account_state.json", "data\account_regions.json",
+          # 로그는 상태가 아니지만, 갱신마다 지워지면 "지난 몇 시간 왜 멈췄나"를
+          # 물을 때마다 증거가 없다. 2026-08-31 에 토큰이 7시간 만료돼 있었는데
+          # 원인 로그가 바로 그 갱신에 날아가 못 봤다.
+          "karrot_monitor.log")
 # 백업 폴더는 실행마다 새로 만든다. 예전에는 고정 경로를 먼저 지웠는데,
 # 앞선 실행이 백업을 마치고 삭제 도중 실패해 C:\karrot 이 반쯤 파인 상태였다면
 # 재실행이 멀쩡한 백업을 지우고 파인 트리에서 다시 백업해 자격증명을 영영
