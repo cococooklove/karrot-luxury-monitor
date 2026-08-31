@@ -18,9 +18,19 @@ function DevCount { (& $adb devices | Select-String "device$").Count }
 # 이미 떠 있는 상태에서 이 스크립트를 다시 돌리면 수가 안 늘어 전부 '기동 실패'가
 # 되고, 재시도 단계가 멀쩡히 돌던 인스턴스를 taskkill 해 함대를 되레 무너뜨린다.
 # (androidStarted=1 인데 게스트가 hang 한 인스턴스도 이 프로브로만 걸러진다.)
+# 창 없이(-WindowStyle Hidden) 돌 때 네이티브 명령 출력 캡처가 막혀 스크립트가
+# 통째로 멈춘 적이 있다(부팅 자동실행에서 15분 무응답, 로그도 안 찍힘).
+# 자식 잡으로 돌리고 시한을 둬서, 막히더라도 그 인덱스만 실패로 넘긴다.
 function Probe($i) {
-    $o = & $console adb --index $i --command "shell echo PROBE_OK" 2>&1
-    return (($o -join " ") -match "PROBE_OK")
+    $j = Start-Job -ArgumentList $console, $i -ScriptBlock {
+        param($c, $idx)
+        & $c adb --index $idx --command "shell echo PROBE_OK" 2>&1
+    }
+    $done = Wait-Job $j -Timeout 30
+    $out = if ($done) { Receive-Job $j 2>$null } else { $null }
+    Remove-Job $j -Force -ErrorAction SilentlyContinue
+    if (-not $done) { W "index $i 프로브 시한 초과(30s) - 응답 없음으로 처리" }
+    return (($out -join " ") -match "PROBE_OK")
 }
 W "=== ldboot 시작 ==="
 
@@ -120,8 +130,10 @@ if ($ld) {
     $indexes = 1, 2, 3, 4, 5
     $bootWait = 180     # 인스턴스당 최대 대기(초)
     $retry = 1          # 실패시 재기동 횟수
+    W "순차 기동 시작 (대상 $($indexes.Count)개)"
 
     foreach ($i in $indexes) {
+        W "index $i 확인"
         if (Probe $i) { W "index $i 이미 살아 있음 - 건너뜀"; Start-Sleep 2; continue }
         $ok = $false
         for ($a = 0; $a -le $retry -and -not $ok; $a++) {
@@ -132,7 +144,9 @@ if ($ld) {
                 Start-Sleep 10
             }
             W "launch index $i"
-            & $console launch --index $i
+            # 출력을 파이프로 받지 않는다. 창 없는 세션에서 네이티브 명령의 출력 스트림이
+            # 막히면 스크립트가 통째로 멈춘다(프로브와 같은 이유).
+            Start-Process -FilePath $console -ArgumentList @("launch", "--index", "$i") -WindowStyle Hidden
             $waited = 0
             while ($waited -lt $bootWait) {
                 Start-Sleep 5; $waited += 5
