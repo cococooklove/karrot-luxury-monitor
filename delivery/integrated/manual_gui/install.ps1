@@ -199,6 +199,20 @@ try {
 # 그래서 고정 경로에는 리포 사본을 부르는 shim 만 두고 내용은 리포에서 관리한다.
 Log "6/6 Boot autostart (shim + Run + karrotgui task)"
 
+# 배포 진입점도 고정 경로에 다시 깐다. 이 파일은 C:\karrot 밖에 있어 재설치가
+# 지우지는 않지만, 그렇다고 두면 리포의 사본만 고쳐지고 서버는 옛 판으로 남는다.
+# (PowerShell 은 스크립트를 통째로 읽고 실행하므로, 이 배포를 부른 장본인을
+#  덮어써도 진행 중인 실행은 멀쩡하다.)
+$deploySrc = Join-Path $app "karrot_deploy.ps1"
+if (Test-Path $deploySrc) {
+  try {
+    Copy-Item $deploySrc "C:\karrot_deploy.ps1" -Force
+    Log "  배포 진입점 갱신: C:\karrot_deploy.ps1"
+  } catch {
+    Write-Host ("[install] 배포 진입점 갱신 실패: " + $_.Exception.Message) -ForegroundColor Yellow
+  }
+}
+
 $shimPath = "C:\karrot\ldboot.ps1"
 $shim = @"
 # 자동실행이 가리키는 고정 경로. 실제 내용은 리포지토리 사본이 갖는다.
