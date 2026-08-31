@@ -44,33 +44,44 @@ $ws = New-Object -ComObject WScript.Shell
 #
 # 이름을 둘 받는다. 시스템 로캘이 한국어가 아닌 서버에서는 WScript.Shell 이
 # 한글 파일명을 ANSI 로 낮추면서 '?' 로 바꾸는데, '?' 는 Windows 파일명에 쓸 수
-# 없어 Save() 가 FileNotFoundException 을 던진다. 그래서 한글로 먼저 시도하고
-# 실패하면 ASCII 이름으로 떨어진다 — 한국어 PC 에서는 한글 이름이 그대로 나오고,
-# 영문 서버에서는 아이콘이 아예 안 생기는 대신 영문 이름으로라도 생긴다.
+# 없어 Save() 가 FileNotFoundException 을 던진다.
+#
+# 그 한계는 COM 에 넘기는 **경로**에만 있다. 파일 이름 자체는 NTFS 에서 유니코드고
+# .lnk 안에 이름이 들어가지도 않는다. 그래서 ASCII 이름으로 만든 뒤 .NET 으로
+# 이름만 바꾼다 — 영문 로캘 서버에서도 한글 아이콘이 나오고, 시스템 로캘을
+# 바꿀 필요가 없다(그건 재부팅을 부르고, 이 서버는 재부팅하면 사람이 RDP 로
+# 붙기 전까지 함대가 안 뜬다).
 function New-Shortcut($name, $fallback, $exe, $argline, $desc) {
-    foreach ($try in @($name, $fallback)) {
-        $path = Join-Path $desktop ($try + ".lnk")
-        try {
-            $sc = $ws.CreateShortcut($path)
-            $sc.TargetPath = $exe
-            $sc.Arguments = [string]$argline
-            $sc.WorkingDirectory = $AppDir   # OUT.json 이 cwd 상대경로다 — 반드시 필요
-            $sc.IconLocation = $icon
-            $sc.Description = $desc
-            $sc.Save()
-        } catch {
-            if ($try -eq $fallback) {
-                Fail ("바로가기 저장 실패: " + $path + "  (" + $_.Exception.Message + ")")
-            }
-            Write-Host ("[shortcut] 한글 이름 실패(시스템 로캘이 한국어가 아님) — 영문 이름으로 다시 시도") -ForegroundColor Yellow
-            continue
-        }
-        if (-not (Test-Path $path)) {
-            if ($try -eq $fallback) { Fail ("바로가기가 만들어지지 않았습니다: " + $path) }
-            continue
-        }
-        Log ("만듦: " + $path)
-        return
+    # 1) COM 이 확실히 다룰 수 있는 ASCII 이름으로 먼저 만든다.
+    $tmp = Join-Path $desktop ($fallback + ".lnk")
+    try {
+        $sc = $ws.CreateShortcut($tmp)
+        $sc.TargetPath = $exe
+        $sc.Arguments = [string]$argline
+        $sc.WorkingDirectory = $AppDir   # OUT.json 이 cwd 상대경로다 — 반드시 필요
+        $sc.IconLocation = $icon
+        $sc.Description = $desc
+        $sc.Save()
+    } catch {
+        Fail ("바로가기 저장 실패: " + $tmp + "  (" + $_.Exception.Message + ")")
+    }
+    if (-not (Test-Path $tmp)) { Fail ("바로가기가 만들어지지 않았습니다: " + $tmp) }
+
+    # 2) 이름만 한글로 바꾼다. 파일 이름은 유니코드라 로캘과 무관하고,
+    #    .lnk 내용에는 이름이 안 들어가므로 바로가기는 그대로 동작한다.
+    $final = Join-Path $desktop ($name + ".lnk")
+    if ($final -eq $tmp) { Log ("만듦: " + $tmp); return }
+    try {
+        # 재설치는 이 스크립트를 다시 돌린다. 옛 아이콘이 남아 있으면 이름이
+        # 겹쳐 Move 가 실패하므로 먼저 치운다.
+        if (Test-Path $final) { Remove-Item $final -Force }
+        [System.IO.File]::Move($tmp, $final)
+        Log ("만듦: " + $final)
+    } catch {
+        # 이름 바꾸기가 실패해도 아이콘은 이미 있다 — 영문 이름으로 남기고 끝낸다.
+        Write-Host ("[shortcut] 한글 이름으로 바꾸지 못했습니다(" +
+                    $_.Exception.Message + ") — 영문 이름으로 둡니다") -ForegroundColor Yellow
+        Log ("만듦: " + $tmp)
     }
 }
 
