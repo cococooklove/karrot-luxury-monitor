@@ -245,7 +245,7 @@ class KeywordRouter:
     # 지금 비싼 매물은 당근이 알림 자체를 안 보내고, 나중에 값을 내려도 우리
     # 시스템에 존재한 적이 없어 알 방법이 없다. 여유분은 알리지 않고 추적만
     # 하다가, 값이 진짜 조건 안으로 들어오면 그때 처음 알린다.
-    WATCH_MARGIN = 1.5
+    WATCH_MARGIN = 2.0
 
     @classmethod
     def _reg_max(cls, max_price):
