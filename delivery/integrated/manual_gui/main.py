@@ -1341,9 +1341,10 @@ class MainWindow(QMainWindow):
     def _on_harvest_tick(self, msg):
         import time as _t
         self._last_harvest_ts = _t.time()
+        # 상태바는 3탭 공용이다 — 여기 찍으면 수동 검색 화면에도 자동수확 로그가
+        # 따라다닌다. 이 메시지의 자리는 '매물 감시' 탭 로그다.
         if hasattr(self, "alertLog"):
             self.alertLog.append(msg)
-        self.sb.showMessage(msg, 4000)
         # 계정수 대시보드 즉시 갱신
         try:
             self._init_dashboard()
@@ -3281,6 +3282,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.autoExcelBtn); bar.addWidget(self.autoNotifyBtn)
         bar.addWidget(self.autoAccountsBtn); bar.addWidget(self.autoProxyViewBtn)
         bar.addStretch(1)
+        # 프록시 상태·진단 — 상태바에서 옮겨 왔다. 쓰는 탭에만 둔다.
+        self.healthBtn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
+                                     QtWidgets.QSizePolicy.Policy.Fixed)
+        bar.addWidget(self.healthLabel); bar.addWidget(self.healthBtn)
         gv.addLayout(bar)
 
         # 복원이 먼저, 배선이 나중이다 — 순서가 바뀌면 복원값이 저장을 유발해
@@ -3593,7 +3598,6 @@ class MainWindow(QMainWindow):
                 info.setText(
                     "프록시 없음 — 아래 '추가' 버튼 또는 '계정+프록시 추가/관리' 사용")
             self._refresh_proxy_labels()
-            self._update_window_title()
 
         def on_add():
             text, ok = QtWidgets.QInputDialog.getText(
@@ -3994,7 +3998,11 @@ class MainWindow(QMainWindow):
         self.ui.detailView.setOpenExternalLinks(False)
         self.ui.detailView.anchorClicked.connect(self._open_detail_link)
         self.sb: QtWidgets.QStatusBar = self.statusBar()  # type: ignore
-        self._setup_health_indicator()
+        # 제목은 브랜드명 고정. 프록시 수·동시요청·대기시간은 자동/수동 공용
+        # 크롤러 설정이라 수동 검색 화면 제목에 얹을 이유가 없다 — 지금 상태는
+        # '매물 감시' 탭의 IP/간격 표시가 보여준다.
+        self.setWindowTitle("LUXE — 명품 실시간 모니터")
+        self._setup_health_indicator()   # 위젯만 만든다. 배치는 _build_alert_tab.
 
         for edit in (self.ui.minimumEdit, self.ui.maximumEdit):
             edit.setValidator(
@@ -4007,8 +4015,11 @@ class MainWindow(QMainWindow):
         self._setup_extra_ui()
 
     def _setup_health_indicator(self):
-        """상태바 우측 상시 표시 — 쓸 수 있는 IP 수 + 현재 요청간격(자동감속 반영).
-        차단 대응은 전부 자동이라, 사용자에게 필요한 건 설정이 아니라 **지금 상태**다."""
+        """'매물 감시' 탭에 상시 표시 — 쓸 수 있는 IP 수 + 현재 요청간격(자동감속 반영).
+        차단 대응은 전부 자동이라, 사용자에게 필요한 건 설정이 아니라 **지금 상태**다.
+
+        예전엔 상태바에 있었다. 상태바는 세 탭 공용이라 수동 검색 화면에도
+        자동 인프라 표시가 따라다녔다. 쓰는 곳에만 둔다."""
         self.healthLabel = QtWidgets.QLabel("")
         self.healthLabel.setStyleSheet("color:#C4B79A; font-size:13px;")
         self.healthBtn = QtWidgets.QPushButton("진단")
@@ -4016,8 +4027,6 @@ class MainWindow(QMainWindow):
         self.healthBtn.setToolTip(
             "프록시를 IP 당 1회씩 찔러 '지금 막힌 건지, 막혔으면 어디가 문제인지' 판정")
         self.healthBtn.clicked.connect(self.on_health_check_clicked)
-        self.sb.addPermanentWidget(self.healthLabel)
-        self.sb.addPermanentWidget(self.healthBtn)
         self._health_thread = None
         self._health_timer = QtCore.QTimer(self)
         self._health_timer.timeout.connect(self._refresh_health_indicator)
@@ -4177,14 +4186,10 @@ class MainWindow(QMainWindow):
         self.controller.task_finished.connect(self._handle_task_finished)
         self.controller.task_message.connect(self._handle_task_message)
 
-    def _update_window_title(self):
-        self.setWindowTitle(self.controller.status_summary())
-
     def _load_proxy(self):
         err = self.controller.load_proxy_settings()
         if err:
             self.alert(err)
-        self._update_window_title()
 
     def _init_tree(self):
         self.all_last_child.clear()
