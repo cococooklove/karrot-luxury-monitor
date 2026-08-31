@@ -45,6 +45,9 @@ $keep = @("accounts.json", "notify.json", "credentials.json", "settings.txt",
           # 잃어도 다시 쌓이지만, account_state 를 잃으면 격리해 둔 정지 계정을
           # 처음부터 다시 두드리고 account_regions 를 잃으면 커버 집계가 0 이 된다.
           "data\account_state.json", "data\account_regions.json",
+          # 함대 인덱스 목록. 잃으면 앱이 다시 전체 인스턴스를 대상으로 삼아
+          # 계정 없는 기본 인스턴스를 매 사이클 깨우려 든다.
+          "data\fleet.json",
           # 로그는 상태가 아니지만, 갱신마다 지워지면 "지난 몇 시간 왜 멈췄나"를
           # 물을 때마다 증거가 없다. 2026-08-31 에 토큰이 7시간 만료돼 있었는데
           # 원인 로그가 바로 그 갱신에 날아가 못 봤다.

@@ -295,6 +295,51 @@ def ld_rows(console):
     return rows
 
 
+# ── 함대 범위 ────────────────────────────────────────────────────────────────
+# 어떤 인덱스가 "우리 함대"인지는 list2 로 알 수 없다. 운영 서버의 index 0 은
+# LDPlayer 설치 때 딸려온 기본 인스턴스라 계정이 없고 사양도 다른데(6CPU/6144MB,
+# 나머지는 2CPU/1024MB), 그걸 매 수확 사이클마다 깨우려다 기동 예산을 태웠다.
+# ldboot.ps1 은 이미 1..5 로 하드코딩해 빼고 있었지만 앱은 그 목록을 몰랐다 —
+# 함대 정의가 두 벌이면 한쪽만 고쳐지고 반드시 어긋난다. 파일 하나로 합친다.
+FLEET_FILE = "data/fleet.json"
+
+
+def fleet_indexes(app_dir=".", log=None):
+    """함대로 볼 인덱스 목록. 파일이 없거나 깨졌으면 None(= 전부).
+
+    없을 때 조용히 0 을 빼지 않는다. index 0 을 실제로 계정 인스턴스로 쓰는
+    설치본이 있을 수 있고, 설정 없이 인스턴스가 사라지는 쪽이 더 나쁜 고장이다.
+    서버는 data/fleet.json 을 두고, install.ps1 이 재설치 때 보존한다."""
+    path = os.path.join(app_dir, FLEET_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        if log:
+            log(f"[LDPlayer] {FLEET_FILE} 읽기 실패({e}) — 전체 인스턴스 대상")
+        return None
+    vals = raw.get("indexes") if isinstance(raw, dict) else raw
+    if not isinstance(vals, list):
+        if log:
+            log(f"[LDPlayer] {FLEET_FILE} 형식이 아님(indexes 배열 필요) — 전체 대상")
+        return None
+    out = []
+    for v in vals:
+        try:
+            out.append(str(int(v)))
+        except (TypeError, ValueError):
+            continue
+    # 빈 목록은 "아무것도 켜지 마라"가 아니라 설정 실수로 본다 — 그대로 따르면
+    # 함대 전체가 조용히 죽고 원인은 로그 어디에도 안 남는다.
+    if not out:
+        if log:
+            log(f"[LDPlayer] {FLEET_FILE} 이 비었음 — 전체 인스턴스 대상")
+        return None
+    return out
+
+
 def ld_list(console):
     """ldconsole list2 → [(index, name, is_running)]. (기존 호출자 호환)"""
     return [(r["index"], r["name"], r["started"]) for r in ld_rows(console)]
@@ -458,7 +503,7 @@ def live_instances(adb_bin, timeout=PROBE_TIMEOUT):
 
 
 def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
-                    budget=FLEET_BOOT_BUDGET, console=None):
+                    budget=FLEET_BOOT_BUDGET, console=None, app_dir="."):
     """설정된 **모든** 인스턴스가 떠 있도록 보장. 반환: 대답하는 serial 리스트.
 
     예전에는 기기가 하나라도 보이면 그대로 끝냈다. 그래서 6대 중 1대만 살아 있어도
@@ -493,6 +538,21 @@ def ensure_ldplayer(adb_bin, boot_wait=180, log=None, gap=35, retry=BOOT_RETRY,
     if not insts:
         log("[LDPlayer] 인스턴스 없음 — .ldbk 복원 필요")
         return live_instances(adb_bin)
+
+    # 함대 밖 인스턴스는 프로브도 하지 않는다. 프로브만 해도 무응답으로 잡혀
+    # 기동 대상이 되고, 그게 예산을 먹는다.
+    want = fleet_indexes(app_dir, log)
+    if want is not None:
+        keep = [r for r in insts if r["index"] in want]
+        skipped = [r["index"] for r in insts if r["index"] not in want]
+        if not keep:
+            log(f"[LDPlayer] {FLEET_FILE} 의 인덱스가 list2 에 하나도 없음"
+                f"(설정 {','.join(want)}) — 전체 인스턴스 대상으로 진행")
+        else:
+            if skipped:
+                log(f"[LDPlayer] 함대 밖 {len(skipped)}개 제외"
+                    f"(index {','.join(skipped)}) — {FLEET_FILE}")
+            insts = keep
 
     # (index, name, quit 이 먼저 필요한가) — 인덱스마다 직접 물어본 결과다.
     need, alive = [], 0

@@ -558,6 +558,77 @@ ck("merge_accounts 가 _MERGE_LOCK + 파일락을 모두 잡는다",
    "_file_lock" in ld.merge_accounts.__code__.co_names,
    str(ld.merge_accounts.__code__.co_names))
 
+print("=== H. 함대 범위 — data/fleet.json 밖 인덱스는 프로브도 안 한다 ===")
+# 운영 서버의 index 0 은 LDPlayer 기본 인스턴스라 계정이 없다. 그걸 매 사이클
+# 깨우려다 기동 예산을 태웠고 토큰이 만료됐다. 이 절이 그 재발을 막는다.
+import json as _json
+import tempfile as _tf
+
+_d = _tf.mkdtemp()
+os.makedirs(os.path.join(_d, "data"), exist_ok=True)
+
+
+def _write_fleet(obj):
+    with open(os.path.join(_d, "data", "fleet.json"), "w", encoding="utf-8") as f:
+        _json.dump(obj, f)
+
+
+def _rm_fleet():
+    p = os.path.join(_d, "data", "fleet.json")
+    if os.path.exists(p):
+        os.remove(p)
+
+
+reset_fails()
+_write_fleet({"indexes": [1, 2, 3, 4, 5]})
+f = Fleet(clock := Clock(), n=6, up=(1, 2, 3, 4, 5))
+out, logs = run(f, clock, app_dir=_d)
+ck("함대 밖 idx0 은 켜지 않는다", 0 not in f.launches(), str(f.calls))
+ck("함대 밖 idx0 은 프로브도 안 한다",
+   not any(k == "probe" and i == 0 for k, i in f.calls), str(f.calls))
+ck("제외를 로그로 남긴다", any("함대 밖" in x for x in logs), str(logs))
+
+reset_fails()
+_write_fleet({"indexes": [1, 2, 3, 4, 5]})
+f = Fleet(clock := Clock(), n=6, up=())
+out, logs = run(f, clock, app_dir=_d)
+ck("함대 안 5개만 켠다", sorted(f.launches()) == [1, 2, 3, 4, 5], str(f.launches()))
+
+# 설정이 없거나 망가졌을 때 조용히 함대를 줄이지 않는다 — 그쪽이 더 나쁜 고장이다.
+reset_fails()
+_rm_fleet()
+f = Fleet(clock := Clock(), n=6, up=())
+out, logs = run(f, clock, app_dir=_d)
+ck("fleet.json 없으면 전체 대상", sorted(f.launches()) == [0, 1, 2, 3, 4, 5],
+   str(f.launches()))
+
+reset_fails()
+_write_fleet({"indexes": []})
+f = Fleet(clock := Clock(), n=6, up=())
+out, logs = run(f, clock, app_dir=_d)
+ck("빈 목록은 설정 실수로 보고 전체 대상",
+   sorted(f.launches()) == [0, 1, 2, 3, 4, 5], str(f.launches()))
+ck("비었다고 로그로 알린다", any("비었" in x for x in logs), str(logs))
+
+reset_fails()
+with open(os.path.join(_d, "data", "fleet.json"), "w", encoding="utf-8") as _f:
+    _f.write("{ not json")
+f = Fleet(clock := Clock(), n=6, up=())
+out, logs = run(f, clock, app_dir=_d)
+ck("깨진 파일도 전체 대상으로 폴백", sorted(f.launches()) == [0, 1, 2, 3, 4, 5],
+   str(f.launches()))
+ck("읽기 실패를 로그로 알린다", any("읽기 실패" in x for x in logs), str(logs))
+
+# list2 와 설정이 하나도 안 겹치면 함대가 통째로 죽는다 → 그때도 전체로 돈다.
+reset_fails()
+_write_fleet({"indexes": [90, 91]})
+f = Fleet(clock := Clock(), n=6, up=())
+out, logs = run(f, clock, app_dir=_d)
+ck("설정 인덱스가 list2 에 없으면 전체 대상",
+   sorted(f.launches()) == [0, 1, 2, 3, 4, 5], str(f.launches()))
+ck("어긋남을 로그로 알린다",
+   any("하나도 없음" in x for x in logs), str(logs))
+
 passed = sum(1 for x in R if x)
 print(f"===== {passed}/{len(R)} PASS =====")
 sys.exit(0 if passed == len(R) else 1)

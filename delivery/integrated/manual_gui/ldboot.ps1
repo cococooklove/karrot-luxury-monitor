@@ -158,7 +158,25 @@ if ($ld) {
     # 운영 서버 실측(list2): 0=LDPlayer(클라 원본, 제외), 1=LDPlayer-1,
     # 2=정지7-0822, 3=정지9-0822, 4=정지11-0822, 5=정지13-0822.
     # index 1 은 이름만 기본값이지 계정 인스턴스가 맞다(karrot_token.ds 를 갖고 있다).
+    #
+    # 목록은 data\fleet.json 이 갖는다. 예전엔 여기 1..5 로 박아 두고 앱은
+    # 그 사실을 몰라, 앱만 index 0 을 매 사이클 깨우려다 기동 예산을 태웠다.
+    # 두 경로가 같은 파일을 본다. 파일이 없으면 예전 기본값으로 돈다.
     $indexes = 1, 2, 3, 4, 5
+    # 이 스크립트는 리포 사본(…\manual_gui\ldboot.ps1)이 실행된다 — 그 폴더가 앱 폴더다.
+    # 고정 경로의 shim 이 부르므로 $PSScriptRoot 는 shim 이 아니라 여기를 가리킨다.
+    $appDir = if ($PSScriptRoot) { $PSScriptRoot } else { "C:\karrot\delivery\integrated\manual_gui" }
+    $fleetFile = Join-Path $appDir "data\fleet.json"
+    if (Test-Path $fleetFile) {
+        try {
+            $fj = Get-Content $fleetFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $vals = @($fj.indexes | Where-Object { $_ -ne $null })
+            if ($vals.Count) { $indexes = $vals; W "함대 목록: data\fleet.json ($($vals -join ','))" }
+            else { W "!! data\fleet.json 이 비었음 - 기본값 1..5 로 진행" }
+        } catch {
+            W "!! data\fleet.json 읽기 실패($($_.Exception.Message)) - 기본값 1..5 로 진행"
+        }
+    }
     if (-not $hasRdp) {
         # 이 상태로 launch 하면 VM 만 뜨고 게스트가 안 올라온다. 인덱스마다 재시도까지
         # 다 돌면 15분을 헛되이 태우고 결과도 같다 → 시도하지 않고 할 일만 남긴다.
