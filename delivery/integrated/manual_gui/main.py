@@ -3522,7 +3522,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_proxy_labels(self):
         n = len(self._collect_proxies())
-        for attr in ("proxyViewBtn", "autoProxyViewBtn"):
+        for attr in ("autoProxyViewBtn",):
             if hasattr(self, attr):
                 getattr(self, attr).setText(f"프록시 목록 ({n})")
 
@@ -4084,12 +4084,6 @@ class MainWindow(QMainWindow):
         self.extraEdit.setPlaceholderText("추가 키워드 (쉼표/공백 구분, 모두 포함)")
         self.excludeEdit = QtWidgets.QLineEdit()
         self.excludeEdit.setPlaceholderText("제외 키워드 (쉼표/공백 구분)")
-        self.tokenRefreshCheck = QtWidgets.QCheckBox("검색 전 토큰 갱신")
-        self.tokenRefreshCheck.setChecked(True)   # app-API 통일 → 토큰 필수 → 기본 ON(LDPlayer 자동수확)
-        self.accountsBtn = QtWidgets.QPushButton("계정·프록시")
-        self.accountsBtn.clicked.connect(self.on_accounts_btn_clicked)
-        self.proxyViewBtn = QtWidgets.QPushButton("프록시 목록 보기")
-        self.proxyViewBtn.clicked.connect(self.on_proxy_view_clicked)
 
     def _build_manual_tab(self):
         """수동 탭 — 자동 탭과 통일된 그룹박스 레이아웃. 클라 원본 위젯 재사용."""
@@ -4113,7 +4107,6 @@ class MainWindow(QMainWindow):
         self.ui.minimumEdit.setPlaceholderText("최소가"); self.ui.minimumEdit.setFixedWidth(96)
         self.ui.maximumEdit.setPlaceholderText("최대가"); self.ui.maximumEdit.setFixedWidth(96)
         self.ui.startBtn.setText("검색")
-        self.tokenRefreshCheck.setText("토큰 갱신")
 
         fc = QtWidgets.QGroupBox(center); fc.setTitle("")
         fv = QtWidgets.QVBoxLayout(fc); fv.setContentsMargins(14, 12, 14, 12); fv.setSpacing(8)
@@ -4124,8 +4117,7 @@ class MainWindow(QMainWindow):
         r1 = QtWidgets.QHBoxLayout(); r1.setSpacing(8)
         r1.addWidget(self.extraEdit, 1); r1.addWidget(self.excludeEdit, 1)
         r1.addSpacing(10)
-        r1.addWidget(self.ui.onlyTradeableCheck); r1.addSpacing(18)
-        r1.addWidget(self.tokenRefreshCheck)
+        r1.addWidget(self.ui.onlyTradeableCheck)
         fv.addLayout(r0); fv.addLayout(r1)
         cl.addWidget(fc)
 
@@ -4140,12 +4132,11 @@ class MainWindow(QMainWindow):
         self.ui.saveToExcelBtn.setText("엑셀 저장")
         self.ui.crawlFromExcelBtn.setText("엑셀 크롤링")
         sb = QtWidgets.QHBoxLayout(); sb.setSpacing(8)
-        for b in (self.ui.saveToExcelBtn, self.ui.crawlFromExcelBtn,
-                  self.accountsBtn, self.proxyViewBtn):
+        for b in (self.ui.saveToExcelBtn, self.ui.crawlFromExcelBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
         sb.addWidget(self.ui.saveToExcelBtn); sb.addWidget(self.ui.crawlFromExcelBtn)
-        sb.addWidget(self.accountsBtn); sb.addStretch(1); sb.addWidget(self.proxyViewBtn)
+        sb.addStretch(1)
         cl.addLayout(sb)
         split.addWidget(center)
 
@@ -4361,10 +4352,8 @@ class MainWindow(QMainWindow):
         self._enter_task()
         self.clearItemList()
 
-        # 검색 전 토큰 갱신(옵션)
-        access_token = None
-        if self.tokenRefreshCheck.isChecked():
-            access_token = self._refresh_tokens()
+        # 검색 전 토큰 갱신 — app-API 경로라 토큰 필수
+        access_token = self._refresh_tokens()
 
         try:
             tasks = [
@@ -4547,9 +4536,7 @@ class MainWindow(QMainWindow):
 
         extra = self._split_keywords(self.extraEdit.text())
         exclude = self._split_keywords(self.excludeEdit.text())
-        access_token = None
-        if self.tokenRefreshCheck.isChecked():
-            access_token = self._refresh_tokens()
+        access_token = self._refresh_tokens()
 
         try:
             tradeable = self.ui.onlyTradeableCheck.isChecked()

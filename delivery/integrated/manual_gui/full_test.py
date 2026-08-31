@@ -132,8 +132,7 @@ try:
        [w.tabs.tabText(i) for i in range(w.tabs.count())]
        == ["수동 검색", "매물 감시", "에뮬레이터"])
     ck("수동 검색 위젯",
-       all(hasattr(w, x) for x in ("extraEdit", "excludeEdit", "tokenRefreshCheck",
-                                   "accountsBtn", "proxyViewBtn")))
+       all(hasattr(w, x) for x in ("extraEdit", "excludeEdit")))
     ck("감시 위젯",
        all(hasattr(w, x) for x in ("watchToggleBtn", "advancedBox", "listingTable",
                                    "alertTable", "alertLog", "_notify")))

@@ -58,7 +58,7 @@ w.alert = lambda *a, **k: None          # 알림 무음
 
 print("=== 버튼 → 핸들러 연결 ===")
 # receivers() 가 0 이면 눌러도 아무 일이 없다 — 런타임에만 드러나는 고장이다.
-for attr in ("accountsBtn", "proxyViewBtn", "alertAddBtn", "alertRefreshBtn",
+for attr in ("alertAddBtn", "alertRefreshBtn",
              "alertDelBtn", "alertDelAllBtn", "alertPollBtn", "alertPollAllBtn",
              "alertBulkAllBtn", "alertCoverageBtn", "alertFleetBtn",
              "alertTgTestBtn", "watchToggleBtn", "autoExcelBtn", "autoNotifyBtn",

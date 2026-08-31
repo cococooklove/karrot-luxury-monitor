@@ -16,8 +16,7 @@ def info(name, wd):
 print("탭:", [w.tabs.tabText(i) for i in range(w.tabs.count())])
 print("현재 탭 index:", w.tabs.currentIndex())
 print("[수동 추가위젯]")
-for n in ("extraEdit", "excludeEdit", "adaptiveCheck", "tokenRefreshCheck",
-          "accountsBtn", "proxyLabel", "proxyViewBtn"):
+for n in ("extraEdit", "excludeEdit"):
     info(n, getattr(w, n))
 print("gridLayout_2 rowCount:", w.ui.gridLayout_2.rowCount(),
       "itemCount:", w.ui.gridLayout_2.count())
