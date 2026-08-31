@@ -73,9 +73,13 @@ function Get-KarrotHolders {
   $hold += Get-Process -ErrorAction SilentlyContinue |
            Where-Object { $_.Path -like "C:\karrot\*" } |
            ForEach-Object { $_ }
+  # cmdline 에 karrot 이 안 들어가는 판이 있다. 작업 폴더가 C:\karrot 이라 pythonw 는
+  # "pythonw.exe main.py" 로만 뜨는데(작업 스케줄러가 -WorkingDirectory 로 띄운다),
+  # 그러면 여기 안 걸리고 install 이 잠긴 폴더를 만나 멈춘다. main.py 도 같이 본다.
   $hold += Get-CimInstance Win32_Process -ErrorAction SilentlyContinue `
              -Filter "Name='python.exe' OR Name='pythonw.exe'" |
-           Where-Object { $_.CommandLine -and $_.CommandLine -like "*karrot*" } |
+           Where-Object { $_.CommandLine -and
+                          ($_.CommandLine -like "*karrot*" -or $_.CommandLine -like "*main.py*") } |
            ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
   @($hold | Where-Object { $_ } | Sort-Object Id -Unique)
 }
