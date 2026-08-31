@@ -241,8 +241,36 @@ class KeywordRouter:
         return n
 
     # ── 배정 ──
+    @staticmethod
+    def _cond(min_price, max_price, exclude, extra, days) -> dict:
+        """앱 경로 키워드의 조건을 라우트 기록에 함께 남긴다.
+
+        앱 알림은 당근 서버가 판정하고 우리에게는 최소가·최대가·제외어만
+        전달된다. 추가키워드·끌올일수는 아예 전달할 방법이 없고, 돌아온
+        매칭을 우리 쪽에서 다시 거르지 않으면 엑셀에 적은 조건이 사실상
+        무시된다(실측: 20개 브랜드 전부 app 경로였고 추가키워드·끌올일수가
+        하나도 안 걸리고 있었다). 그래서 조건을 여기 보존해 두고 알림 직전에
+        한 번 더 태운다."""
+        c = {}
+        if min_price is not None:
+            c["min"] = min_price
+        if max_price is not None:
+            c["max"] = max_price
+        if exclude:
+            c["exclude"] = [str(x) for x in exclude]
+        if extra:
+            c["extra"] = [str(x) for x in extra]
+        if days:
+            c["days"] = int(days)
+        return c
+
+    def condition_for(self, keyword) -> dict:
+        """키워드에 걸린 조건(없으면 빈 dict). 알림 직전 필터가 쓴다."""
+        return dict(((self._routes.get(str(keyword or "").strip()) or {})
+                     .get("cond")) or {})
+
     def add(self, keyword, min_price=None, max_price=None, exclude=None,
-            core_only=False, log=None) -> dict:
+            core_only=False, log=None, extra=None, days=None) -> dict:
         log = log or (lambda m: None)
         keyword = str(keyword or "").strip()
         now = int(time.time())
@@ -283,12 +311,14 @@ class KeywordRouter:
 
         self.queue.remove(keyword)
         self._routes[keyword] = {"route": ROUTE_APP, "reason": "앱 알림 등록",
-                                 "at": now}
+                                 "at": now,
+                                 "cond": self._cond(min_price, max_price,
+                                                    exclude, extra, days)}
         self._save()
         return {"keyword": keyword, "route": ROUTE_APP, "reason": "앱 알림 등록"}
 
     def add_many(self, keywords, min_price=None, max_price=None, exclude=None,
-                 core_only=False, log=None) -> list[dict]:
+                 core_only=False, log=None, extra=None, days=None) -> list[dict]:
         """여러 키워드를 한 번에 배정한다(반환은 키워드별 결과 — 호출자가
         키워드마다 경로를 로그한다).
 
@@ -306,15 +336,16 @@ class KeywordRouter:
             seen.add(kw)
             batch.append(kw)
         done = (self._register_batch(batch, min_price, max_price, exclude,
-                                     core_only, log)
+                                     core_only, log, extra, days)
                 if len(batch) > 1 else set())
         return [{"keyword": k, "route": ROUTE_APP, "reason": "앱 알림 등록"}
                 if k in done else
-                self.add(k, min_price, max_price, exclude, core_only, log)
+                self.add(k, min_price, max_price, exclude, core_only, log,
+                         extra, days)
                 for k in items]
 
     def _register_batch(self, batch, min_price, max_price, exclude, core_only,
-                        log) -> set:
+                        log, extra=None, days=None) -> set:
         """묶음 등록 1회. 전원 성공일 때만 그 키워드들을 app 으로 확정한다.
 
         register_all 이 계정별 결과를 세 정수로 뭉개므로 부분 실패의 범인을
@@ -344,10 +375,11 @@ class KeywordRouter:
         if res.get("failed"):
             return set()
         now = int(time.time())
+        cond = self._cond(min_price, max_price, exclude, extra, days)
         for kw in batch:
             self.queue.remove(kw)
             self._routes[kw] = {"route": ROUTE_APP, "reason": "앱 알림 등록",
-                                "at": now}
+                                "at": now, "cond": cond}
         self._save()
         return set(batch)
 

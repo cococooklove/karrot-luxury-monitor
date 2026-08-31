@@ -646,6 +646,53 @@ class HeadlessSweepRunner:
             self.start()
 
 
+def filter_by_conditions(matches, router, log=None):
+    """앱 경로 매칭에 등록 조건을 한 번 더 태운다.
+
+    앱 알림은 당근 서버가 판정하고, 우리가 넘길 수 있는 건 최소가·최대가·
+    제외어뿐이다. 추가키워드·끌올일수는 전달할 방법 자체가 없다. 그래서
+    엑셀에 조건을 적어도 앱 경로에서는 사실상 무시됐다(실측 2026-08-30:
+    등록된 20개 브랜드가 전부 app 경로였고 추가키워드·끌올일수가 하나도
+    안 걸리고 있었다).
+
+    앱 매칭 payload 에는 제목·가격만 있고 본문과 끌올 시각이 없다. 그래서
+    여기서는 제목과 가격까지만 본다 — 본문에만 있는 제외어와 끌올일수는
+    이 경로에서 거를 수 없고 검색 스윕이 맡는다. 가격을 못 읽으면 가격
+    조건은 건너뛴다(못 읽었다는 이유로 버리지 않는다).
+    """
+    items = list(matches or [])
+    if not items or router is None:
+        return items, 0
+    from daangn_ext.article_watch import parse_price_text
+    kept, cut = [], 0
+    for m in items:
+        try:
+            cond = router.condition_for(m.get("keyword"))
+        except Exception:
+            cond = {}
+        if not cond:
+            kept.append(m)
+            continue
+        title = (m.get("title") or "").lower()
+        ok = all(str(x).lower() not in title for x in (cond.get("exclude") or []) if x)
+        if ok:
+            ok = all(str(x).lower() in title for x in (cond.get("extra") or []) if x)
+        if ok and (cond.get("min") is not None or cond.get("max") is not None):
+            price = parse_price_text(m.get("price"))
+            if price:
+                if cond.get("min") is not None and price < int(cond["min"]):
+                    ok = False
+                if cond.get("max") is not None and price > int(cond["max"]):
+                    ok = False
+        if ok:
+            kept.append(m)
+        else:
+            cut += 1
+    if cut and log:
+        log(f"[매칭] 조건 불일치 {cut}건 제외")
+    return kept, cut
+
+
 def dedupe_new_matches(matches, watch_store, fallback):
     """폴링 결과에서 아직 안 본 매치만 고른다 → (fresh, dropped).
 
@@ -2627,6 +2674,8 @@ class MainWindow(QMainWindow):
         if matches is None:
             self._last_new = 0
             return
+        matches, _ = filter_by_conditions(matches, getattr(self, "_router", None),
+                                          self.alertLog.append)
         new_items, dropped = dedupe_new_matches(
             matches, self._watch_store, self._match_seen_fallback)
         new = len(new_items)
@@ -2824,19 +2873,22 @@ class MainWindow(QMainWindow):
             kw = str((c or {}).get("keyword") or "").strip()
             if not kw:
                 continue
-            key = (c.get("min"), c.get("max"), tuple(c.get("exclude") or []))
+            key = (c.get("min"), c.get("max"), tuple(c.get("exclude") or []),
+                   tuple(c.get("extra") or []), c.get("days"))
             groups.setdefault(key, [])
             if kw not in groups[key]:
                 groups[key].append(kw)
-        return [(kws, k[0], k[1], list(k[2])) for k, kws in groups.items()]
+        return [(kws, k[0], k[1], list(k[2]), list(k[3]), k[4])
+                for k, kws in groups.items()]
 
     def _route_conditions(self, conditions, core_only=False, log=None):
         """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다."""
         log = log or self.alertLog.append
         out = []
-        for kws, mn, mx, excl in self._condition_groups(conditions):
+        for kws, mn, mx, excl, extra, days in self._condition_groups(conditions):
             out.extend(self._router.add_many(kws, mn, mx, excl,
-                                             core_only=core_only, log=log) or [])
+                                             core_only=core_only, log=log,
+                                             extra=extra, days=days) or [])
         return out
 
     def _night_factor(self):
@@ -3578,14 +3630,15 @@ class MainWindow(QMainWindow):
             cats = {c.get("category") or "-" for c in conds}
             self.alertLog.append(
                 f"[엑셀] 조건 {len(conds)}개 로드 (대분류 {len(cats)}종) — 라우터로 배정")
-            # 추가키워드·끌올일수·대분류는 라우터가 표현하지 못한다. 앱 알림은 그
-            # 셋을 애초에 못 받고, 스윕행 키워드는 고급 패널의 추가/끌올 값을 쓴다.
-            dropped = sorted({n for c in conds for n, v in
-                              (("추가키워드", c.get("extra")), ("끌올일수", c.get("days")),
-                               ("대분류", c.get("category"))) if v})
-            if dropped:
+            # 추가키워드는 앱 알림에 전달할 수 없지만, 조건을 라우트에 보존해
+            # 알림 직전에 우리가 한 번 더 거른다(제목·가격 기준). 끌올일수는
+            # 앱 매칭 payload 에 끌올 시각이 없어 이 경로에서 못 거른다.
+            if any(c.get("days") for c in conds):
                 self.alertLog.append(
-                    f"[엑셀] 라우터가 못 받는 항목 무시: {', '.join(dropped)}")
+                    "[엑셀] 끌올일수는 앱 알림 경로에서 적용되지 않습니다"
+                    " — 검색 스윕으로 배정된 키워드에만 걸립니다")
+            if any(c.get("category") for c in conds):
+                self.alertLog.append("[엑셀] 대분류는 분류용이라 필터에 쓰이지 않습니다")
             co = self._core_only()
 
             def job(log):
@@ -5187,6 +5240,7 @@ def _run_headless():
                 matches = m.poll_all(core_only=core_only, log=log)
             except Exception as e:
                 log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
+            matches, _ = filter_by_conditions(matches, router, log)
             fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
             if dropped:
                 log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
