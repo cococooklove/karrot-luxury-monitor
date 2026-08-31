@@ -216,23 +216,29 @@ New-NetFirewallRule -DisplayName karrot-block-bruteforce -Direction Inbound `
 그대로다. `update.ps1` 이 앱 정지 → 최신 ZIP → `install.ps1` → 앱 재기동을 한다.
 LDPlayer 함대는 건드리지 않으므로 순차 기동을 다시 기다릴 필요가 없다.
 
-```powershell
-# 최신인지만 확인 (아무것도 안 바꾼다)
-iwr https://raw.githubusercontent.com/cococooklove/karrot-luxury-monitor/master/delivery/integrated/manual_gui/update.ps1 -OutFile $env:TEMP\upd.ps1
-& $env:TEMP\upd.ps1 -Check
+`update.ps1` 자체는 ZIP 에서 꺼내 온다. `raw.githubusercontent` 는 CDN 캐시라
+푸시 직후 옛 스크립트를 내주고 `?nocache=` 를 붙여도 소용없다(2026-08-31 실측:
+새 판 7,434B 인데 raw 는 옛 7,055B 를 계속 내줬다).
 
-# 갱신
-& $env:TEMP\upd.ps1
+```powershell
+$z="$env:TEMP\k.zip"; $x="$env:TEMP\kx"
+iwr https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip -OutFile $z
+Expand-Archive $z -DestinationPath $x -Force
+$u="$x\karrot-luxury-monitor-master\delivery\integrated\manual_gui\update.ps1"
+
+& $u -Check   # 최신인지만 확인 (아무것도 안 바꾼다)
+& $u          # 갱신
 ```
 
 - 설정·자격증명 보존은 `install.ps1` 의 `$keep` 이 담당한다(2단계 백업/복원).
 - 배포 각인은 `data\deployed.json` — `install.ps1` 이 매 설치마다 커밋 SHA 를 적는다.
   `-Check` 는 이 파일과 GitHub `master` SHA 를 비교한다. 각인이 없으면 이 스크립트
   이전에 설치된 판이라 비교가 안 되고, 한 번 갱신하면 이후로는 비교된다.
-- `update.ps1` 은 ZIP 안의 `install.ps1` 을 부른다. `raw.githubusercontent` 는 CDN
-  캐시가 있어 푸시 직후 옛 스크립트를 내주지만 codeload ZIP 은 요청 시 생성된다.
-  (위 `iwr` 로 받는 `update.ps1` 자체는 캐시를 탈 수 있다 — 몇 분 기다리거나
-  `?nocache=1` 을 붙인다.)
+- `update.ps1` 은 ZIP 안의 `install.ps1` 을 부른다(같은 ZIP 을 `-ZipPath` 로 물려줘
+  두 번 받지 않는다). codeload ZIP 은 요청 시 생성되므로 항상 최신이다.
+- 점유 프로세스 판정은 `main.py` 를 실행 중인 python/pythonw 도 본다. 작업
+  스케줄러가 `-WorkingDirectory` 로 띄우면 명령줄에 `karrot` 이 안 남아서,
+  경로·`*karrot*` 만 보면 실행 중인 앱을 못 찾고 `Move-Item` 에서 잠긴다.
 - `--watchdog` 이 앱을 되살리므로 정지는 재시도 루프로 한다. 그래도 안 죽으면
   중단하고 살아 있는 PID 를 찍는다 — 폴더가 잠긴 채 반쯤 지워지는 것보다 낫다.
 
