@@ -276,6 +276,53 @@ tools/srv.sh push <로컬> <원격> / pull <원격> <로컬>
 - **인용부호는 base64 로 우회한다.** ssh → cmd → PowerShell 3단 인용은 쓰다 보면
   반드시 깨진다. 명령 본문은 base64 로 넘겨 서버에서 디코드한다.
 
+## 5-6. 푸시 즉시 배포 (GitHub Actions)
+
+`master` 에 푸시하면 `.github/workflows/deploy-server.yml` 이 서버를 그 커밋으로
+갱신한다. 문서만 고친 푸시(`**.md`, `docs/**`)는 건너뛴다 — 갱신은 앱을 2~3분
+내리기 때문이다.
+
+**이 레포는 공개다. 자체 호스팅 러너를 붙이면 안 된다** — 공개 레포에 붙인
+러너는 누구든 fork PR 로 서버에서 코드를 실행할 수 있다. 그래서 GitHub 호스팅
+러너가 SSH 로 서버를 두드리는 쪽을 쓴다. secrets 는 fork PR 에 넘어가지 않고,
+이 워크플로에는 `pull_request` 트리거가 없다.
+
+경로:
+
+```
+push master → Actions 러너 → ssh(배포키) → C:\karrot_deploy.ps1
+            → master.zip → update.ps1 → 앱 정지 → install.ps1 → 앱 재기동
+```
+
+**배포 키는 셸을 열지 못한다.** 서버 `administrators_authorized_keys` 가 그 키를
+강제 명령으로 묶는다:
+
+```
+command="powershell -NoProfile -ExecutionPolicy Bypass -File C:\karrot_deploy.ps1",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc,no-pty ssh-ed25519 AAAA… karrot-deploy-github-actions
+```
+
+클라이언트가 무슨 명령을 보내든 이 스크립트만 돈다. 키가 새더라도 할 수 있는
+일은 "재배포 트리거" 하나다. 운영용 키(`~/.ssh/karrot_server`)는 이 제한을 받지
+않으니 그대로 셸로 쓴다.
+
+`C:\karrot_deploy.ps1` 은 `C:\karrot` **밖**에 둔다. 재설치가 그 폴더를 통째로
+갈아끼우기 때문이다(`ldboot.ps1` shim 과 같은 이유). 로그는 `C:\karrot_deploy.log`.
+
+설정에 필요한 것:
+
+| 위치 | 이름 | 값 |
+|---|---|---|
+| 레포 Secrets | `KARROT_DEPLOY_KEY` | 배포용 **개인키** 전문 |
+| 레포 Variables | `KARROT_HOST_KEY` | `ssh-keyscan -t ed25519 <서버>` 결과 한 줄 |
+| 서버 | `administrators_authorized_keys` | 위 `command=` 줄 |
+
+호스트 키를 고정하지 않으면 중간자에게 배포 트리거를 넘겨줄 수 있다. Variables
+로 두는 이유는 비밀이 아니고, 서버를 재설치해 바뀌면 눈에 보여야 하기 때문이다.
+
+배포가 겹치면 `install.ps1` 이 서로의 폴더를 옮기려다 깨진다 → `concurrency` 로
+직렬화한다. 앞 배포를 취소하지도 않는다 — 중간에 끊기면 `C:\karrot` 이 반쯤
+파인 채 남는다.
+
 ## 6. 테스트 순서
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
 2. 키워드 등록(계정당 최대 30개): 코드 `MultiAccountAlerts.register_all(LUXURY_BRANDS)` or GUI 1회

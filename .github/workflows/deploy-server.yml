@@ -1,0 +1,51 @@
+# master 에 푸시하면 운영 서버가 그 커밋으로 갱신된다.
+#
+# 이 레포는 공개다. 그래서 자체 호스팅 러너는 쓰지 않는다 — 공개 레포에
+# 붙인 러너는 누구든 fork PR 로 서버에서 코드를 실행할 수 있다.
+# 대신 GitHub 호스팅 러너가 SSH 로 서버를 두드린다. secrets 는 fork PR 에
+# 넘어가지 않고, 이 워크플로는 push 로만 돈다(pull_request 트리거 없음).
+#
+# 키가 새더라도 셸은 열리지 않는다. 서버 authorized_keys 가 이 키를
+# `command="… -File C:\karrot_deploy.ps1"` 로 묶어 놨기 때문에, 무슨 명령을
+# 보내든 그 스크립트만 실행된다.
+name: deploy-server
+
+on:
+  push:
+    branches: [master]
+    # 문서만 고친 푸시로 앱을 2~3분 내리지 않는다.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:        # 손으로도 돌릴 수 있게
+
+# 배포가 겹치면 install.ps1 이 서로의 폴더를 옮기려다 깨진다. 앞 배포를 죽이지도
+# 않는다 — 중간에 끊기면 C:\karrot 이 반쯤 파인 채 남는다.
+concurrency:
+  group: deploy-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: SSH 키 준비
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.KARROT_DEPLOY_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          # 호스트 키를 고정한다. 이게 없으면 중간자에게 배포 트리거를 넘겨줄 수 있다.
+          printf '%s\n' "${{ vars.KARROT_HOST_KEY }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: 서버 갱신
+        run: |
+          # 보내는 명령은 무시된다 — authorized_keys 의 command= 가 이긴다.
+          # ServerAlive 로 죽은 연결에 매달리지 않게 한다(재설치는 10분 넘게 걸린다).
+          ssh -i ~/.ssh/deploy \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+              Administrator@108.181.252.171 deploy
