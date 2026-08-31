@@ -2023,6 +2023,10 @@ class MainWindow(QMainWindow):
 
     _BOOT_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
     _BOOT_NAME = "KarrotLuxeMonitor"
+    # install.ps1 이 서버에 심는 부팅 진입점. 이쪽은 ldboot.ps1 을 거쳐 LDPlayer 를
+    # 한 대씩 띄운 뒤에야 앱을 부른다. 우리 이름으로 하나 더 등록하면 로그온 때
+    # 앱과 ldboot 이 동시에 인스턴스를 launch 해 게스트 커널이 hang 한다.
+    _BOOT_NAME_INSTALLER = "LDPlayerBoot"
 
     def _boot_command(self):
         """부팅 시 실행할 커맨드 — frozen exe면 exe, 개발이면 pythonw + main.py.
@@ -2044,10 +2048,25 @@ class MainWindow(QMainWindow):
             self._set_boot_autostart(True)
         self.alertLog.append(f"[크래시 자동복구] {'켜짐 — 부팅 시 감시자 모드' if on else '꺼짐'}")
 
+    def _installer_boot_entry(self) -> bool:
+        """install.ps1 이 심은 부팅 진입점이 있는지."""
+        import sys as _sys
+        if _sys.platform != "win32":
+            return False
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._BOOT_KEY) as k:
+                winreg.QueryValueEx(k, self._BOOT_NAME_INSTALLER)
+            return True
+        except Exception:
+            return False
+
     def _boot_autostart_enabled(self):
         import sys as _sys
         if _sys.platform != "win32":
             return False
+        if self._installer_boot_entry():
+            return True          # 설치본 경로로 이미 켜져 있다
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._BOOT_KEY) as k:
@@ -2060,6 +2079,13 @@ class MainWindow(QMainWindow):
         import sys as _sys
         if _sys.platform != "win32":
             self.alertLog.append("[부팅 자동실행] Windows 전용 — Mac/Linux 미지원")
+            return
+        if enable and self._installer_boot_entry():
+            # 설치본이 이미 ldboot 경로로 등록해 뒀다. 여기서 하나 더 넣으면
+            # 로그온 때 앱과 ldboot 이 동시에 인스턴스를 띄워 함대가 hang 한다.
+            self.alertLog.append(
+                "[부팅 자동실행] 이미 켜져 있습니다 — 설치본이 LDPlayer 순차 기동 뒤에 "
+                "앱을 띄우는 경로로 등록해 뒀습니다. 따로 등록하지 않습니다.")
             return
         try:
             import winreg
@@ -2074,6 +2100,10 @@ class MainWindow(QMainWindow):
                     except FileNotFoundError:
                         pass
             self.alertLog.append(f"[부팅 자동실행] {'등록' if enable else '해제'}됨")
+            if not enable and self._installer_boot_entry():
+                self.alertLog.append(
+                    "[부팅 자동실행] 다만 설치본 경로(LDPlayer 순차 기동)는 그대로입니다 — "
+                    "부팅 시 앱은 계속 뜹니다.")
         except Exception as e:
             self.alertLog.append(f"[부팅 자동실행] 실패: {str(e)[:60]}")
 
