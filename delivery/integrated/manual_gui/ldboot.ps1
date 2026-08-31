@@ -3,7 +3,7 @@
 # 무인 부팅에서 지켜야 하는 두 가지:
 #  1) 콘솔 세션(사람이 RDP 로 붙지 않은 자동로그온 상태)에서는 LDPlayer 가 게스트를
 #     띄우지 못한다. VM 은 RUNNING 까지 가지만 게스트 커널이 실행되지 않아 adb 기기가
-#     끝내 안 뜬다. → 루프백 RDP 로 세션을 승격시킨 뒤에 기동한다.
+#     끝내 안 뜬다. → tscon 으로 세션을 콘솔에 붙인 뒤에 기동한다(안 되면 루프백 RDP).
 #  2) 인스턴스를 동시에 launch 하면 같은 증상으로 hang 한다. → 1개씩, 그리고 다음 것을
 #     띄우기 전에 adb 기기 수가 실제로 늘었는지 확인한다.
 #  3) LDPlayer 를 못 찾아도 모니터 앱은 반드시 띄운다. 앱은 HKCU Run 에서 빠져 있어
@@ -68,11 +68,33 @@ else {
 }
 
 if ($ld) {
-    # --- 1) 콘솔 세션이면 루프백 RDP 로 승격 ---
-    if ((quser 2>$null) -match "rdp-tcp") {
-        W "이미 RDP 세션 - 승격 생략"
+    # --- 1) 세션 활성화 ---
+    # LDPlayer 는 '활성' 세션이 없으면 VM 만 RUNNING 이고 게스트 커널이 끝내 안 뜬다.
+    # 실측(2026-08-30): 자동로그온 직후 세션은 어느 스테이션에도 안 붙어 Disc 로 남았고
+    # 그 상태에서 인스턴스가 하나도 기동되지 않았다. 사람이 RDP 로 붙어 세션이 Active 가
+    # 되자 같은 스크립트가 인스턴스당 20초에 다 띄웠다.
+    #
+    # tscon 으로 세션을 콘솔에 붙이는 게 정석이다. 실패하면 옛 방식(루프백 RDP)으로 넘어간다.
+    if ((quser 2>$null) -match "Active") {
+        W "세션 이미 활성 - 승격 생략"
     }
     else {
+        $sid = (Get-Process -Id $PID).SessionId
+        W "세션 $sid 비활성 - tscon 으로 콘솔 연결 시도"
+        try {
+            Start-Process -FilePath "tscon.exe" -ArgumentList "$sid", "/dest:console" `
+                          -WindowStyle Hidden -Wait -ErrorAction Stop
+        } catch {
+            W "tscon 실행 실패: $($_.Exception.Message)"
+        }
+        Start-Sleep 10
+    }
+
+    if ((quser 2>$null) -match "Active") {
+        W "세션 활성 확인"
+    }
+    else {
+        W "tscon 으로 활성화 안 됨 - 루프백 RDP 로 재시도"
         $w = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
         if (-not $w.DefaultPassword) {
             W "DefaultPassword 없음 - RDP 승격 불가(콘솔 세션에서는 기동 실패함)"
@@ -112,13 +134,13 @@ if ($ld) {
                 Start-Process mstsc -ArgumentList "/v:$target", "/w:1920", "/h:1080"
                 for ($i = 0; $i -lt 12; $i++) {
                     Start-Sleep 5
-                    if ((quser 2>$null) -match "rdp-tcp") { break }
+                    if ((quser 2>$null) -match "Active") { break }
                 }
-                if ((quser 2>$null) -match "rdp-tcp") { W "RDP 세션 승격 완료"; break }
+                if ((quser 2>$null) -match "Active") { W "RDP 세션 승격 완료"; break }
                 taskkill /IM mstsc.exe /F 2>$null | Out-Null   # 실패 팝업 정리
                 Start-Sleep 10
             }
-            if (-not ((quser 2>$null) -match "rdp-tcp")) { W "RDP 승격 실패 - 그대로 진행(기동 실패 예상)" }
+            if (-not ((quser 2>$null) -match "Active")) { W "세션 활성화 실패 - 그대로 진행(기동 실패 예상). 사람이 RDP 로 한 번 붙으면 복구됨" }
             Start-Sleep 10
         }
     }
