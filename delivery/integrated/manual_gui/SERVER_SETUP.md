@@ -158,6 +158,58 @@ Move-Item D:\LDPlayer\LDPlayer9\vms\leidian1\leidian.vbox `
 치운 뒤에는 앱의 `ensure_ldplayer`(20분 주기)가 알아서 되살린다. 실제로 index 1
 은 이 한 번으로 복구됐고 `karrot_token.ds` 도 그대로 살아 있었다.
 
+## 5-3. RDP 가 `프로토콜 오류(코드: 0x112f)` 로 3초 만에 끊길 때
+
+메모리 부족처럼 보이지만 아니다. 2026-08-31 에 실측했다. 서버는 32GB 중
+21.5GB 가 남아 있었고 함대(11 프로세스)도 앱도 정상이었다.
+
+`Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational` 을 보면 인증은
+통과하고 세션까지 배정된 뒤에 끊긴다:
+
+```
+3:26:43  AuthenticateClientToSession / 세션 1 배정
+3:26:44  RemoteFX guest mode, AVC available: 1, Initial profile: 8
+3:26:46  DisconnectNotify → The disconnect reason is 4399   ← 4399 = 0x112F
+```
+
+원인은 **RDP 하드웨어 AVC(H.264) 인코딩**이다. 이 서버에는 NVIDIA GPU 가 있고
+정책이 하드웨어 인코딩을 강제하고 있었는데(`AVCHardwareEncodePreferred=1`,
+`AVC444ModePreferred=1`), 같은 GPU 를 LDPlayer 인스턴스들이 OpenGL 로 점유한다.
+재접속 순간 RDP 가 하드웨어 인코더를 잡지 못하면 프로토콜 오류로 끊는다.
+
+소프트웨어 인코딩으로 내리면 경합이 사라진다(화질 약간 하락, CPU 소폭 증가):
+
+```powershell
+$p='HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+Set-ItemProperty $p AVCHardwareEncodePreferred 0 -Type DWord
+Set-ItemProperty $p AVC444ModePreferred        0 -Type DWord
+Restart-Service TermService -Force
+```
+
+`Restart-Service TermService` 는 **로그오프가 아니다.** 세션 1 은 살아 있고 함대도
+앱도 죽지 않는다(실측: 재시작 후 LD 11 프로세스·pythonw 2 그대로). 되돌리려면 두
+값을 `1` 로 다시 넣는다.
+
+진단할 때 헷갈리는 것들:
+
+- **`3389` 가 막혀 있는 것은 정상이다.** 이 서버의 RDP 는 `1098` 이다(5-1 참고).
+  기본 포트로 붙으면 접속 자체가 안 되고, 그건 0x112f 가 아니다.
+- **로그의 로그인 실패는 대부분 봇이다.** 같은 시각 `112.170.79.190` 이 5분마다
+  없는 계정명(BEST/MICHAEL/GEMINI/...)으로, `82.145.229.50` 이 ADMINISTRATOR
+  비밀번호로 두드리고 있었다. 4625 의 `SubStatus` 로 가른다 —
+  `0xc0000064` = 없는 계정명, `0xc000006a` = 비밀번호 틀림.
+- **내 접속인지 가르는 법**: 이벤트 104 `Client timezone is [9] hour from UTC` 가
+  한국 클라이언트다. 그리고 `disconnect reason 4399` 가 찍힌 연결이 0x112f 를 본
+  바로 그 연결이다.
+
+알려진 공격 IP 는 이름 붙은 규칙 하나로 막아 둔다. 형 IP 만 화이트리스트로 조이면
+유동 IP 일 때 본인이 잠기므로, KVM 콘솔 접근을 확인하기 전에는 이 방향으로 간다:
+
+```powershell
+New-NetFirewallRule -DisplayName karrot-block-bruteforce -Direction Inbound `
+  -Action Block -RemoteAddress 112.170.79.190,82.145.229.50 -Profile Any
+```
+
 ## 6. 테스트 순서
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
 2. 키워드 등록(계정당 최대 30개): 코드 `MultiAccountAlerts.register_all(LUXURY_BRANDS)` or GUI 1회
