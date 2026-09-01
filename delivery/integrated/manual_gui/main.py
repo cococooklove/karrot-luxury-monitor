@@ -866,31 +866,27 @@ class _HarvestThread(QtCore.QThread):
         import time as _t
         while not self._stop:
             started = _t.monotonic()
+            hstats = {}
             try:
                 import ld_autoharvest
-                # 임계는 '직전에 실제로 걸린 주기'를 기준으로 정한다. 수확 자체가
-                # 함대 기동(최대 FLEET_BOOT_BUDGET)까지 포함하므로 틱 간격은
-                # 고정이 아니고, 고정으로 가정하면 느린 틱에서 토큰이 죽는다.
-                mr = ld_autoharvest.min_remaining_for(self._period)
-                if not ld_autoharvest.period_is_safe(self._period):
-                    self.tick.emit(
-                        f"[자동수확] 경고: 한 틱이 {int(self._period)}초 걸립니다 — "
-                        f"토큰 수명({ld_autoharvest.ACCESS_TTL}초)에 비해 너무 길어 "
-                        "만료를 못 막습니다. 주기를 줄이거나 함대를 줄이세요.")
                 u, i, t, h = ld_autoharvest.harvest_all(
-                    self.accounts, nudge=True, log=self.tick.emit, min_remaining=mr)
+                    self.accounts, nudge=True, log=self.tick.emit, stats=hstats)
                 self.tick.emit(f"[자동수확] {h}계정 갱신 · 총 {t}계정" if h
                                else "[자동수확] 대상 없음(LDPlayer/폰 확인)")
             except Exception as e:
                 self.tick.emit(f"[자동수확] 실패: {str(e)[:60]}")
-            # 남은 시간만 잔다 — 수확에 걸린 만큼 주기가 밀리면 그게 곧 만료 구간이다.
+            # 다음 수확은 '가장 먼저 죽는 토큰'의 만료 직후다. 앱이 만료 전에는
+            # 갱신을 거절하므로(ld_autoharvest 상수 주석의 실측 로그), 고정 주기로
+            # 돌면 최악의 경우 그 주기만큼 만료된 채 방치된다 — 실제로 20분을
+            # 그렇게 보내고 폴링이 "전계정(0)" 으로 헛돌았다.
+            import ld_autoharvest as _LA
             spent = _t.monotonic() - started
-            for _ in range(max(1, int(self.interval - spent))):
+            delay = _LA.next_harvest_delay(hstats.get("min_remaining"),
+                                           ceil=self.interval)
+            for _ in range(max(1, int(delay - spent))):
                 if self._stop:
                     return
                 _t.sleep(1)
-            # 다음 틱이 쓸 기준: 이번 틱 시작부터 다음 틱 시작까지의 실제 간격.
-            self._period = max(float(self.interval), _t.monotonic() - started)
 
     def stop(self):
         self._stop = True
@@ -5237,6 +5233,8 @@ def _run_headless():
 
     log("=== 헤드리스 무인 모니터 시작 ===")
     last_harvest = 0.0
+    next_harvest = 0.0          # 첫 루프에서 곧바로 한 번 수확한다
+    hstats = {}
     watch_store = watch_tracker = watch_budget = None
     last_watch_sweep = 0.0
     try:
@@ -5362,23 +5360,19 @@ def _run_headless():
             core_only = bool(st.get("core_only"))
             now = _time.time()
             # 자동수확(20분 주기)
-            if do_harvest and now - last_harvest > harvest_interval():
+            # 다음 수확 시각은 만료 직후로 잡힌다(GUI 와 같은 규칙).
+            if do_harvest and now - last_harvest > next_harvest:
                 try:
                     import ld_autoharvest
-                    # GUI 와 같은 이유로 임계는 '실제 틱 간격'에서 나온다.
-                    # 첫 틱은 측정값이 없으므로 설정 간격을 쓴다.
-                    period = (now - last_harvest) if last_harvest else harvest_interval()
-                    if not ld_autoharvest.period_is_safe(period):
-                        log(f"[수확] 경고: 틱 간격 {int(period)}초 — 토큰 수명"
-                            f"({ld_autoharvest.ACCESS_TTL}초)에 비해 너무 깁니다."
-                            " 만료를 못 막습니다.")
                     u, i, t, h = ld_autoharvest.harvest_all(
-                        "./accounts.json", nudge=True, log=log,
-                        min_remaining=ld_autoharvest.min_remaining_for(period))
+                        "./accounts.json", nudge=True, log=log, stats=hstats)
                     log(f"[수확] 갱신 {u} 신규 {i} 총 {t} (수확 {h})")
                 except Exception as e:
                     log(f"[수확] 실패: {str(e)[:60]}")
                 last_harvest = now
+                import ld_autoharvest as _LA
+                next_harvest = _LA.next_harvest_delay(hstats.get("min_remaining"),
+                                                      ceil=harvest_interval())
             # ── 라우터 · 검색 스윕 — GUI _auto_poll_tick 과 같은 순서 ──
             # 씨딩 → 승격 → 스윕 재동기화. 재동기화는 루프 1회에 한 번뿐이라
             # 대기열이 요동쳐도 재시작은 폴링 주기당 한 번을 넘지 않는다.

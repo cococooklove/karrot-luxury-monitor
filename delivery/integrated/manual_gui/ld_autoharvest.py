@@ -413,54 +413,44 @@ def ld_kill_pid(pid):
 
 # ── 토큰 신선도 정책 ─────────────────────────────────────────────────────────
 # access 토큰 수명. JWT 의 exp-iat 실측값(2026-09-01, 서버 4계정 전부 동일).
-# 추정이 아니라 서버가 발급하며 정한 값이라 우리가 못 바꾼다.
+# 서버가 발급하며 정한 값이라 우리가 못 바꾼다.
 ACCESS_TTL = 1800
-# 주기적 수확 간격. 이 값의 소유자는 여기다 — GUI 스레드도 헤드리스 루프도
-# 각자 1200 을 적어 두면 아래 불변식이 조용히 깨진다.
-HARVEST_INTERVAL = 1200
 # nudge(force-stop→launch) 가 새 토큰을 받아오기까지의 실측 최대 대기. 3초 × 8회.
 NUDGE_WORST = 24
-# 신선도 임계 — 이 아래로 남으면 이번 틱에 갱신한다.
 #
-# **불변식: 임계 > 수확 간격 + nudge 소요.** 임계가 간격보다 작으면 만료는 우연이
-# 아니라 필연이다. 잔여가 임계보다 1초 많은 순간 이번 틱은 건너뛰는데, 다음 틱은
-# 간격만큼 뒤라 그 사이에 토큰이 죽는다. 실제로 그렇게 죽었다 — 임계 600 · 간격
-# 1200 이던 서버에서 4계정이 만료된 채 방치됐고, 폴링은 유효 계정이 없어 헛돌았다.
-# 반대쪽 한계는 TTL 이다. 임계가 TTL 을 넘으면 어떤 토큰도 임계를 못 넘어 매 틱
-# 함대를 깨우게 된다. 그래서 항상 HARVEST_INTERVAL < MIN_REMAINING < ACCESS_TTL.
-SAFETY = 5 * NUDGE_WORST                                # 120초
+# **당근 앱은 만료 전에 토큰을 갱신하지 않는다.** 이게 이 정책 전체를 정한다.
+# 실서버 로그로 확정(2026-09-01):
+#     20:07:44  갱신 4   ← 만료된 상태에서 nudge → 갱신됨
+#     20:12:51  갱신 0   ← 잔여 ~1500초에 nudge → 앱이 갱신 안 함
+#     20:32:51  갱신 0   ← 잔여 ~300초에 nudge → 그래도 갱신 안 함
+#     20:37     만료 → 폴링이 "전계정(0)" 으로 헛돎
+#     20:45     만료 후 nudge → 갱신 4
+# 그래서 "만료 전에 미리 깨워 둔다"는 접근은 성립하지 않는다. 아무리 임계를
+# 올려도 앱이 거절하고, 깨우는 비용(앱 콜드스타트)만 나간다. 우리가 할 수 있는
+# 최선은 **만료 직후 최대한 빨리 깨우는 것**이고, 그러면 남은 문제는 "만료된 채
+# 방치되는 시간을 얼마나 짧게 만드느냐"뿐이다.
+NUDGE_BELOW = 30
+# 그 시간을 짧게 만드는 방법은 고정 주기가 아니라 **만료 시각에서 역산한 스케줄**
+# 이다. 고정 1200초 틱은 최악 20분을 죽은 채로 보낸다(실제로 그랬다).
+HARVEST_INTERVAL = 300          # 아무 정보가 없을 때의 심장박동(상한)
+HARVEST_MIN_SLEEP = 30          # 아래로는 안 내려간다 — nudge 폭주 방지
 
 
-def min_remaining_for(period) -> int:
-    """이 **실제 주기**로 도는 수확기가 토큰을 죽이지 않을 최소 신선도.
+def next_harvest_delay(min_remaining, ceil=None, floor=HARVEST_MIN_SLEEP) -> int:
+    """다음 수확까지 잘 시간. 가장 먼저 죽는 토큰의 만료 시각에서 역산한다.
 
-    주기를 상수로 가정하면 안 된다. 한 틱은 '간격 + 수확에 걸린 시간'이고,
-    수확은 매번 ensure_ldplayer 를 거치며 그건 FLEET_BOOT_BUDGET(600초)까지
-    쓸 수 있다. 인스턴스 하나가 hang 하면 틱 간격이 1200초가 아니라 1400초가
-    되고, 1320초 남아 '신선'으로 건너뛴 토큰이 다음 틱에는 이미 죽어 있다 —
-    고치려던 사고가 그대로 재현된다. 그래서 호출자가 **직전에 측정한 주기**를
-    넘기고, 임계는 거기에 맞춰 따라 움직인다.
-
-    TTL 을 넘겨야 안전한 주기라면 어떤 임계로도 못 막는다. 그때는 TTL 바로
-    아래로 깎아 매 틱 갱신하게 하고(할 수 있는 최선), 호출자가 경고하게 둔다.
+    앱이 만료 전에는 갱신하지 않으므로 만료 **직후**에 깨어나야 한다. 너무 일찍
+    깨면 헛수고(앱이 거절), 너무 늦게 깨면 그만큼 폴링이 계정 없이 헛돈다.
+    잔여를 모르면(측정 실패) 심장박동 주기로 떨어진다.
     """
+    ceil = HARVEST_INTERVAL if ceil is None else ceil
     try:
-        period = float(period)
+        rem = float(min_remaining)
     except (TypeError, ValueError):
-        period = float(HARVEST_INTERVAL)
-    return int(min(period + SAFETY, ACCESS_TTL - NUDGE_WORST))
+        return int(ceil)
+    # 만료 직후를 노린다. 이미 만료됐으면 바로 다시 간다(floor).
+    return int(max(floor, min(ceil, rem + 1)))
 
-
-def period_is_safe(period) -> bool:
-    """이 주기로 토큰 만료를 막을 수 있나. False 면 주기를 줄여야 한다."""
-    try:
-        return float(period) + NUDGE_WORST < ACCESS_TTL
-    except (TypeError, ValueError):
-        return False
-
-
-MIN_REMAINING = min_remaining_for(HARVEST_INTERVAL)      # 1320
-assert HARVEST_INTERVAL < MIN_REMAINING < ACCESS_TTL, "수확 신선도 불변식 위반"
 
 # ── 함대 기동 정책 ───────────────────────────────────────────────────────────
 # 한 사이클(수확 1틱)에 기동에 쓸 수 있는 총 시간. 6대 × 최대 180s + 간격이면
@@ -745,13 +735,13 @@ def _read_parse(adb_bin, serial):
     return {"code": str(code), "refresh": refresh, "access": access}
 
 
-def harvest_one(adb_bin, serial, nudge=True, min_remaining=MIN_REMAINING):
+def harvest_one(adb_bin, serial, nudge=True, min_remaining=NUDGE_BELOW):
     """토큰 수확. 먼저 읽어(무-nudge) 아직 min_remaining 초 넘게 살아있으면 그대로 반환.
     만료임박/없음일 때만 nudge(앱 강제실행)해 앱이 갱신하도록 유도 → 재읽기.
     → 100계정 팜서 불필요한 앱실행 최소화(배터리·부하·방해 감소).
 
-    기본 임계를 직접 정하지 마라. MIN_REMAINING 은 수확 간격에 묶여 있고
-    (임계 > 간격), 그 부등식이 깨지면 토큰이 틱 사이에 죽는다."""
+    기본 임계(NUDGE_BELOW)는 낮게 잡혀 있다. 앱이 만료 전 갱신을 거절하므로
+    미리 깨우는 건 앱 콜드스타트만 낭비한다 — 위 상수 주석의 실측 로그 참고."""
     cur = _read_parse(adb_bin, serial)
     if cur and _access_remaining(cur.get("access", "")) > min_remaining:
         return cur                       # 아직 신선 → nudge 불필요
@@ -833,7 +823,8 @@ def _atomic_write_json(fp, data):
 
 
 def harvest_all(accounts_fp="./accounts.json", adb_bin=None, serials=None,
-                nudge=True, log=None, min_remaining=MIN_REMAINING):
+                nudge=True, log=None, min_remaining=NUDGE_BELOW,
+                stats=None):
     """모든 LDPlayer 인스턴스 수확 → accounts.json 병합. (updated, inserted, total, harvested).
 
     프로세스 안에서 한 번에 하나만 돈다. 두 스레드가 동시에 들어오면 뒤쪽은
@@ -844,11 +835,11 @@ def harvest_all(accounts_fp="./accounts.json", adb_bin=None, serials=None,
     동시에 띄우면 두 프로세스가 각각 수확하며, 그건 파일락으로만 막힌다."""
     with _HARVEST_LOCK:
         return _harvest_all_locked(accounts_fp, adb_bin, serials, nudge, log,
-                                   min_remaining)
+                                   min_remaining, stats)
 
 
 def _harvest_all_locked(accounts_fp, adb_bin, serials, nudge, log,
-                        min_remaining=MIN_REMAINING):
+                        min_remaining=NUDGE_BELOW, stats=None):
     log = log or (lambda m: None)
     adb_bin = find_adb(adb_bin)
     use = list(serials or [])
@@ -881,5 +872,11 @@ def _harvest_all_locked(accounts_fp, adb_bin, serials, nudge, log,
     if not rows:
         return (0, 0, 0, 0)
     u, i, t = merge_accounts(accounts_fp, rows, log=log)
+    # 다음 수확 시각을 정하려면 '가장 먼저 죽는 토큰'의 잔여가 필요하다.
+    if stats is not None:
+        rems = [_access_remaining(r.get("access", "")) for r in rows]
+        rems = [x for x in rems if isinstance(x, (int, float))]
+        stats["min_remaining"] = min(rems) if rems else None
+        stats["harvested"] = len(rows)
     log(f"[수확] 갱신 {u} · 신규 {i} · 총 {t}계정")
     return (u, i, t, len(rows))
