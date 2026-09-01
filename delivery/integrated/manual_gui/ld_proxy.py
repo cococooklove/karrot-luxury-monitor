@@ -172,6 +172,33 @@ def proxy_alive(proxy_url, timeout=PROBE_TIMEOUT, log=None):
     return True
 
 
+LOOPBACK = ("127.0.0.1", "localhost", "0.0.0.0", "::1")
+
+
+def _guest_reachable(console, index, endpoint, log=None):
+    """호스트 기준 주소를 **게스트가 부를 수 있는** 주소로 바꾼다.
+
+    릴레이는 루프백에만 연다 — 인증이 없으므로 공개 IP 서버에서 0.0.0.0 으로
+    열면 우리 유료 자격증명을 아무나 쓰는 오픈 프록시가 된다. 그런데 게스트는
+    호스트의 127.0.0.1 을 그 이름으로 부를 수 없다. LDPlayer NAT 은 게스트의
+    게이트웨이를 호스트 루프백으로 잇는다 — 실측으로 확인했다(127.0.0.1 에만
+    묶은 리스너에 게스트가 172.16.1.2 로 닿았다). 그래서 호스트 쪽 주소가
+    루프백이면 그 인스턴스의 게이트웨이 주소로 갈아 끼운다.
+    """
+    log = log or (lambda m: None)
+    if not endpoint:
+        return None
+    host, _, port = str(endpoint).rpartition(":")
+    if host not in LOOPBACK:
+        return endpoint
+    gw = host_addr_for(console, index)
+    if not gw:
+        log(f"[프록시] index {index}: 게스트에서 호스트로 가는 주소를 못 찾아"
+            " 릴레이를 걸지 않습니다")
+        return None
+    return f"{gw}:{port}"
+
+
 def _account_proxies(accounts_fp):
     """{code: proxy} — 프록시가 지정된 계정만."""
     import json
@@ -235,6 +262,7 @@ def apply_account_proxies(accounts_fp="./accounts.json", console=None,
             continue
         else:
             ep = px.split("//", 1)[-1]
+        ep = _guest_reachable(console, idx, ep, log=log)
         if not ep:
             out[idx] = None
             continue

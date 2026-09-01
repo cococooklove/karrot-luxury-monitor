@@ -25,6 +25,54 @@ LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다"
 WATCH_SWEEP_INTERVAL = 600          # 워치리스트 스윕 주기(초)
 
 
+# ── 게스트(에뮬) 앱 트래픽 프록시 ──────────────────────────────────────────
+# 토큰을 만드는 건 게스트 안의 당근 앱이고, 그 앱이 접속하는 곳이 곧 그 계정이
+# 로그인한 곳이다. 서버가 미국 IP 라 검색만 KR 프록시로 돌려도 계정은 미국에서
+# 붙는다. 그래서 계정에 지정한 프록시를 그 계정이 든 인스턴스의 안드로이드
+# 전역 프록시로 건다(당근 앱이 그걸 존중하는 것은 실측으로 확인).
+#
+# 상용 프록시는 대개 자격증명이 붙는데 전역 프록시에는 그 칸이 없다. 그래서
+# 호스트 루프백에 인증 없는 릴레이를 열고 업스트림에 인증을 붙여 넘긴다.
+# 릴레이는 프로세스가 사는 동안 떠 있어야 하므로 여기서 하나만 들고 간다.
+_GUEST_RELAY = None
+
+
+def guest_proxy_sync(accounts_path="./accounts.json", log=None):
+    """계정별 프록시를 게스트에 반영한다. 반환 {index: endpoint|None}.
+
+    수확 직전에 부른다 — 프록시가 걸린 뒤에 앱이 콜드스타트해야 토큰 갱신이
+    그 프록시로 나간다. 값이 안 바뀌었으면 adb 를 더 쓰지 않으므로 매 틱 불러도
+    싸다. 어떤 이유로 실패해도 수확을 막지 않는다(프록시는 보조, 토큰이 본체).
+    """
+    global _GUEST_RELAY
+    log = log or (lambda m: None)
+    try:
+        import ld_proxy
+        from daangn_ext.proxy_relay import ProxyRelay
+    except Exception as e:
+        log(f"[프록시] 모듈 없음 — 게스트 프록시를 건너뜁니다: {str(e)[:60]}")
+        return {}
+    try:
+        want = ld_proxy._account_proxies(accounts_path)
+        need_relay = {px for px in want.values() if "@" in px}
+        if need_relay:
+            if _GUEST_RELAY is None:
+                _GUEST_RELAY = ProxyRelay(bind="127.0.0.1", log=log).start()
+            for px in need_relay:
+                _GUEST_RELAY.add(px, px)      # 키 = URL. 같은 업스트림은 릴레이가 합친다
+
+        def endpoint_for(px):
+            if "@" not in px:
+                return px.split("//", 1)[-1]
+            return _GUEST_RELAY.endpoint(px) if _GUEST_RELAY else None
+
+        return ld_proxy.apply_account_proxies(accounts_path, log=log,
+                                              endpoint_for=endpoint_for)
+    except Exception as e:
+        log(f"[프록시] 게스트 반영 실패(계속): {type(e).__name__}: {str(e)[:80]}")
+        return {}
+
+
 def mirror_app_keywords_to_sweep(router, queue, log=None, enabled=False) -> int:
     """앱 알림에 배정된 키워드를 검색 스윕 대기열에도 싣는다.
 
@@ -907,6 +955,8 @@ class _HarvestThread(QtCore.QThread):
         while not self._stop:
             started = _t.monotonic()
             hstats = {}
+            # 프록시를 먼저 걸어야 이어지는 콜드스타트가 그 프록시로 나간다.
+            guest_proxy_sync(self.accounts, log=self.tick.emit)
             try:
                 import ld_autoharvest
                 u, i, t, h = ld_autoharvest.harvest_all(
@@ -1354,6 +1404,72 @@ class HealthCheckThread(QtCore.QThread):
         except Exception as e:
             res = {"error": f"{type(e).__name__}: {e}"}
         self.result.emit(res)
+
+
+class _TokenRefreshThread(QtCore.QThread):
+    """검색 직전 access 토큰 확보 — **GUI 스레드에서 돌리면 안 된다**.
+
+    안에서 부르는 ld_autoharvest.harvest_all(nudge=True) 는 LDPlayer 함대를
+    깨워 정품 앱이 갱신한 토큰을 읽어오는 일이다. 전국 검색 규모에서는 수십
+    초가 걸리고, 그동안 GUI 스레드에 있으면 이벤트 루프가 멈춘다 → 창이 얼어
+    리페인트조차 안 된다. 클라가 본 '검색을 눌러도 한참 아무 변화 없음'의
+    실제 정체가 이것이다. 진행 문구를 아무리 찍어도 그려질 틈이 없으므로,
+    이 스레드는 진행 표시의 장식이 아니라 전제다.
+
+    워커 스레드에서 위젯을 만지면 Qt 는 조용히 죽는다 — 여기서는 시그널만
+    쏘고, 화면 갱신·모달은 전부 GUI 쪽 슬롯이 한다.
+    """
+    log = QtCore.pyqtSignal(str)
+    done = QtCore.pyqtSignal(object, str)   # (access_token | None, 오류문구)
+
+    def __init__(self, parent, accounts="./accounts.json"):
+        super().__init__(parent)
+        self.setObjectName("TokenRefreshThread")
+        self.accounts = accounts
+
+    def run(self):
+        import json as _json
+        # 1) LDPlayer 온디바이스 수확 — 정품 앱이 갱신한 access 를 su 로 직접 읽어
+        #    accounts.json 에 병합. HTTP refresh(api.kr.karrotmarket.com)는 WAF 403
+        #    이라 이 경로가 실질 갱신책이다.
+        try:
+            import ld_autoharvest
+            ld_autoharvest.harvest_all(
+                self.accounts, nudge=True,
+                log=lambda m: self.log.emit(str(m)))
+        except Exception as e:
+            self.log.emit(f"[수확 건너뜀] {str(e)[:60]}")
+        # 2) accounts.json 에서 남은 수명이 가장 긴 access 반환
+        try:
+            from daangn_ext.token_manager import token_exp
+            best = None
+            with open(self.accounts, encoding="utf-8") as _f:
+                _accs = _json.load(_f)
+            for a in _accs:
+                acc = a.get("access") or ""
+                if acc and (best is None or token_exp(acc) > token_exp(best)):
+                    best = acc
+            if best:
+                self.done.emit(best, "")
+                return
+        except Exception:
+            pass
+        # 3) 폴백: 기존 HTTP refresh (LDPlayer 없음/수확실패 시. WAF면 실패할 수 있음)
+        try:
+            from daangn_ext import TokenManager, AccountStore, bind_to_token_manager
+            store = AccountStore(self.accounts)
+            if not store.rows:
+                self.done.emit(
+                    None,
+                    "계정 없음. LDPlayer 를 켜거나 '계정+프록시 추가'로 등록하세요.")
+                return
+            tm = TokenManager()
+            bind_to_token_manager(store, tm)
+            tm.refresh_all()
+            accs = list(tm.accounts.values())
+            self.done.emit(tm.ensure_safe(accs[0]) if accs else None, "")
+        except Exception as e:
+            self.done.emit(None, f"토큰 갱신 오류: {e}")
 
 
 class MyProgressDialog(QProgressDialog):
@@ -4116,6 +4232,10 @@ class MainWindow(QMainWindow):
 
 
     def _init_state(self):
+        # 검색 수명 상태 — 토큰 스레드 유무가 '준비 중'의 유일한 근거다.
+        self._token_thread = None
+        self._search_cancelled = False
+        self._crawl_builder = None
         self.worker_thread: CancelableImageDownloader | None = None
         self.current_loaded_url: str | None = None
         self.current_download_task_token: str | None = None
@@ -4265,7 +4385,19 @@ class MainWindow(QMainWindow):
         r1.addWidget(self.extraEdit, 1); r1.addWidget(self.excludeEdit, 1)
         r1.addSpacing(10)
         r1.addWidget(self.ui.onlyTradeableCheck)
+        # 진행 표시 — 전국 검색은 지역이 200곳을 넘고 몇 분이 걸린다. 누른 뒤
+        # 화면이 그대로면 사용자는 눌리지 않은 줄 안다(클라 실제 반응). 상태바
+        # 한 줄로는 부족해서 필터바 바로 아래, 결과표 위에 둔다.
+        self.searchProgress = QtWidgets.QProgressBar()
+        self.searchProgress.setRange(0, 0)          # 준비 단계는 진행률을 모른다
+        self.searchProgress.setTextVisible(True)
+        self.searchProgress.setVisible(False)
+        self.searchProgressLabel = QtWidgets.QLabel("")
+        self.searchProgressLabel.setStyleSheet(
+            "color:#B3A88F; font-size:12px;")
+        self.searchProgressLabel.setVisible(False)
         fv.addLayout(r0); fv.addLayout(r1)
+        fv.addWidget(self.searchProgress); fv.addWidget(self.searchProgressLabel)
         cl.addWidget(fc)
 
         hdr = QtWidgets.QHBoxLayout()
@@ -4317,6 +4449,7 @@ class MainWindow(QMainWindow):
         self.controller.task_error.connect(self._handle_task_error)
         self.controller.task_finished.connect(self._handle_task_finished)
         self.controller.task_message.connect(self._handle_task_message)
+        self.controller.task_progress.connect(self._handle_task_progress)
 
     def _load_proxy(self):
         err = self.controller.load_proxy_settings()
@@ -4444,6 +4577,15 @@ class MainWindow(QMainWindow):
         return reply.exec() == QtWidgets.QMessageBox.StandardButton.Yes
 
     def on_start_btn_clicked(self):
+        # 토큰 준비 구간에는 controller.task 가 아직 없다. is_task_running() 만
+        # 보면 여기서 두 번째 검색이 그대로 시작된다(같은 함대를 두 번 깨운다).
+        if getattr(self, "_token_thread", None) is not None:
+            if not self.ask("토큰을 준비하고 있습니다. 검색을 취소할까요?"):
+                return
+            self._search_cancelled = True
+            self._set_search_progress("취소 중… 토큰 준비가 끝나면 멈춥니다")
+            return
+
         # if stop btn
         if self.controller.is_task_running():
             if self.controller.is_task_stopping():
@@ -4492,31 +4634,22 @@ class MainWindow(QMainWindow):
 
         # 토큰 갱신은 실패 시 모달을 띄운다. 모달이 중첩 이벤트루프를 도는 동안
         # 버튼이 살아 있으면 두 번째 작업이 재진입으로 시작될 수 있다 → 먼저 잠근다.
-        self._enter_task()
-        self.clearItemList()
-
-        # 검색 전 토큰 갱신 — app-API 경로라 토큰 필수
-        access_token = self._refresh_tokens()
-
-        try:
-            tasks = [
-                CrawlTask(
-                    area=area,
-                    keyword=keyword,
-                    only_tradeable=onlyTradeable,
-                    minimum=minimum,
-                    maximum=maximum,
-                    extra_keywords=extra,
-                    exclude_keywords=exclude,
-                    adaptive=adaptive,
-                    access_token=access_token,
-                )
-                for area in area_id_list
-            ]
-            self.controller.start_task(tasks)
-        except Exception as e:
-            self._leave_task()
-            self.alert(str(e))
+        # 토큰 확보(수십 초)는 워커 스레드가 한다 — GUI 스레드에서 돌리면 창이
+        # 얼어 진행 표시가 그려지지 않는다. 작업 목록은 토큰이 온 뒤에 짓는다.
+        self._start_crawl(lambda access_token: [
+            CrawlTask(
+                area=area,
+                keyword=keyword,
+                only_tradeable=onlyTradeable,
+                minimum=minimum,
+                maximum=maximum,
+                extra_keywords=extra,
+                exclude_keywords=exclude,
+                adaptive=adaptive,
+                access_token=access_token,
+            )
+            for area in area_id_list
+        ])
 
     def _read_token_quiet(self) -> str | None:
         """스윕 스레드의 토큰 provider — accounts.json 을 **읽기만** 한다.
@@ -4531,48 +4664,71 @@ class MainWindow(QMainWindow):
         주기적 수확은 _HarvestThread 소유다. GUI 미접근. 본체는 헤드리스와 공유."""
         return harvest_token_quiet("./accounts.json")
 
-    def _refresh_tokens(self) -> str | None:
-        """검색 전 access 토큰 확보. LDPlayer 온디바이스 수확 우선(WAF 우회),
-        실패 시 기존 HTTP refresh 폴백. 최신 access 반환."""
-        import json as _json
-        # 1) LDPlayer 온디바이스 수확 — 정품 앱이 갱신한 access 를 su 로 직접 읽어 accounts.json 병합.
-        #    HTTP refresh(api.kr.karrotmarket.com)는 WAF 403 이라 이 경로가 실질 갱신책.
+    # ── 검색 수명: 토큰 확보(스레드) → 작업 시작 → 진행 표시 ──────────────
+    #
+    # 예전에는 여기서 토큰 갱신을 동기로 부르고 바로 start_task 를 했다. 갱신이
+    # 수십 초 걸리는 동안 GUI 스레드가 막혀 창이 얼었고, 표는 이미 비워진 뒤라
+    # 사용자에게는 '눌렀는데 아무 일도 안 일어남'으로 보였다.
+
+    def _start_crawl(self, build_tasks):
+        """토큰을 워커 스레드로 확보한 뒤 build_tasks(access_token) 으로 검색 시작.
+
+        build_tasks 는 토큰이 도착한 다음에 불린다 — CrawlTask 가 토큰을 품기
+        때문에 그 전에 지을 수 없다."""
+        self._enter_task()          # 준비 중 재진입 방지(정지 버튼으로 바뀐다)
+        self.clearItemList()
+        self._crawl_builder = build_tasks
+        self._search_cancelled = False
+        self._show_search_progress("토큰을 준비하고 있습니다… (LDPlayer 수확)")
+        th = _TokenRefreshThread(self)
+        th.log.connect(self._set_search_progress)
+        th.done.connect(self._on_token_ready)
+        th.finished.connect(th.deleteLater)   # 검색마다 스레드 객체가 쌓이지 않게
+        self._token_thread = th
+        th.start()
+
+    def _on_token_ready(self, access_token, err):
+        self._token_thread = None
+        if self._search_cancelled:
+            self._abort_search("검색을 취소했습니다")
+            return
+        if err:
+            self._abort_search("")
+            self.alert(err)
+            return
         try:
-            import ld_autoharvest
-            ld_autoharvest.harvest_all(
-                "./accounts.json", nudge=True,
-                log=lambda m: self.sb.showMessage(m, 4000))
+            tasks = self._crawl_builder(access_token)
+            self.searchProgress.setRange(0, max(1, len(tasks)))
+            self.searchProgress.setValue(0)
+            self._set_search_progress(f"0/{len(tasks)} 지역 — 검색을 시작합니다")
+            self.controller.start_task(tasks)
         except Exception as e:
-            self.sb.showMessage(f"[수확 건너뜀] {str(e)[:60]}", 4000)
-        # 2) accounts.json 에서 남은 수명이 가장 긴 access 반환
-        try:
-            from daangn_ext.token_manager import token_exp
-            best = None
-            with open("./accounts.json", encoding="utf-8") as _f:
-                _accs = _json.load(_f)
-            for a in _accs:
-                acc = a.get("access") or ""
-                if acc and (best is None or token_exp(acc) > token_exp(best)):
-                    best = acc
-            if best:
-                return best
-        except Exception:
-            pass
-        # 3) 폴백: 기존 HTTP refresh (LDPlayer 없음/수확실패 시. WAF면 실패할 수 있음)
-        try:
-            from daangn_ext import TokenManager, AccountStore, bind_to_token_manager
-            store = AccountStore("./accounts.json")
-            if not store.rows:
-                self.alert("계정 없음. LDPlayer 를 켜거나 '계정+프록시 추가'로 등록하세요.")
-                return None
-            tm = TokenManager()
-            bind_to_token_manager(store, tm)
-            tm.refresh_all()
-            accs = list(tm.accounts.values())
-            return tm.ensure_safe(accs[0]) if accs else None
-        except Exception as e:
-            self.alert(f"토큰 갱신 오류: {e}")
-            return None
+            self._abort_search("")
+            self.alert(str(e))
+
+    def _abort_search(self, msg):
+        self._hide_search_progress()
+        self._leave_task()
+        if msg:
+            self.sb.showMessage(msg, 5000)
+
+    def _show_search_progress(self, text):
+        self.searchProgress.setRange(0, 0)      # 남은 시간을 모르는 준비 단계
+        self.searchProgress.setVisible(True)
+        self.searchProgressLabel.setVisible(True)
+        self._set_search_progress(text)
+
+    def _set_search_progress(self, text):
+        self.searchProgressLabel.setText(str(text)[:160])
+
+    def _hide_search_progress(self):
+        self.searchProgress.setVisible(False)
+        self.searchProgressLabel.setVisible(False)
+
+    def _handle_task_progress(self, done, total):
+        self.searchProgress.setRange(0, max(1, total))
+        self.searchProgress.setValue(done)
+        self.searchProgress.setFormat(f"{done}/{total} 지역  (%p%)")
 
     def on_accounts_btn_clicked(self):
         """계정+프록시 추가/관리 다이얼로그."""
@@ -4722,15 +4878,11 @@ class MainWindow(QMainWindow):
         ):
             return
 
-        self._enter_task()          # 토큰 갱신 모달 중 재진입 방지 — on_search 와 같은 이유
-        self.clearItemList()
-
         extra = self._split_keywords(self.extraEdit.text())
         exclude = self._split_keywords(self.excludeEdit.text())
-        access_token = self._refresh_tokens()
+        tradeable = self.ui.onlyTradeableCheck.isChecked()
 
-        try:
-            tradeable = self.ui.onlyTradeableCheck.isChecked()
+        def build(access_token):
             requests = []
             for task in tasks:
                 for area in task["areas"]:
@@ -4747,10 +4899,9 @@ class MainWindow(QMainWindow):
                             access_token=access_token,
                         )
                     )
-            self.controller.start_task(requests)
-        except Exception as e:
-            self._leave_task()
-            self.alert(str(e))
+            return requests
+
+        self._start_crawl(build)
 
     def _read_excel_tasks(self, path: str) -> tuple[list[dict[str, Any]], list[str]]:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -5101,10 +5252,12 @@ class MainWindow(QMainWindow):
         self.controller.clear_products()
 
     def _handle_task_error(self):
+        self._hide_search_progress()
         self._leave_task()
         self.alert("작업 중 오류\nERROR_LOG 파일에 오류가 저장되었습니다")
 
     def _handle_task_finished(self):
+        self._hide_search_progress()
         self.alert("작업이 정지되었습니다")
         self._leave_task()
 
@@ -5513,6 +5666,7 @@ def _run_headless():
             if do_harvest and now - last_harvest > next_harvest:
                 try:
                     import ld_autoharvest
+                    guest_proxy_sync("./accounts.json", log=log)
                     u, i, t, h = ld_autoharvest.harvest_all(
                         "./accounts.json", nudge=True, log=log, stats=hstats)
                     log(f"[수확] 갱신 {u} 신규 {i} 총 {t} (수확 {h})")

@@ -155,8 +155,29 @@ state.clear()
 res = LP.apply_account_proxies(ACC, console="c",
                                endpoint_for=lambda px: "127.0.0.1:19001",
                                log=None)
-ck("릴레이 주소로 걸린다", res.get(1) == "127.0.0.1:19001",
+# 릴레이는 루프백에 열리고, 게스트에는 그 인스턴스의 게이트웨이 주소로 걸린다.
+ck("릴레이 주소로 걸린다", res.get(1) == "172.16.1.2:19001",
    LP.get_guest_proxy("c", 1))
+
+print("\n=== 8b. 루프백 릴레이 주소는 게스트가 부를 수 있게 바꾼다 ===")
+# 릴레이는 인증이 없어 루프백에만 연다. 그런데 게스트는 호스트의 127.0.0.1 을
+# 그 이름으로 못 부른다 — NAT 게이트웨이가 호스트 루프백으로 이어진다(실측).
+state.clear()
+res = LP.apply_account_proxies(ACC, console="c",
+                               endpoint_for=lambda px: "127.0.0.1:19001",
+                               log=None)
+ck("게이트웨이 주소로 바뀐다", res.get(1) == "172.16.1.2:19001", str(res))
+ck("게스트에도 그 값이 걸린다", LP.get_guest_proxy("c", 1) == "172.16.1.2:19001")
+ck("localhost 도 같다", LP._guest_reachable("c", 1, "localhost:5") == "172.16.1.2:5")
+ck("외부 주소는 그대로", LP._guest_reachable("c", 1, "9.9.9.9:8080") == "9.9.9.9:8080")
+
+_gw = LP.host_addr_for
+LP.host_addr_for = lambda c, i: None
+logs = []
+ck("게이트웨이를 못 찾으면 안 건다",
+   LP._guest_reachable("c", 1, "127.0.0.1:1", log=logs.append) is None)
+ck("이유를 남긴다", any("호스트로 가는 주소를 못 찾아" in m for m in logs))
+LP.host_addr_for = _gw
 
 print("\n=== 9. 죽은 프록시는 걸지 않는다 ===")
 # 죽은 프록시를 걸면 그 인스턴스가 통째로 오프라인이 되고 토큰이 멈춘다.
