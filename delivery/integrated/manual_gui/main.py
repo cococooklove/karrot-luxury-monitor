@@ -25,6 +25,46 @@ LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다"
 WATCH_SWEEP_INTERVAL = 600          # 워치리스트 스윕 주기(초)
 
 
+def mirror_app_keywords_to_sweep(router, queue, log=None, enabled=False) -> int:
+    """앱 알림에 배정된 키워드를 검색 스윕 대기열에도 싣는다.
+
+    왜 필요한가: 앱 알림은 **계정 인증동네** 기반이라 그 계정이 사는 동네만 본다.
+    운영 계정이 오산·평택이면 강남 명품은 원천적으로 안 보인다. 검색 스윕은
+    지역을 인자로 받으므로 그 사각지대를 메우라고 있는 건데, 라우터가 키워드를
+    app / sweep 중 **하나로만** 배정한다. 브랜드 20개가 앱 슬롯(상한 30)에 다
+    들어가면 스윕 큐가 비고, 스윕은 아예 뜨지 않는다 — 실서버가 정확히 그 상태였다.
+
+    그래서 '둘 다' 를 가능하게 한다. 다만 **기본은 꺼져 있다**: 켜면 설정된 지역
+    전체의 매물이 알림으로 나가므로(서울 806동이면 물량이 계정 알림과 비교가 안
+    된다) 받는 사람이 감당할지는 운영 판단이다. `alert_settings.json` 의
+    `sweep_mirror_app` 로 켠다.
+    """
+    _log = log or (lambda m: None)
+    if not enabled or router is None or queue is None:
+        return 0
+    try:
+        routes = router.routes()          # [{keyword, route, ...}, ...]
+    except Exception as e:
+        _log(f"[스윕미러] 라우트 읽기 실패: {str(e)[:80]}")
+        return 0
+    added = 0
+    for r in routes or []:
+        if (r or {}).get("route") != "app":
+            continue
+        kw = (r or {}).get("keyword")
+        if not kw:
+            continue
+        try:
+            if queue.add(kw):
+                added += 1
+        except Exception as e:
+            _log(f"[스윕미러] '{kw}' 대기열 추가 실패: {str(e)[:60]}")
+    if added:
+        _log(f"[스윕미러] 앱 키워드 {added}개를 검색 스윕에도 실었습니다 "
+             "— 계정 동네 밖 지역을 스윕이 맡습니다")
+    return added
+
+
 def harvest_interval() -> int:
     """수확 주기. 숫자의 소유자는 ld_autoharvest 다 — 여기 1200 을 다시 적으면
     안 된다.
@@ -3084,6 +3124,9 @@ class MainWindow(QMainWindow):
                         log(f"[라우터] {p['keyword']} → 앱 알림 승격")
                 except Exception as e:
                     log(f"[라우터] 승격 실패: {str(e)[:80]}")
+                mirror_app_keywords_to_sweep(
+                    self._router, self._sweep_queue, log=log,
+                    enabled=bool(self._load_alert_settings().get("sweep_mirror_app")))
             return self._alert_fleet().poll_all(log=log, core_only=co)
 
         self._alert_run(job, self._match_populate)
@@ -5384,6 +5427,9 @@ def _run_headless():
                         log(f"[라우터] {p['keyword']} → 앱 알림 승격")
                 except Exception as e:
                     log(f"[라우터] 승격 실패: {str(e)[:80]}")
+                mirror_app_keywords_to_sweep(
+                    router, sweep_queue, log=log,
+                    enabled=bool(st.get("sweep_mirror_app")))
             if sweep_runner is not None:
                 sweep_runner.resync()
             # 스윕 스레드가 넘긴 매물을 여기(폴링 스레드)서 워치리스트에 넣는다.

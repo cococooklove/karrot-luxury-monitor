@@ -293,6 +293,10 @@ class _Tick:
         # 운영 로그는 이제 _alog 중앙 헬퍼를 거친다(화면 + karrot_monitor.log).
         # 페이크도 같은 이름을 가져야 _auto_poll_tick 이 그대로 돈다.
         self._alog = lambda s: _self.calls.append(("log", s))
+        # 폴링 틱은 승격 뒤 '앱 키워드를 스윕에도 실을지'를 설정에서 읽는다.
+        # 기본은 꺼짐이라 여기서는 아무 일도 일어나지 않아야 한다.
+        self._sweep_queue = None
+        self._load_alert_settings = lambda: {}
 
     def _resync_search_sweep(self):
         self.calls.append(("resync", threading.get_ident()))
