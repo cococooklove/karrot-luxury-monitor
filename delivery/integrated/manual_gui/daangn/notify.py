@@ -16,6 +16,16 @@ TG_MAX_CHARS = 3900          # 텔레그램 본문 한도 4096 - 여유
 TG_MIN_INTERVAL = 3.0        # 같은 방 연속 전송 최소 간격(초). 그룹 한도 ~20msg/min
 TG_QUEUE_SOFT_CAP = 40       # 큐가 이만큼 쌓이면 호출측 flush 안 기다리고 자동 전송
 
+# 시간당 알림 상한. 설정 실수 하나가 받는 사람의 폰을 못 쓰게 만들면 안 된다.
+#
+# 근거: 스윕 범위를 넓히면(예: 서울 806동) 물량이 지역·키워드 수에 곱으로 늘어난다.
+# 실측으로 강남 한 동의 '샤넬' 하나가 시간당 신규 13건이었다. 브랜드 20개 x 서울이면
+# 시간당 수백 건이고, 그건 알림이 아니라 소음이다 — 진짜 급매가 그 안에 묻힌다.
+# 그래서 상한을 넘기면 **버리지 않고 묶어서** 한 줄로 요약해 알린다. 조용히
+# 사라지면 운영자가 '알림이 안 온다'고 오해하고, 그게 더 나쁘다.
+TG_HOURLY_CAP = 120
+TG_CAP_WINDOW = 3600.0
+
 _TG_HINT = {
     400: "chat_id 가 잘못됐거나 메시지 형식 오류",
     401: "봇 토큰이 잘못됨",
@@ -37,7 +47,7 @@ def _sleep_stoppable(sec, should_stop):
 
 class TelegramSender:
     def __init__(self, token, chat, log=None, should_stop=None,
-                 min_interval=TG_MIN_INTERVAL):
+                 min_interval=TG_MIN_INTERVAL, hourly_cap=TG_HOURLY_CAP):
         self.token = (token or "").strip()
         self.chat = (chat or "").strip()
         self.min_interval = min_interval
@@ -47,16 +57,47 @@ class TelegramSender:
         self._last_sent = 0.0
         self._fail_total = 0
         self._sent_total = 0
+        self.hourly_cap = int(hourly_cap)
+        self._window_start = 0.0
+        self._window_sent = 0
+        self._suppressed = 0          # 상한에 걸려 못 보낸 건수(요약해서 알린다)
+        self._cap_told = False
 
     @property
     def enabled(self):
         return bool(self.token and self.chat)
 
     # ── 큐 ──
+    def _cap_check(self) -> bool:
+        """시간당 상한 안인가. 창이 지나면 새로 센다."""
+        if self.hourly_cap <= 0:
+            return True
+        now = time.time()
+        if now - self._window_start >= TG_CAP_WINDOW:
+            # 창이 바뀐다. 직전 창에서 눌린 게 있으면 여기서 한 번 알린다.
+            if self._suppressed:
+                self._q.append(
+                    f"⚠️ 알림 상한({self.hourly_cap}건/시간)에 걸려 지난 1시간 동안 "
+                    f"{self._suppressed}건을 보내지 않았습니다. 감시 범위나 조건을 "
+                    "좁히세요 — 이대로면 진짜 급매가 묻힙니다.")
+                self._suppressed = 0
+            self._window_start = now
+            self._window_sent = 0
+            self._cap_told = False
+        return self._window_sent < self.hourly_cap
+
     def enqueue(self, text):
         """전송 대기열에 넣는다. 미설정이면 조용히 버림(설정 자체가 선택)."""
         if not self.enabled:
             return
+        if not self._cap_check():
+            self._suppressed += 1
+            if not self._cap_told:
+                self._cap_told = True
+                self._log(f"[텔레그램] 시간당 상한 {self.hourly_cap}건 도달 — "
+                          "이번 창의 남은 알림은 묶어서 요약합니다")
+            return
+        self._window_sent += 1
         self._q.append(str(text))
         if len(self._q) >= TG_QUEUE_SOFT_CAP:
             self.flush()
