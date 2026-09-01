@@ -257,6 +257,9 @@ class CrawlThread(QThread):
     error = pyqtSignal()
     message = pyqtSignal(str)
     new_products = pyqtSignal(str, list)
+    # (끝난 지역, 전체 지역). 전국 검색은 지역이 200곳을 넘고 몇 분이 걸린다 —
+    # 진행률을 문자열 메시지에만 실으면 화면이 그걸 다시 파싱해야 한다.
+    progress = pyqtSignal(int, int)
 
     def __init__(
         self,
@@ -284,6 +287,9 @@ class CrawlThread(QThread):
         total_products = 0
         error_area_list = []
         completed = 0
+        # 진행바가 세는 것은 '성공'이 아니라 '끝난 지역'이다. completed 만 쓰면
+        # 재시도까지 실패한 지역에서 막대가 멈춰 서 멈춘 것처럼 보인다.
+        done_areas = 0
         retry_cnt = 0
         no_proxy_limitter = ReqLimitter(self.req_min_ms)
 
@@ -306,7 +312,7 @@ class CrawlThread(QThread):
         try:
 
             def worker(task: CrawlTask):
-                nonlocal completed, total_products, retry_cnt
+                nonlocal completed, total_products, retry_cnt, done_areas
 
                 try:
                     last_error = None
@@ -365,9 +371,11 @@ class CrawlThread(QThread):
 
                             with lock:
                                 completed += 1
+                                done_areas += 1
                                 total_products += len(products)
                                 success_per_proxy[proxy or "No Proxy"] += 1
                                 notify(area_name, task.keyword)
+                                self.progress.emit(done_areas, len(self.tasks))
 
                             break
 
@@ -383,6 +391,9 @@ class CrawlThread(QThread):
                             with io.StringIO() as sio:
                                 traceback.print_exception(last_error, file=sio)
                                 error_area_list.append((*task.area, sio.getvalue()))
+                            # 실패한 지역도 '끝난' 지역이다 — 안 세면 막대가 멈춘다.
+                            done_areas += 1
+                            self.progress.emit(done_areas, len(self.tasks))
                 except DaangnCancelledError:
                     pass
 

@@ -17,6 +17,8 @@ class MainController(QObject):
     task_error = pyqtSignal()
     task_finished = pyqtSignal()
     task_message = pyqtSignal(str)
+    # (끝난 지역, 전체 지역) — 화면 진행바가 붙는다.
+    task_progress = pyqtSignal(int, int)
 
     def __init__(
         self, parent: QObject | None = None, settings_path: str = "./settings.txt"
@@ -158,6 +160,7 @@ class MainController(QObject):
         )
         self.task.error.connect(self.task_error.emit)
         self.task.message.connect(self.task_message.emit)
+        self.task.progress.connect(self.task_progress.emit)
         self.task.finished.connect(self._handle_task_finished)
         self.task.new_products.connect(self._handle_new_products)
         self.task.start()

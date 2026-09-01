@@ -4582,6 +4582,14 @@ class MainWindow(QMainWindow):
         if getattr(self, "_token_thread", None) is not None:
             if not self.ask("토큰을 준비하고 있습니다. 검색을 취소할까요?"):
                 return
+            # ask() 는 중첩 이벤트루프를 돈다. 그 사이에 토큰이 도착해
+            # _on_token_ready 가 이미 검색을 시작했을 수 있다 — 그때 이 플래그는
+            # 아무것도 멈추지 못한다(이미 지나간 분기다). 실제로 도는 작업을 세운다.
+            if self._token_thread is None:
+                if self.controller.is_task_running():
+                    self.controller.stop_task()
+                    self._set_search_progress("정지 중…")
+                return
             self._search_cancelled = True
             self._set_search_progress("취소 중… 토큰 준비가 끝나면 멈춥니다")
             return
@@ -5224,6 +5232,14 @@ class MainWindow(QMainWindow):
                     task.wait(2000)
 
         # 종료 전 실행 중인 QThread 정리 (미정리 시 SIGABRT)
+        # 토큰 스레드는 controller.task 가 아직 없는 구간에 돈다 — 위 running
+        # 분기가 못 잡는다. harvest_all 은 수십 초라 기다림이 길다.
+        tok = getattr(self, "_token_thread", None)
+        if tok is not None and tok.isRunning():
+            self._search_cancelled = True
+            if not tok.wait(8000):
+                tok.terminate()
+                tok.wait(2000)
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
             self.auto_monitor.stop()
             if not self.auto_monitor.wait(3000):
