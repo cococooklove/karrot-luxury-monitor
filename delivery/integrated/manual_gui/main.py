@@ -24,6 +24,20 @@ LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다"
 
 WATCH_SWEEP_INTERVAL = 600          # 워치리스트 스윕 주기(초)
 
+
+def harvest_interval() -> int:
+    """수확 주기. 숫자의 소유자는 ld_autoharvest 다 — 여기 1200 을 다시 적으면
+    안 된다.
+
+    수확 간격과 토큰 신선도 임계는 한 부등식으로 묶여 있다(임계 > 간격). 두 값이
+    다른 파일에 따로 적혀 있던 동안 실서버 4계정이 만료된 채 방치됐다. 그래서
+    GUI 스레드도 헤드리스 루프도 여기를 거쳐 같은 값을 본다."""
+    try:
+        import ld_autoharvest
+        return int(ld_autoharvest.HARVEST_INTERVAL)
+    except Exception:
+        return 1200
+
 _WATCH_LABELS = {
     "entered_range": "🎯 조건 진입(가격 인하)",
     "price_down": "↓ 가격 인하",
@@ -840,27 +854,43 @@ class _HarvestThread(QtCore.QThread):
     accounts.json 을 항상 신선하게 유지 → 수동 수확 불필요. access 30분 만료 전 갱신."""
     tick = QtCore.pyqtSignal(str)
 
-    def __init__(self, interval=1200, accounts="./accounts.json"):
+    def __init__(self, interval=None, accounts="./accounts.json"):
         super().__init__()
-        self.interval = interval
+        self.interval = harvest_interval() if interval is None else interval
         self.accounts = accounts
+        # 첫 틱은 아직 측정값이 없으니 설정 간격을 그대로 기준으로 쓴다.
+        self._period = float(self.interval)
         self._stop = False
 
     def run(self):
         import time as _t
         while not self._stop:
+            started = _t.monotonic()
             try:
                 import ld_autoharvest
+                # 임계는 '직전에 실제로 걸린 주기'를 기준으로 정한다. 수확 자체가
+                # 함대 기동(최대 FLEET_BOOT_BUDGET)까지 포함하므로 틱 간격은
+                # 고정이 아니고, 고정으로 가정하면 느린 틱에서 토큰이 죽는다.
+                mr = ld_autoharvest.min_remaining_for(self._period)
+                if not ld_autoharvest.period_is_safe(self._period):
+                    self.tick.emit(
+                        f"[자동수확] 경고: 한 틱이 {int(self._period)}초 걸립니다 — "
+                        f"토큰 수명({ld_autoharvest.ACCESS_TTL}초)에 비해 너무 길어 "
+                        "만료를 못 막습니다. 주기를 줄이거나 함대를 줄이세요.")
                 u, i, t, h = ld_autoharvest.harvest_all(
-                    self.accounts, nudge=True, log=self.tick.emit)
+                    self.accounts, nudge=True, log=self.tick.emit, min_remaining=mr)
                 self.tick.emit(f"[자동수확] {h}계정 갱신 · 총 {t}계정" if h
                                else "[자동수확] 대상 없음(LDPlayer/폰 확인)")
             except Exception as e:
                 self.tick.emit(f"[자동수확] 실패: {str(e)[:60]}")
-            for _ in range(max(1, self.interval)):
+            # 남은 시간만 잔다 — 수확에 걸린 만큼 주기가 밀리면 그게 곧 만료 구간이다.
+            spent = _t.monotonic() - started
+            for _ in range(max(1, int(self.interval - spent))):
                 if self._stop:
                     return
                 _t.sleep(1)
+            # 다음 틱이 쓸 기준: 이번 틱 시작부터 다음 틱 시작까지의 실제 간격.
+            self._period = max(float(self.interval), _t.monotonic() - started)
 
     def stop(self):
         self._stop = True
@@ -1334,17 +1364,35 @@ class MainWindow(QMainWindow):
         self.sb.showMessage("프로그램이 시작되었습니다.")
 
         # 백그라운드 자동 수확 — 토큰 항상 신선 유지(수동 불필요). 20분 주기.
-        self._harvest_thread = _HarvestThread(interval=1200, accounts="./accounts.json")
+        self._harvest_thread = _HarvestThread(accounts="./accounts.json")
         self._harvest_thread.tick.connect(self._on_harvest_tick)
         self._harvest_thread.start()
+
+    def _alog(self, msg):
+        """운영 로그 한 줄 — 화면(매물 감시 탭)과 karrot_monitor.log 양쪽에 남긴다.
+
+        무인 서버에서는 위젯을 볼 사람이 없다. 파일에 안 남기면 앱이 살아 있는지
+        확인할 방법이 data/*.json mtime 뿐이 된다(실제로 그래서 토큰 만료를 늦게 봤다).
+        시각 형식은 헤드리스 런타임 log() 와 같게 맞춘다 — 두 로그를 나란히 읽는다.
+        """
+        import time as _t
+        # 위젯은 아직 안 만들어졌을 수 있다(_setup_ui 이전 초기화 경로).
+        if hasattr(self, "alertLog"):
+            try:
+                self.alertLog.append(msg)
+            except Exception:
+                pass
+        try:
+            print(f"[{_t.strftime('%H:%M:%S')}] {msg}", flush=True)
+        except Exception:
+            pass
 
     def _on_harvest_tick(self, msg):
         import time as _t
         self._last_harvest_ts = _t.time()
         # 상태바는 3탭 공용이다 — 여기 찍으면 수동 검색 화면에도 자동수확 로그가
         # 따라다닌다. 이 메시지의 자리는 '매물 감시' 탭 로그다.
-        if hasattr(self, "alertLog"):
-            self.alertLog.append(msg)
+        self._alog(msg)
         # 계정수 대시보드 즉시 갱신
         try:
             self._init_dashboard()
@@ -2028,7 +2076,7 @@ class MainWindow(QMainWindow):
                 start_search_sweep=self._start_search_sweep,
                 stop_search_sweep=self._stop_search_sweep)
         except Exception as e:
-            self.alertLog.append(f"[감시] 초기화 실패: {str(e)[:120]}")
+            self._alog(f"[감시] 초기화 실패: {str(e)[:120]}")
         if self._supervisor is None:
             self.watchToggleBtn.setEnabled(False)
             self.watchToggleBtn.setToolTip(
@@ -2197,7 +2245,7 @@ class MainWindow(QMainWindow):
         # 부팅 자동실행이 이미 켜져 있으면 커맨드(--watchdog 포함)를 즉시 갱신
         if self.alertBootChk.isChecked():
             self._set_boot_autostart(True)
-        self.alertLog.append(f"[크래시 자동복구] {'켜짐 — 부팅 시 감시자 모드' if on else '꺼짐'}")
+        self._alog(f"[크래시 자동복구] {'켜짐 — 부팅 시 감시자 모드' if on else '꺼짐'}")
 
     def _installer_boot_entry(self) -> bool:
         """install.ps1 이 심은 부팅 진입점이 있는지."""
@@ -2229,12 +2277,12 @@ class MainWindow(QMainWindow):
     def _set_boot_autostart(self, enable):
         import sys as _sys
         if _sys.platform != "win32":
-            self.alertLog.append("[부팅 자동실행] Windows 전용 — Mac/Linux 미지원")
+            self._alog("[부팅 자동실행] Windows 전용 — Mac/Linux 미지원")
             return
         if enable and self._installer_boot_entry():
             # 설치본이 이미 ldboot 경로로 등록해 뒀다. 여기서 하나 더 넣으면
             # 로그온 때 앱과 ldboot 이 동시에 인스턴스를 띄워 함대가 hang 한다.
-            self.alertLog.append(
+            self._alog(
                 "[부팅 자동실행] 이미 켜져 있습니다 — 설치본이 LDPlayer 순차 기동 뒤에 "
                 "앱을 띄우는 경로로 등록해 뒀습니다. 따로 등록하지 않습니다.")
             return
@@ -2250,18 +2298,18 @@ class MainWindow(QMainWindow):
                         winreg.DeleteValue(k, self._BOOT_NAME)
                     except FileNotFoundError:
                         pass
-            self.alertLog.append(f"[부팅 자동실행] {'등록' if enable else '해제'}됨")
+            self._alog(f"[부팅 자동실행] {'등록' if enable else '해제'}됨")
             if not enable and self._installer_boot_entry():
-                self.alertLog.append(
+                self._alog(
                     "[부팅 자동실행] 다만 설치본 경로(LDPlayer 순차 기동)는 그대로입니다 — "
                     "부팅 시 앱은 계속 뜹니다.")
         except Exception as e:
-            self.alertLog.append(f"[부팅 자동실행] 실패: {str(e)[:60]}")
+            self._alog(f"[부팅 자동실행] 실패: {str(e)[:60]}")
 
     def _autostart_poll(self):
         """실행 시 자동감시 — 이미 돌고 있으면 건드리지 않는다(중복 방지)."""
         if self._supervisor and not self._supervisor.is_running():
-            self.alertLog.append("[감시] 실행 시 자동 시작")
+            self._alog("[감시] 실행 시 자동 시작")
             self.on_watch_toggle()
 
     def _refresh_alert_health(self):
@@ -2293,7 +2341,7 @@ class MainWindow(QMainWindow):
         # 자동수확
         try:
             hv_on = self._harvest_thread.isRunning()
-            iv = getattr(self._harvest_thread, "interval", 1200)
+            iv = getattr(self._harvest_thread, "interval", harvest_interval())
         except Exception:
             hv_on, iv = False, 1200
         if hv_on and self._last_harvest_ts:
@@ -2414,7 +2462,7 @@ class MainWindow(QMainWindow):
 
         def do_reset():
             try:
-                self._multi().reset_state(); self.alertLog.append("[팜] 계정 상태 초기화")
+                self._multi().reset_state(); self._alog("[팜] 계정 상태 초기화")
             except Exception:
                 pass
             refresh()
@@ -2448,7 +2496,7 @@ class MainWindow(QMainWindow):
         def do_save():
             kws = [ln.strip() for ln in edit.toPlainText().splitlines() if ln.strip()]
             if m.save_core_keywords(kws):
-                self.alertLog.append(f"[핵심지역] {len(kws)}개 저장")
+                self._alog(f"[핵심지역] {len(kws)}개 저장")
                 if on_saved:
                     on_saved()
                 dlg.accept()
@@ -2465,19 +2513,19 @@ class MainWindow(QMainWindow):
         tok = (getattr(self, "_notify", {}) or {}).get("tg_token")
         chat = (getattr(self, "_notify", {}) or {}).get("tg_chat")
         if not (tok and chat):
-            self.alertLog.append("[텔레그램] 미설정 — 상단 '알림 설정'서 봇토큰/chat_id 입력")
+            self._alog("[텔레그램] 미설정 — 상단 '알림 설정'서 봇토큰/chat_id 입력")
             self.sb.showMessage("텔레그램 미설정", 4000)
             return
         try:
             from daangn.notify import TelegramSender
-            tg = TelegramSender(tok, chat, log=self.alertLog.append)
+            tg = TelegramSender(tok, chat, log=self._alog)
             tg.enqueue(f"✅ 당근 명품 모니터 테스트 · {_t.strftime('%m/%d %H:%M:%S')}\n"
                        f"이 메시지가 보이면 알림 정상 작동.")
             tg.flush()
-            self.alertLog.append("[텔레그램] 테스트 전송 완료 — 폰 확인")
+            self._alog("[텔레그램] 테스트 전송 완료 — 폰 확인")
             self.sb.showMessage("텔레그램 테스트 전송됨", 4000)
         except Exception as e:
-            self.alertLog.append(f"[텔레그램] 테스트 실패: {str(e)[:60]}")
+            self._alog(f"[텔레그램] 테스트 실패: {str(e)[:60]}")
 
     def _init_dashboard(self):
         """탭 열릴 때 계정수 즉시 표시(토큰 불필요, accounts.json만). 커버리지는 버튼."""
@@ -2533,9 +2581,9 @@ class MainWindow(QMainWindow):
     def _alert_run(self, fn, on_done=None):
         if self._alert_worker and self._alert_worker.isRunning():
             self.alert("이전 작업 진행 중 — 잠시 후"); return
-        self.alertLog.append("── 작업 시작 ──")
+        self._alog("── 작업 시작 ──")
         self._alert_worker = _AlertWorker(fn)
-        self._alert_worker.log.connect(lambda m: self.alertLog.append(m))
+        self._alert_worker.log.connect(lambda m: self._alog(m))
         if on_done:
             self._alert_worker.done.connect(on_done)
         self._alert_worker.start()
@@ -2549,7 +2597,7 @@ class MainWindow(QMainWindow):
     def _log_route(self, res):
         """라우터 결과 한 줄. route 는 None 일 수 있다(빈 키워드)."""
         name = self._ROUTE_NAMES.get(res.get("route"), "배정 안 됨")
-        self.alertLog.append(
+        self._alog(
             f"[키워드] {res.get('keyword')} → {name} ({res.get('reason')})")
 
     def on_alert_add(self):
@@ -2613,10 +2661,10 @@ class MainWindow(QMainWindow):
                 self._router.remove(kw)
             except Exception as e:
                 # 삼키면 슬롯이 영영 샌다 — 이 호출이 막으려던 바로 그 실패다.
-                self.alertLog.append(
+                self._alog(
                     f"[라우터] {kw} 배정 해제 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
         if not uid:                                   # 스윕 대기열 행 — 앱 id 가 없다
-            self.alertLog.append(f"[키워드] {kw} 검색 스윕 대기열에서 제거")
+            self._alog(f"[키워드] {kw} 검색 스윕 대기열에서 제거")
             self.on_alert_refresh()
             return
         def job(log):
@@ -2635,7 +2683,7 @@ class MainWindow(QMainWindow):
                 for r in list(self._router.routes()):
                     self._router.remove(r["keyword"])
             except Exception as e:
-                self.alertLog.append(
+                self._alog(
                     f"[라우터] 배정 비우기 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
         def job(log):
             api = self._alert_api()
@@ -2678,7 +2726,7 @@ class MainWindow(QMainWindow):
         if not data and not entries:
             return
         if not data:
-            self.alertLog.append(
+            self._alog(
                 "[목록] 앱 등록 목록을 못 읽었습니다 — 검색 스윕 대기열만 표시합니다")
         kws = (data or {}).get("user_keywords") or []
         # 이 브랜치 이전에 일괄등록된 키워드는 routes 파일에 없다. 첫 실행에서
@@ -2689,10 +2737,10 @@ class MainWindow(QMainWindow):
                 seeded = self._router.seed_from_server(
                     [k.get("keyword") for k in kws])
                 if seeded:
-                    self.alertLog.append(
+                    self._alog(
                         f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
             except Exception as e:
-                self.alertLog.append(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
+                self._alog(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
         routes = self._routes_map()
         self.alertTable.setRowCount(0)
         shown = set()
@@ -2751,7 +2799,7 @@ class MainWindow(QMainWindow):
     def on_watch_toggle(self):
         """감시 토글 — 폴링·워치 스윕·검색 스윕이 한 수명을 공유한다."""
         if not self._supervisor:
-            self.alertLog.append("[감시] 컨트롤러가 없습니다")
+            self._alog("[감시] 컨트롤러가 없습니다")
             self.watchToggleBtn.setChecked(False)
             return
         if self._supervisor.is_running():
@@ -2759,7 +2807,7 @@ class MainWindow(QMainWindow):
             self._set_sleep_block(False)
             self.watchToggleBtn.setText("▶ 감시 시작")
             self.watchToggleBtn.setChecked(False)
-            self.alertLog.append("[감시] 정지")
+            self._alog("[감시] 정지")
         else:
             self._supervisor.start()
             self._set_sleep_block(True)
@@ -2767,7 +2815,7 @@ class MainWindow(QMainWindow):
             self.watchToggleBtn.setChecked(True)
             nf = self._night_factor()
             night = f" · 야간감속 ×{nf}" if nf > 1 else ""
-            self.alertLog.append(
+            self._alog(
                 f"[감시] 시작 · 폴링 {self.alertPollInterval.value()}초{night} · 절전차단")
             self.on_alert_poll_all()      # 첫 회차는 기다리지 않는다
 
@@ -2778,24 +2826,24 @@ class MainWindow(QMainWindow):
             self._last_new = 0
             return
         matches, watch_only, _ = filter_by_conditions(
-            matches, getattr(self, "_router", None), self.alertLog.append)
+            matches, getattr(self, "_router", None), self._alog)
         new_items, dropped = dedupe_new_matches(
             matches, self._watch_store, self._match_seen_fallback)
         new = len(new_items)
         self._last_new = new
         if dropped:
-            self.alertLog.append(f"[매칭] id 없는 payload {dropped}건 건너뜀")
+            self._alog(f"[매칭] id 없는 payload {dropped}건 건너뜀")
         # 추적 등록은 알림 여부와 무관하게 한다 — 상한을 넘겨 알리지 않은
         # 매물도 값이 내려오는지 지켜봐야 '조건 진입'을 잡을 수 있다.
         try:
             added = self._watch_tracker.add_from_matches(new_items + watch_only) \
                 if self._watch_tracker else 0
             if added:
-                self.alertLog.append(f"[가격추적] {added}건 추적 시작")
+                self._alog(f"[가격추적] {added}건 추적 시작")
         except Exception as e:
-            self.alertLog.append(f"[가격추적] 등록 실패: {str(e)[:80]}")
+            self._alog(f"[가격추적] 등록 실패: {str(e)[:80]}")
         if new:
-            self.alertLog.append(f"[매칭] 신규 {new}건 추가")
+            self._alog(f"[매칭] 신규 {new}건 추가")
             self._notify_matches(new_items)
         if new or watch_only:
             self._refresh_listing_table()
@@ -2814,7 +2862,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_notify_threads"):
             self._notify_threads = []
         th = _NotifyThread(nt, list(items))
-        th.log.connect(self.alertLog.append)
+        th.log.connect(self._alog)
         th.finished.connect(lambda t=th: self._notify_threads.remove(t)
                             if t in self._notify_threads else None)
         self._notify_threads.append(th)
@@ -2829,7 +2877,7 @@ class MainWindow(QMainWindow):
             return                      # 이전 스윕이 아직 돌면 건너뛴다
         th = _WatchSweepThread(self._watch_tracker, self._watch_store,
                                self._watch_budget, WATCH_SWEEP_INTERVAL)
-        th.log.connect(self.alertLog.append)
+        th.log.connect(self._alog)
         th.done.connect(self._on_watch_swept)
         self._watch_thread = th
         th.start()
@@ -2848,13 +2896,13 @@ class MainWindow(QMainWindow):
         if not lines:
             return
         for line in lines:
-            self.alertLog.append(f"[가격추적] {line}")
+            self._alog(f"[가격추적] {line}")
         self._refresh_listing_table()
         nt = getattr(self, "_notify", {}) or {}
         if not ((nt.get("tg_token") and nt.get("tg_chat")) or nt.get("sheet_url")):
             return
         th = _WatchNotifyThread(getattr(self, "_notify", {}) or {}, lines)
-        th.log.connect(self.alertLog.append)
+        th.log.connect(self._alog)
         th.finished.connect(lambda t=th: self._watch_threads.remove(t)
                             if t in self._watch_threads else None)
         self._watch_threads.append(th)
@@ -2873,7 +2921,7 @@ class MainWindow(QMainWindow):
             rows = listing_display_rows(self._watch_store.listing_rows(),
                                         int(_t.time()), self._listing_filter_key())
         except Exception as e:
-            self.alertLog.append(f"[매물표] 갱신 실패: {str(e)[:80]}")
+            self._alog(f"[매물표] 갱신 실패: {str(e)[:80]}")
             return
         self.listingTable.setSortingEnabled(False)
         self.listingTable.setRowCount(0)
@@ -2991,7 +3039,7 @@ class MainWindow(QMainWindow):
 
     def _route_conditions(self, conditions, core_only=False, log=None):
         """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다."""
-        log = log or self.alertLog.append
+        log = log or self._alog
         out = []
         for kws, mn, mx, excl, extra, days in self._condition_groups(conditions):
             out.extend(self._router.add_many(kws, mn, mx, excl,
@@ -3020,7 +3068,7 @@ class MainWindow(QMainWindow):
         # 워커로 못 옮긴다. 대신 네트워크를 타지 않는다.
         self._resync_search_sweep()
         if self._alert_worker and self._alert_worker.isRunning():
-            self.alertLog.append("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
+            self._alog("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
             return
         co = self._core_only()
         state = self.__dict__.setdefault("_seed_state", {})
@@ -3401,10 +3449,10 @@ class MainWindow(QMainWindow):
             self.alert("라우터가 없습니다 — 로그를 확인하세요")
             return False
         if self._router.reset_observed_cap():
-            self.alertLog.append("[라우터] 앱 슬롯 상한 관측치 초기화 —"
+            self._alog("[라우터] 앱 슬롯 상한 관측치 초기화 —"
                                  " 다음 등록부터 설정 상한을 다시 씁니다")
             return True
-        self.alertLog.append("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
+        self._alog("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
         return False
 
 
@@ -3739,17 +3787,17 @@ class MainWindow(QMainWindow):
             if not self._router:
                 self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
             cats = {c.get("category") or "-" for c in conds}
-            self.alertLog.append(
+            self._alog(
                 f"[엑셀] 조건 {len(conds)}개 로드 (대분류 {len(cats)}종) — 라우터로 배정")
             # 추가키워드는 앱 알림에 전달할 수 없지만, 조건을 라우트에 보존해
             # 알림 직전에 우리가 한 번 더 거른다(제목·가격 기준). 끌올일수는
             # 앱 매칭 payload 에 끌올 시각이 없어 이 경로에서 못 거른다.
             if any(c.get("days") for c in conds):
-                self.alertLog.append(
+                self._alog(
                     "[엑셀] 끌올일수는 앱 알림 경로에서 적용되지 않습니다"
                     " — 검색 스윕으로 배정된 키워드에만 걸립니다")
             if any(c.get("category") for c in conds):
-                self.alertLog.append("[엑셀] 대분류는 분류용이라 필터에 쓰이지 않습니다")
+                self._alog("[엑셀] 대분류는 분류용이라 필터에 쓰이지 않습니다")
             co = self._core_only()
 
             def job(log):
@@ -3831,7 +3879,7 @@ class MainWindow(QMainWindow):
         cfg.update(sweep_scope_for(self._selected_auto_regions(),
                                    self.autoNationwide.isChecked(),
                                    out_json=cfg["out_json"],
-                                   log=self.alertLog.append))
+                                   log=self._alog))
         return cfg
 
     @staticmethod
@@ -3886,7 +3934,7 @@ class MainWindow(QMainWindow):
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
             # stop() 은 비동기다(최대 8초). 그 안에 다시 켜면 여기서 조용히 막혔다 —
             # 재시작이 통째로 사라지는 것처럼 보이므로 로그를 남긴다.
-            self.alertLog.append(
+            self._alog(
                 "[검색스윕] 아직 정지 중 — 이번 시작 요청은 건너뜁니다(다음 틱 재시도)")
             return
         try:
@@ -3894,7 +3942,7 @@ class MainWindow(QMainWindow):
             if not cfg.get("conditions"):
                 # conditions 가 비면 AutoMonitor 가 cfg["keyword"] 로 떨어져 KeyError.
                 # 컨트롤러의 큐 검사에 기대지 않고 여기서 직접 막는다.
-                self.alertLog.append("[검색스윕] 대기열이 비어 시작하지 않습니다")
+                self._alog("[검색스윕] 대기열이 비어 시작하지 않습니다")
                 return
             from daangn.auto_monitor import AutoMonitor
             # 죽은 모니터를 버리고 간다. 안 버리면 되살릴 때마다 MainWindow 에
@@ -3902,22 +3950,22 @@ class MainWindow(QMainWindow):
             # log/found 시그널은 죽은 객체에서도 계속 슬롯을 때린다.
             self._dispose_auto_monitor()
             self.auto_monitor = AutoMonitor(self, cfg)
-            self.auto_monitor.log.connect(self.alertLog.append)
+            self.auto_monitor.log.connect(self._alog)
             self.auto_monitor.found.connect(self._on_sweep_found)
             self.auto_monitor.start()
             # 이 스윕이 어떤 키워드 집합으로 떠 있는지 기억한다 — cfg 는 스냅샷이다.
             self._sweep_kws = {c["keyword"] for c in cfg["conditions"]}
-            self.alertLog.append(
+            self._alog(
                 f"[검색스윕] 시작 — 키워드 {len(self._sweep_kws)}개")
         except Exception as e:
-            self.alertLog.append(f"[검색스윕] 시작 실패: {str(e)[:120]}")
+            self._alog(f"[검색스윕] 시작 실패: {str(e)[:120]}")
 
     def _stop_search_sweep(self):
         am = self.auto_monitor
         self._sweep_kws = None
         if am is not None and am.isRunning():
             am.stop()
-            self.alertLog.append("[검색스윕] 정지 요청")
+            self._alog("[검색스윕] 정지 요청")
 
     def _resync_search_sweep(self):
         """돌고 있는 스윕이 낡은 키워드 집합인지 보고, 다르면 갈아끼운다.
@@ -3955,12 +4003,12 @@ class MainWindow(QMainWindow):
             ok, self._sweep_revives, msg = sweep_revive_step(
                 getattr(self, "_sweep_revives", 0), len(want))
             if msg:
-                self.alertLog.append(msg)
+                self._alog(msg)
             if not ok:
                 return
         else:
             self._sweep_revives = 0
-            self.alertLog.append(
+            self._alog(
                 f"[검색스윕] 키워드 변경 {len(have)}개 → {len(want)}개 — 재시작")
         self._stop_search_sweep()          # _sweep_kws 를 None 으로 되돌린다
         if want:
@@ -3980,7 +4028,7 @@ class MainWindow(QMainWindow):
             if self._watch_tracker.add_from_matches([norm], source="sweep"):
                 self._refresh_listing_table()
         except Exception as e:
-            self.alertLog.append(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
+            self._alog(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
 
 
     def _init_state(self):
@@ -5082,6 +5130,19 @@ def _run_headless():
     def log(m):
         print(f"[{_time.strftime('%H:%M:%S')}] {m}", flush=True)
 
+    # 앱API→웹크롤 폴백 경고를 무인 런타임 로그로 끌어온다. 안 걸면 stderr 로만
+    # 나가고, 스윕을 안 거치는 경로(수동/보정 수집)의 폴백은 시각 표시도 없이
+    # 섞인다. 웹크롤은 명품을 억제하므로 그 경고가 곧 '0건의 진짜 이유'다.
+    # GUI 쪽은 일부러 등록하지 않는다 — 경고를 내는 쪽이 레인 스레드라
+    # 위젯에 직접 append 하면 Qt 스레드 규칙을 어긴다. GUI 는 스윕이
+    # sweep_engine.run() 에서 self._log 로 등록하는 경로와, stderr→
+    # karrot_monitor.log 티잉(_setup_logging)으로 덮인다.
+    try:
+        from daangn_ext.adaptive import set_app_fallback_logger
+        set_app_fallback_logger(log)
+    except Exception as e:
+        log(f"[경고] 앱API 폴백 로거 등록 실패: {str(e)[:80]}")
+
     argv = _sys.argv
     once = "--once" in argv
     do_harvest = "--no-harvest" not in argv
@@ -5301,10 +5362,19 @@ def _run_headless():
             core_only = bool(st.get("core_only"))
             now = _time.time()
             # 자동수확(20분 주기)
-            if do_harvest and now - last_harvest > 1200:
+            if do_harvest and now - last_harvest > harvest_interval():
                 try:
                     import ld_autoharvest
-                    u, i, t, h = ld_autoharvest.harvest_all("./accounts.json", nudge=True, log=log)
+                    # GUI 와 같은 이유로 임계는 '실제 틱 간격'에서 나온다.
+                    # 첫 틱은 측정값이 없으므로 설정 간격을 쓴다.
+                    period = (now - last_harvest) if last_harvest else harvest_interval()
+                    if not ld_autoharvest.period_is_safe(period):
+                        log(f"[수확] 경고: 틱 간격 {int(period)}초 — 토큰 수명"
+                            f"({ld_autoharvest.ACCESS_TTL}초)에 비해 너무 깁니다."
+                            " 만료를 못 막습니다.")
+                    u, i, t, h = ld_autoharvest.harvest_all(
+                        "./accounts.json", nudge=True, log=log,
+                        min_remaining=ld_autoharvest.min_remaining_for(period))
                     log(f"[수확] 갱신 {u} 신규 {i} 총 {t} (수확 {h})")
                 except Exception as e:
                     log(f"[수확] 실패: {str(e)[:60]}")

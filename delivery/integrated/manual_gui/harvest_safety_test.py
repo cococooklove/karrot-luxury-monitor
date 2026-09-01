@@ -238,11 +238,21 @@ ck("_HarvestThread 가 __init__ 에서 기동",
 ck("_HarvestThread 가 harvest_all 소유",
    "harvest_all" in m._HarvestThread.run.__code__.co_names)
 _ht_sig = _insp.signature(m._HarvestThread.__init__).parameters
-ck("_HarvestThread 기본 주기 1200초(헤드리스와 동일)",
-   _ht_sig["interval"].default == 1200
+# 주기의 소유자는 ld_autoharvest 다. 예전에는 GUI·헤드리스가 각자 1200 을 적어
+# 두고 "둘이 같은가"만 봤는데, 그 숫자는 토큰 신선도 임계와 부등식으로 묶여 있어
+# 한쪽만 바뀌면 토큰이 틱 사이에 죽는다(실서버 4계정 만료). 이제는 양쪽이 같은
+# 함수를 거치는지를 잠근다 — 값이 아니라 출처를 고정한다.
+import ld_autoharvest as _LA
+ck("_HarvestThread 주기 기본값은 위임(None)",
+   _ht_sig["interval"].default is None
    and _ht_sig["accounts"].default == "./accounts.json", str(_ht_sig))
-ck("GUI 기동 시 1200초로 붙임",
-   1200 in m.MainWindow.__init__.__code__.co_consts,
+ck("_HarvestThread 가 harvest_interval() 로 주기를 받는다",
+   "harvest_interval" in m._HarvestThread.__init__.__code__.co_names)
+ck("harvest_interval() = ld_autoharvest.HARVEST_INTERVAL",
+   m.harvest_interval() == _LA.HARVEST_INTERVAL,
+   f"{m.harvest_interval()} vs {_LA.HARVEST_INTERVAL}")
+ck("GUI __init__ 에 리터럴 주기가 없다",
+   1200 not in m.MainWindow.__init__.__code__.co_consts,
    str([c for c in m.MainWindow.__init__.__code__.co_consts if isinstance(c, int)]))
 ck("_alert_api(사용자 조작 경로)는 수확 유지",
    "_harvest_token_quiet" in m.MainWindow._alert_api.__code__.co_names)
@@ -280,6 +290,9 @@ class _Tick:
         _self = self
         self.alertLog = types.SimpleNamespace(
             append=lambda s: _self.calls.append(("log", s)))
+        # 운영 로그는 이제 _alog 중앙 헬퍼를 거친다(화면 + karrot_monitor.log).
+        # 페이크도 같은 이름을 가져야 _auto_poll_tick 이 그대로 돈다.
+        self._alog = lambda s: _self.calls.append(("log", s))
 
     def _resync_search_sweep(self):
         self.calls.append(("resync", threading.get_ident()))
