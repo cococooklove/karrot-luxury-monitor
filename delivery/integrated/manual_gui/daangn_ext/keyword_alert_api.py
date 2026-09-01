@@ -393,6 +393,13 @@ class MultiAccountAlerts:
                 api.close()
 
         valid = self._valid(core_only)
+        if not valid:
+            # 유효 계정이 하나도 없다 = 전 계정 토큰 만료. 여기서 그냥 0건을
+            # 돌려주면 다음 수확 틱까지 감시가 통째로 멈춘다(실서버에서 실제로
+            # 그렇게 20분을 보냈고, 스케줄을 고친 뒤에도 폴링 한 틱이 남았다).
+            # 앱은 만료된 뒤에야 갱신하므로 지금이 정확히 깨울 때다.
+            if self._on_no_valid_accounts(log):
+                valid = self._valid(core_only)
         seen, merged = set(), []
         with ThreadPoolExecutor(max_workers=min(workers, max(1, len(valid)))) as ex:
             for res in ex.map(one, valid):
@@ -404,6 +411,29 @@ class MultiAccountAlerts:
         self._save_state(state)
         log(f"전계정({len(valid)}) 매칭 {len(merged)}건(중복제거)")
         return merged
+
+    def _on_no_valid_accounts(self, log) -> bool:
+        """전 계정 만료 시 즉시 수확을 부른다. 성공하면 True.
+
+        폴링 쪽에서 수확기를 부르는 게 층을 넘는 것처럼 보이지만, 이건 '주기적
+        갱신'이 아니라 **장애 복구**다. 주기 수확은 여전히 수확 스레드 몫이고
+        여기는 그 사이에 뚫린 구멍만 메운다. harvest_all 은 프로세스 락으로
+        직렬화되므로 수확 스레드와 겹쳐도 함대를 두 번 깨우지 않는다.
+
+        수확기가 없거나(다른 배포 형태) 실패해도 폴링은 그대로 진행한다 —
+        복구는 최선 노력이지, 폴링을 막을 이유가 아니다."""
+        try:
+            import ld_autoharvest
+        except Exception:
+            return False
+        log("[복구] 유효 계정 0 — 즉시 수확을 시도합니다")
+        try:
+            u, i, t, h = ld_autoharvest.harvest_all(self.accounts_fp, nudge=True,
+                                                    log=log)
+        except Exception as e:
+            log(f"[복구] 수확 실패: {str(e)[:80]}")
+            return False
+        return bool(h)
 
     # ── 계정 상태(폴링 성공/실패·밴 격리) 영속 ──
     _STATE_FP = "./data/account_state.json"
