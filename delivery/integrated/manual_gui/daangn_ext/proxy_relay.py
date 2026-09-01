@@ -254,8 +254,17 @@ class _Listener:
         self._tunnel(cli, up)
 
     def _do_plain(self, cli, up, head: bytes, leftover: bytes) -> None:
-        """절대 URL 평문 요청을 인증만 붙여 그대로 넘긴다."""
-        up.sendall(_inject_auth(head, self.auth))
+        """절대 URL 평문 요청을 인증만 붙여 그대로 넘긴다.
+
+        인증은 **첫 요청 헤더에만** 붙는다 — 그 뒤로는 바이트를 그대로 잇기
+        때문에, 같은 연결로 두 번째 요청이 오면 인증 없이 나가 업스트림이 407 로
+        막는다(첫 요청만 되고 나머지는 조용히 실패하는, 찾기 어려운 고장).
+        스트림 중간의 요청 경계를 다시 파싱하는 대신 **연결을 재사용하지 못하게**
+        한다. 그러면 요청마다 새 연결이 열리고 매번 인증이 붙는다. 대가는 연결
+        비용뿐이고, 게스트 앱 트래픽은 사실상 전부 CONNECT(HTTPS)라 이 경로는
+        드물다.
+        """
+        up.sendall(_force_close(_inject_auth(head, self.auth)))
         if leftover:
             up.sendall(leftover)
         self._tunnel(cli, up)
@@ -265,6 +274,27 @@ class _Listener:
         t.start()
         _pump(up, cli)                     # 업스트림→클라는 이 스레드가 맡는다
         t.join(timeout=5.0)
+
+
+def _force_close(head: bytes) -> bytes:
+    """이 요청 뒤에 연결을 재사용하지 못하게 한다(_do_plain 참고).
+
+    Connection 과 Proxy-Connection 을 지우고 close 로 다시 쓴다. 헤더 이름은
+    대소문자를 안 가리므로 소문자로 비교한다."""
+    try:
+        head_txt, sep, rest = head.partition(b"\r\n\r\n")
+        lines = head_txt.split(b"\r\n")
+        keep = [lines[0]]
+        for ln in lines[1:]:
+            name = ln.split(b":", 1)[0].strip().lower()
+            if name in (b"connection", b"proxy-connection"):
+                continue
+            keep.append(ln)
+        keep.append(b"Connection: close")
+        keep.append(b"Proxy-Connection: close")
+        return b"\r\n".join(keep) + (sep or b"\r\n\r\n") + rest
+    except Exception:
+        return head
 
 
 class ProxyRelay:
@@ -309,7 +339,15 @@ class ProxyRelay:
                     return True
             ls = _Listener(host, port, auth, self.bind, self._log)
             if self._started:
-                ls.start()
+                # 리스너 기동 실패(포트 고갈·바인드 불가)가 여기서 예외로 튀면
+                # 계정 하나 때문에 나머지 계정의 프록시 반영이 통째로 멈춘다.
+                # 이 메서드의 계약은 '예외 없음'이다 — start() 도 그 안에 든다.
+                try:
+                    ls.start()
+                except Exception as e:
+                    self._errors[key] = str(e)
+                    self._log(f"[relay] {key}: 리스너를 못 열었다 — {e}")
+                    return False
             self._listeners.append(ls)
             self._by_key[key] = ls
         return True

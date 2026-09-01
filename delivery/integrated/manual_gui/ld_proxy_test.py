@@ -38,16 +38,16 @@ state = {}          # index -> 현재 전역 프록시
 def fake_adb(console, index, cmd, timeout=LP.CMD_TIMEOUT):
     calls.append((index, cmd))
     if "settings get global http_proxy" in cmd:
-        return True, (state.get(index) or "null") + "\n"
+        return True, (state.get(str(index)) or "null") + "\n"
     if "settings put global http_proxy" in cmd:
         val = cmd.rsplit(" ", 1)[-1]
-        state[index] = None if val == LP.NONE_PROXY else val
+        state[str(index)] = None if val == LP.NONE_PROXY else val
         return True, ""
     if "ip route show table all" in cmd:
         return True, ("172.16.1.0/24 dev wlan0 proto kernel scope link\n"
                       "default via 172.16.1.2 dev wlan0 table wlan0\n")
     if "karrot_token.ds" in cmd:
-        tok = TOKENS.get(index)
+        tok = TOKENS.get(str(index))
         return (True, tok + "\n") if tok else (True, "")
     return False, ""
 
@@ -61,11 +61,12 @@ def _ds(code):
     return base64.b64encode(body).decode()
 
 
-TOKENS = {1: _ds("452902"), 2: _ds("463777"), 3: None}
+TOKENS = {"1": _ds("452902"), "2": _ds("463777"), "3": None}
 
 LP._adb = fake_adb
 LP.find_ldconsole = lambda *a, **k: "ldconsole.exe"
-LP.fleet_indexes = lambda app_dir=".", log=None: [1, 2, 3]
+LP.fleet_indexes = lambda app_dir=".", log=None: ["1", "2", "3"]
+LP.ld_rows = lambda console: [{"index": "1"}, {"index": "2"}, {"index": "3"}]
 
 tmp = tempfile.mkdtemp()
 ACC = os.path.join(tmp, "accounts.json")
@@ -103,7 +104,7 @@ def stubborn(console, index, cmd, timeout=LP.CMD_TIMEOUT):
 
 
 LP._adb = stubborn
-state[5] = None
+state["5"] = None
 logs = []
 ck("안 먹은 설정을 성공으로 보고하지 않는다",
    LP.set_guest_proxy("c", 5, "1.2.3.4:8080", log=logs.append) is False)
@@ -123,9 +124,9 @@ write_accounts([
 ])
 logs = []
 res = LP.apply_account_proxies(ACC, console="c", log=logs.append)
-ck("index 1 에 그 계정 프록시", res.get(1) == "1.1.1.1:8000", str(res))
-ck("index 2 에 그 계정 프록시", res.get(2) == "2.2.2.2:9000")
-ck("로그아웃 인스턴스는 건너뛴다", res.get(3) is None)
+ck("index 1 에 그 계정 프록시", res.get("1") == "1.1.1.1:8000", str(res))
+ck("index 2 에 그 계정 프록시", res.get("2") == "2.2.2.2:9000")
+ck("로그아웃 인스턴스는 건너뛴다", res.get("3") is None)
 ck("건너뛴 이유를 남긴다", any("로그인된 계정이 없어" in m for m in logs))
 
 print("\n=== 5. 같은 값이면 adb 를 더 쓰지 않는다 ===")
@@ -138,7 +139,7 @@ print("\n=== 6. 프록시를 떼면 게스트도 직결로 되돌린다 ===")
 write_accounts([{"code": "452902"}, {"code": "463777", "proxy": "http://2.2.2.2:9000"}])
 logs = []
 res = LP.apply_account_proxies(ACC, console="c", log=logs.append)
-ck("index 1 해제됨", LP.get_guest_proxy("c", 1) is None and res.get(1) is None)
+ck("index 1 해제됨", LP.get_guest_proxy("c", 1) is None and res.get("1") is None)
 ck("index 2 는 그대로", LP.get_guest_proxy("c", 2) == "2.2.2.2:9000")
 ck("해제를 로그로 남긴다", any("해제" in m for m in logs), str(logs))
 
@@ -147,7 +148,7 @@ state.clear()
 write_accounts([{"code": "452902", "proxy": "http://u:p@3.3.3.3:7000"}])
 logs = []
 res = LP.apply_account_proxies(ACC, console="c", log=logs.append)
-ck("안 건다", res.get(1) is None and LP.get_guest_proxy("c", 1) is None)
+ck("안 건다", res.get("1") is None and LP.get_guest_proxy("c", 1) is None)
 ck("이유를 남긴다", any("릴레이 없이는" in m for m in logs), str(logs))
 
 print("\n=== 8. 릴레이가 있으면 그 주소를 건다 ===")
@@ -156,7 +157,7 @@ res = LP.apply_account_proxies(ACC, console="c",
                                endpoint_for=lambda px: "127.0.0.1:19001",
                                log=None)
 # 릴레이는 루프백에 열리고, 게스트에는 그 인스턴스의 게이트웨이 주소로 걸린다.
-ck("릴레이 주소로 걸린다", res.get(1) == "172.16.1.2:19001",
+ck("릴레이 주소로 걸린다", res.get("1") == "172.16.1.2:19001",
    LP.get_guest_proxy("c", 1))
 
 print("\n=== 8b. 루프백 릴레이 주소는 게스트가 부를 수 있게 바꾼다 ===")
@@ -166,7 +167,7 @@ state.clear()
 res = LP.apply_account_proxies(ACC, console="c",
                                endpoint_for=lambda px: "127.0.0.1:19001",
                                log=None)
-ck("게이트웨이 주소로 바뀐다", res.get(1) == "172.16.1.2:19001", str(res))
+ck("게이트웨이 주소로 바뀐다", res.get("1") == "172.16.1.2:19001", str(res))
 ck("게스트에도 그 값이 걸린다", LP.get_guest_proxy("c", 1) == "172.16.1.2:19001")
 ck("localhost 도 같다", LP._guest_reachable("c", 1, "localhost:5") == "172.16.1.2:5")
 ck("외부 주소는 그대로", LP._guest_reachable("c", 1, "9.9.9.9:8080") == "9.9.9.9:8080")
@@ -187,28 +188,59 @@ write_accounts([{"code": "452902", "proxy": "http://3.3.3.3:7000"}])
 LP.proxy_alive = lambda px, timeout=None, log=None: False
 logs = []
 res = LP.apply_account_proxies(ACC, console="c", log=logs.append)
-ck("죽었으면 안 건다", res.get(1) is None and LP.get_guest_proxy("c", 1) is None)
+ck("죽었으면 안 건다", res.get("1") is None and LP.get_guest_proxy("c", 1) is None)
 ck("이유를 남긴다", any("응답하지 않아" in m for m in logs), str(logs[:2]))
 
 # 이미 걸려 있던 프록시가 죽으면 직결로 되돌린다
-state[1] = "3.3.3.3:7000"
+state["1"] = "3.3.3.3:7000"
 LP.apply_account_proxies(ACC, console="c", log=None)
 ck("죽은 프록시는 걷어낸다", LP.get_guest_proxy("c", 1) is None)
 
 LP.proxy_alive = lambda px, timeout=None, log=None: True
 state.clear()
 res = LP.apply_account_proxies(ACC, console="c", log=None)
-ck("살아 있으면 건다", res.get(1) == "3.3.3.3:7000")
+ck("살아 있으면 건다", res.get("1") == "3.3.3.3:7000")
 
 state.clear()
 res = LP.apply_account_proxies(ACC, console="c", check_alive=False, log=None)
-ck("확인을 끌 수도 있다", res.get(1) == "3.3.3.3:7000")
+ck("확인을 끌 수도 있다", res.get("1") == "3.3.3.3:7000")
+
+print("\n=== 9b. fleet.json 이 없으면(=전체) 그래도 돈다 ===")
+# fleet_indexes 는 목록 또는 None(전체)을 준다. None 을 그대로 순회하면 TypeError 가
+# 나고 호출자의 except 에 먹혀 '아무 일도 안 일어난 것처럼' 보인다 — 프록시가 안
+# 걸렸는데 걸린 줄 아는 게 가장 나쁜 실패다.
+_fi = LP.fleet_indexes
+LP.fleet_indexes = lambda app_dir=".", log=None: None
+state.clear()
+write_accounts([{"code": "452902", "proxy": "http://3.3.3.3:7000"}])
+res = LP.apply_account_proxies(ACC, console="c", log=None)
+ck("None 이면 list2 로 전체를 훑는다", set(res) == {"1", "2", "3"}, str(res))
+ck("그 안에서 정상 적용", res.get("1") == "3.3.3.3:7000")
+LP.fleet_indexes = _fi
+
+print("\n=== 9c. 걸지 못하면 남아 있던 프록시를 걷어낸다 ===")
+# 릴레이 포트는 프로세스가 다시 뜰 때마다 바뀐다. 못 걸었는데 옛 값을 두면
+# 그 인스턴스는 죽은 포트로 나가려다 무기한 오프라인이 된다.
+state.clear()
+state["1"] = "172.16.1.2:19001"          # 지난 실행의 릴레이 포트가 남아 있음
+write_accounts([{"code": "452902", "proxy": "http://u:p@3.3.3.3:7000"}])
+logs = []
+res = LP.apply_account_proxies(ACC, console="c", endpoint_for=lambda px: None,
+                               log=logs.append)
+ck("릴레이가 주소를 못 주면 직결로", LP.get_guest_proxy("c", "1") is None,
+   str(state))
+ck("되돌린 사실을 남긴다", any("직결로 되돌립니다" in m for m in logs), str(logs[:2]))
+
+state["1"] = "172.16.1.2:19001"
+logs = []
+LP.apply_account_proxies(ACC, console="c", log=logs.append)   # 릴레이 없음 + 자격증명
+ck("릴레이 없이 자격증명이면 직결로", LP.get_guest_proxy("c", "1") is None)
 
 print("\n=== 10. 없는/깨진 accounts.json 에도 안 죽는다 ===")
 logs = []
 r9 = LP.apply_account_proxies(os.path.join(tmp, "없는파일.json"), console="c",
                               log=logs.append)
-ck("빈 결과가 아니라 인덱스별 None", set(r9) == {1, 2, 3}, str(r9))
+ck("빈 결과가 아니라 인덱스별 None", set(r9) == {"1", "2", "3"}, str(r9))
 ck("프록시 없음을 알린다", any("지정된 프록시가 없습니다" in m for m in logs))
 
 bad = [n for n, ok in R if not ok]

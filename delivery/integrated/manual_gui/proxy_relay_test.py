@@ -20,6 +20,7 @@ import time
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.getcwd())
 
+from daangn_ext import proxy_relay as PR
 from daangn_ext.proxy_relay import ProxyRelay
 
 R = []
@@ -400,6 +401,44 @@ for t in open_things:
         t.stop()
     except Exception:
         pass
+
+print("\n=== 12. keep-alive 로 인증이 새지 않는다 ===")
+# 인증은 첫 요청 헤더에만 붙는다. 같은 연결로 두 번째 요청이 오면 인증 없이
+# 나가 업스트림이 407 로 막는다 — 첫 요청만 되고 나머지는 조용히 실패한다.
+# 그래서 연결 재사용 자체를 막는다.
+_fc = PR._force_close
+h = (b"GET http://x/ HTTP/1.1\r\nHost: x\r\n"
+     b"Connection: keep-alive\r\nProxy-Connection: keep-alive\r\n\r\n")
+out = _fc(h)
+ck("keep-alive 를 지운다", b"keep-alive" not in out.lower(), str(out[:80]))
+ck("close 로 바꾼다", b"Connection: close" in out and b"Proxy-Connection: close" in out)
+ck("요청라인은 보존", out.startswith(b"GET http://x/ HTTP/1.1"))
+ck("다른 헤더는 보존", b"Host: x" in out)
+ck("대소문자 섞여도 지운다",
+   b"keep-alive" not in _fc(b"GET / HTTP/1.1\r\nCONNECTION: Keep-Alive\r\n\r\n").lower())
+ck("망가진 입력에도 안 죽는다", isinstance(_fc(b"\xff\xfe"), bytes))
+
+print("\n=== 13. 리스너를 못 열어도 그 키만 죽는다 ===")
+# 계정 하나 때문에 나머지 계정의 프록시 반영이 통째로 멈추면 안 된다.
+r13 = ProxyRelay(bind="127.0.0.1", log=lambda m: None).start()
+try:
+    class _Boom:
+        def __init__(self, *a, **k):
+            self.up_host, self.up_port, self.auth = "boom", 1, None
+
+        def start(self):
+            raise OSError("바인드 불가")
+
+    _orig_ls = PR._Listener
+    PR._Listener = _Boom
+    ok13 = r13.add("bad", "http://u:p@1.2.3.4:8000")
+    PR._Listener = _orig_ls
+    ck("예외 대신 False", ok13 is False)
+    ck("사유를 남긴다", "bad" in (r13.errors() or {}), str(r13.errors()))
+    ck("정상 키는 계속 된다", r13.add("good", "http://u:p@5.6.7.8:9000") is True)
+    ck("정상 키 엔드포인트가 있다", bool(r13.endpoint("good")))
+finally:
+    r13.stop()
 
 bad_names = [n for n, ok in R if not ok]
 print(f"\n{len(R) - len(bad_names)}/{len(R)} PASS")

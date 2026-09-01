@@ -35,8 +35,8 @@ from __future__ import annotations
 
 import subprocess
 
-from ld_autoharvest import (PKG, find_ldconsole, fleet_indexes, parse_token_ds,
-                            _jwt_sub)
+from ld_autoharvest import (PKG, find_ldconsole, fleet_indexes, ld_rows,
+                            parse_token_ds, _jwt_sub)
 
 # 게스트에서 '프록시 없음'을 뜻하는 값. 안드로이드는 빈 문자열 대신 이걸 쓴다 —
 # `settings put global http_proxy ""` 는 값이 안 지워지는 판이 있다.
@@ -175,6 +175,18 @@ def proxy_alive(proxy_url, timeout=PROBE_TIMEOUT, log=None):
 LOOPBACK = ("127.0.0.1", "localhost", "0.0.0.0", "::1")
 
 
+def _clear_if_set(console, index, log=None):
+    """걸려 있던 프록시가 있으면 지운다. 없으면 adb 를 쓰지 않는다.
+
+    프록시를 못 걸게 된 모든 갈래가 여기로 온다. 못 걸었는데 옛 값을 남겨두면
+    그 인스턴스는 조용히 오프라인이 되고 토큰이 멈춘다 — 프록시가 없는 것보다
+    나쁘다."""
+    if get_guest_proxy(console, index):
+        set_guest_proxy(console, index, None, log=log)
+        if log:
+            log(f"[프록시] index {index}: 걸 수 없어 직결로 되돌립니다")
+
+
 def _guest_reachable(console, index, endpoint, log=None):
     """호스트 기준 주소를 **게스트가 부를 수 있는** 주소로 바꾼다.
 
@@ -237,8 +249,14 @@ def apply_account_proxies(accounts_fp="./accounts.json", console=None,
     want = _account_proxies(accounts_fp)
     if not want:
         log("[프록시] 계정에 지정된 프록시가 없습니다 — 게스트는 직결로 둡니다")
+    # fleet_indexes 는 목록 **또는 None(=전체)** 을 준다. None 을 그대로 순회하면
+    # TypeError 가 나고 호출자의 except 에 먹혀 아무 일도 안 일어난 것처럼 보인다 —
+    # 프록시가 안 걸렸는데 걸린 줄 알게 되는 가장 나쁜 실패다. 값도 문자열이다.
+    idxs = fleet_indexes(app_dir, log=None)
+    if idxs is None:
+        idxs = [r.get("index") for r in ld_rows(console) or [] if r.get("index")]
     out = {}
-    for idx in fleet_indexes(app_dir, log=None):
+    for idx in idxs:
         code = index_code(console, idx)
         if not code:
             log(f"[프록시] index {idx}: 로그인된 계정이 없어 건너뜁니다")
@@ -257,13 +275,18 @@ def apply_account_proxies(accounts_fp="./accounts.json", console=None,
             ep = endpoint_for(px)
         elif "@" in px:
             log(f"[프록시] index {idx}({code[:6]}): 자격증명이 있는 프록시라"
-                " 릴레이 없이는 못 겁니다 — 그대로 둡니다")
+                " 릴레이 없이는 못 겁니다 — 직결로 둡니다")
+            _clear_if_set(console, idx, log)
             out[idx] = None
             continue
         else:
             ep = px.split("//", 1)[-1]
         ep = _guest_reachable(console, idx, ep, log=log)
         if not ep:
+            # 걸 주소를 못 만들었으면 **남아 있던 값을 반드시 걷어낸다.**
+            # 릴레이 포트는 프로세스가 다시 뜰 때마다 바뀌므로, 옛 포트를 그대로
+            # 두면 그 인스턴스는 죽은 포트로 나가려다 무기한 오프라인이 된다.
+            _clear_if_set(console, idx, log)
             out[idx] = None
             continue
         # 죽은 프록시를 걸면 그 인스턴스가 통째로 오프라인이 되고 토큰이 멈춘다.
