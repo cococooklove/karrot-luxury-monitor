@@ -119,10 +119,25 @@ if (Test-Path C:\karrot) {
   # 프로세스는 안 잡혔는데 탐색기·백신·다른 셸이 잡고 있을 수 있다. 통째로
   # 지우는 대신 옆으로 밀어 본다 — 실패하면 아무것도 안 지운 상태로 멈춘다.
   $old = "C:\karrot_old_" + (Get-Date -Format "yyyyMMdd_HHmmss")
-  try { Move-Item C:\karrot $old -ErrorAction Stop }
-  catch {
+  # 잠금은 대개 **지나간다**. 짧게 도는 셸 하나가 C:\karrot 을 작업 폴더로 잡고
+  # 있으면 그 순간 Move 가 막히는데, 몇 초 뒤엔 풀린다. 한 번 실패로 배포를
+  # 포기하면 푸시할 때마다 배포가 실패하고 서버는 영영 옛 코드로 남는다
+  # (실제로 그렇게 두 번 실패했다 — 원격 점검 명령이 잡고 있었다).
+  # 그래서 유한하게 다시 시도한다. 그래도 안 되면 예전처럼 아무것도 안 지우고 멈춘다.
+  $moved = $false
+  for ($try = 1; $try -le 6; $try++) {
+    try { Move-Item C:\karrot $old -ErrorAction Stop; $moved = $true; break }
+    catch {
+      $why = $_.Exception.Message
+      if ($try -lt 6) {
+        Log ("  C:\karrot 이 잠겨 있습니다 — " + $try + "/5 재시도(5초 뒤)")
+        Start-Sleep -Seconds 5
+      }
+    }
+  }
+  if (-not $moved) {
     Write-Host "[install][FAIL] C:\karrot 을 옮길 수 없습니다(잠김). 아무것도 지우지 않았습니다." -ForegroundColor Red
-    Write-Host ("[install] 사유: " + $_.Exception.Message) -ForegroundColor Yellow
+    Write-Host ("[install] 사유: " + $why) -ForegroundColor Yellow
     Write-Host "[install] 탐색기 창·다른 PowerShell·백신 실시간 검사를 확인하세요." -ForegroundColor Yellow
     Write-Host ("[install] 백업은 그대로 있습니다: " + $stash) -ForegroundColor Green
     exit 1
