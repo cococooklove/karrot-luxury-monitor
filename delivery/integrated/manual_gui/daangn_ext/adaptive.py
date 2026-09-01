@@ -50,6 +50,96 @@ import threading as _threading
 _APP_SRC = None
 _APP_SRC_LOCK = _threading.Lock()
 
+# 앱API→웹크롤 폴백 통지. 기본은 stderr 로 찍는다(모니터가 없어도 흔적이 남게).
+# GUI/서버는 set_app_fallback_logger(self._log) 로 갈아끼우면 화면·로그파일로 간다.
+_FALLBACK_LOG: Callable[[str], None] | None = None
+# 같은 예외로 매 지역마다 로그가 폭주하지 않게 **원인별** 1회만 크게 알린다.
+# 키는 예외 요약문이 아니라 _fallback_key() 가 만드는 안정된 값이다(아래 참고).
+_FALLBACK_SEEN: set = set()
+_FALLBACK_SEEN_LOCK = _threading.Lock()
+# 키가 안정적이면 실제로는 몇 종류뿐이지만, 예상 못 한 예외가 쏟아져도
+# 이 집합이 무한히 커지지 않게 상한을 둔다(6,537개 지역 × 사이클).
+_FALLBACK_SEEN_CAP = 64
+
+
+def set_app_fallback_logger(fn: Callable[[str], None] | None) -> None:
+    """앱API 폴백 경고를 받을 로거 주입(모니터의 _log 등). None 이면 stderr."""
+    global _FALLBACK_LOG
+    _FALLBACK_LOG = fn
+
+
+def get_app_fallback_logger() -> Callable[[str], None] | None:
+    """현재 등록된 폴백 로거. 호출자가 끝날 때 되돌리려고 읽는다.
+
+    _FALLBACK_LOG 는 프로세스 전역이라, 스윕이 자기 _log 를 걸고 안 되돌리면
+    이미 죽은 수신자(disconnect 된 시그널의 bound emit)를 계속 물고 있게 된다.
+    호출은 성공하지만 아무도 못 보고 stderr 폴백도 안 타 경고가 통째로 사라진다.
+    """
+    return _FALLBACK_LOG
+
+
+def reset_app_fallback_notices() -> None:
+    """1회성 경고 기억 초기화(테스트/새 사이클용)."""
+    with _FALLBACK_SEEN_LOCK:
+        _FALLBACK_SEEN.clear()
+
+
+def _exc_summary(e: BaseException) -> str:
+    """'ValueError: 헤더 없음' 형태의 한 줄 요약. 로그·stats 양쪽에 같은 값을 쓴다."""
+    msg = str(e).strip().replace("\n", " ")
+    return f"{type(e).__name__}: {msg[:160]}" if msg else type(e).__name__
+
+
+def _fallback_key(e: BaseException) -> str:
+    """경고 dedup 키 — **매번 달라지지 않는 것만** 넣는다: 예외 타입 + HTTP 상태코드.
+
+    _exc_summary(예외 메시지)를 키로 쓰면 안 된다. 실제 메시지는
+    app_api.search_page 의 'HTTP {code}: {응답본문 200자}' 와 _post 의
+    '요청 실패: {전송오류}'(프록시 host:port 가 박힘)라서 지역·IP 마다 다르다.
+    그러면 매번 처음 보는 키가 되어 6,537개 지역이 전부 ⚠️ 전체 줄을 찍고
+    _FALLBACK_SEEN 도 무한히 커진다.
+
+    상태코드는 예외 메시지 파싱이 아니라 app_api.AppApiError.status 로 받는다 —
+    메시지 포맷이 바뀌면 조용히 깨지는 정규식보다 낫고, 상태코드가 필요한 곳이
+    여기 말고 app_source(IP 쿨다운 판단)에도 있어서 어차피 구조적 노출이 필요했다.
+    """
+    st = getattr(e, "status", None)
+    return f"{type(e).__name__}:{st if isinstance(st, int) else '-'}"
+
+
+def _warn_app_fallback(region_in: str, keyword: str, summary: str,
+                       key: str | None = None) -> None:
+    """앱API 실패 → 웹크롤 폴백 사실을 반드시 밖으로 낸다.
+
+    웹크롤은 명품 브랜드를 억제한다('샤넬' 0건 vs 앱API 1,000건+). 조용히 폴백하면
+    토큰만료·네트워크오류·앱API 스펙변경이 전부 '매물 없음'으로 보여 운영자가
+    장애를 인지할 수 없다(이 함수가 존재하는 유일한 이유).
+
+    줄이는 건 '크게 찍는 빈도'뿐이다 — 축약 줄에도 지역·예외 요약은 그대로 남긴다.
+    """
+    key = key or summary
+    with _FALLBACK_SEEN_LOCK:
+        first = key not in _FALLBACK_SEEN
+        if first and len(_FALLBACK_SEEN) >= _FALLBACK_SEEN_CAP:
+            # 상한 도달: 새 키는 기록하지 않고 크게 알리지도 않는다(축약 줄만 남음).
+            # 이 함수의 목적이 로그 폭주 방지이므로, 상한을 넘겨 키를 계속 쌓느니
+            # 큰 경고를 포기한다. reset_app_fallback_notices()(사이클마다 호출)로 풀린다.
+            first = False
+        elif first:
+            _FALLBACK_SEEN.add(key)
+    head = "⚠️ [앱API 실패→웹크롤 폴백]" if first else "[앱API 폴백]"
+    line = (f"{head} {summary} · 지역 {region_in} · 키워드 '{keyword}' — "
+            "웹크롤은 명품 브랜드를 억제하므로 결과가 0건일 수 있다. 토큰/헤더 확인 필요")
+    fn = _FALLBACK_LOG
+    if fn:
+        try:
+            fn(line)
+            return
+        except Exception:
+            pass
+    import sys
+    print(line, file=sys.stderr, flush=True)
+
 
 def _app_source_for(access_token):
     """캐시된 AppSource 에 토큰만 메모리 갱신해 반환. config.json 재로드·파일쓰기 없음.
@@ -82,18 +172,25 @@ def collect_region(
     ★ 토큰이 있으면 app-API(search-bff)로 수집한다. 웹크롤(daangn.com)은 명품 브랜드
       키워드를 억제해 '샤넬' 0건이 나오지만, 앱API는 수천 건 + 페이징을 준다(app_api.py).
       토큰 없거나 앱API 실패 시에만 웹크롤로 폴백."""
+    app_failed: str | None = None
     if access_token:
         try:
             src = _app_source_for(access_token)
             return src.collect_region(
                 keyword, region_in, only_on_sale=only_on_sale,
-                proxies=proxies, should_stop=should_stop)
+                proxy=proxy, proxies=proxies, should_stop=should_stop)
         except Exception as _e:
-            pass  # 앱API 실패 → 아래 웹크롤 폴백(안전망)
+            # 폴백은 안전망이라 유지한다. 다만 절대 조용히 넘어가지 않는다 —
+            # 로그로 알리고 stats["app_api_failed"] 로 상위(sweep_engine/GUI)까지 올린다.
+            app_failed = _exc_summary(_e)
+            _warn_app_fallback(region_in, keyword, app_failed, key=_fallback_key(_e))
     seen: dict = {}
     # missed = 재시도 소진으로 "확인 못 한" 가격구간. 0건과 반드시 구분해야 한다.
     stats = {"requests": 0, "splits": 0, "saturated": False, "missed": [],
              "empties": 0, "suppressed": 0, "expanded": []}
+    if app_failed:
+        # 이 지역 결과가 '앱API 없이 얻은 것'임을 결과에 박아둔다.
+        stats["app_api_failed"] = app_failed
     # 시작 IP 만 고정. 쿨다운 중인 IP 는 후보에서 제외.
     fixed_proxy = proxy or proxy_budget.pick(proxies)
 
@@ -218,7 +315,8 @@ def collect_nationwide(
     """전국(구 목록) 적응형 수집. 전역 id 중복제거. (articles, summary).
     rest_range 로 지역 사이 랜덤 휴식(등간격 폴링 = 봇 패턴 → 스로틀). None 이면 생략."""
     seen: dict = {}
-    total_req = sat = rested = 0
+    total_req = sat = rested = app_fb = 0
+    app_fb_last = None
     for idx, reg in enumerate(regions):
         if should_stop and should_stop():
             break
@@ -231,13 +329,19 @@ def collect_nationwide(
                                   should_stop=should_stop, proxies=proxies)
         for a in arts:
             seen[a["id"]] = a
-        total_req += st["requests"]
-        sat += 1 if st["saturated"] else 0
+        total_req += st.get("requests", 0)
+        sat += 1 if st.get("saturated") else 0
+        if st.get("app_api_failed"):
+            app_fb += 1
+            app_fb_last = st["app_api_failed"]
         if on_region:
             on_region(reg, len(arts), st)
     return list(seen.values()), {"regions": len(regions), "requests": total_req,
                                  "saturated_regions": sat, "unique": len(seen),
-                                 "rests": rested}
+                                 "rests": rested,
+                                 # 앱API 폴백이 한 번이라도 있었으면 요약에도 남긴다
+                                 "app_api_fallbacks": app_fb,
+                                 "app_api_failed": app_fb_last}
 
 
 async def collect_region_async(
@@ -393,7 +497,8 @@ def collect_lanes(
     q_lock = threading.Lock()
     w_lock = threading.Lock()
     seen: dict = {}
-    total_req = sat = rested = 0
+    total_req = sat = rested = app_fb = 0
+    app_fb_last = None
     per_lane = [{"regions": 0, "requests": 0, "articles": 0, "proxies": len(s)}
                 for s in shards]
 
@@ -402,7 +507,7 @@ def collect_lanes(
             return queue.pop(0) if queue else None
 
     def lane(idx: int):
-        nonlocal total_req, sat, rested
+        nonlocal total_req, sat, rested, app_fb, app_fb_last
         pool = shards[idx] or None
         first = True
         while True:
@@ -422,10 +527,15 @@ def collect_lanes(
             with w_lock:
                 for a in arts:
                     seen[a["id"]] = a
-                total_req += st["requests"]
-                sat += 1 if st["saturated"] else 0
+                # .get 로 읽는다 — 소스마다 stats 키가 다를 수 있는데 KeyError 가
+                # 나면 이 레인 스레드가 통째로 죽어 그 지역들이 조용히 유실된다.
+                total_req += st.get("requests", 0)
+                sat += 1 if st.get("saturated") else 0
+                if st.get("app_api_failed"):
+                    app_fb += 1
+                    app_fb_last = st["app_api_failed"]
                 per_lane[idx]["regions"] += 1
-                per_lane[idx]["requests"] += st["requests"]
+                per_lane[idx]["requests"] += st.get("requests", 0)
                 per_lane[idx]["articles"] += len(arts)
                 if on_result:
                     on_result(reg, arts, st)
@@ -442,6 +552,9 @@ def collect_lanes(
         "saturated_regions": sat, "unique": len(seen), "rests": rested,
         "lanes": n_lanes, "per_lane": per_lane,
         "skipped": len(queue),          # should_stop 으로 남긴 지역 수
+        # 앱API 폴백이 몇 지역에서 일어났는지 + 마지막 예외 요약(운영자 통지용)
+        "app_api_fallbacks": app_fb,
+        "app_api_failed": app_fb_last,
     }
 
 
