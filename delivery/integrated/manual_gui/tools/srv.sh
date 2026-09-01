@@ -21,7 +21,9 @@
 # 파이썬을 부를 땐 반드시 `python -X utf8 -u` — -u 가 없으면 로그가 비어 보인다.
 set -uo pipefail
 
-HOST="${KARROT_HOST:-Administrator@108.181.252.171}"
+# 이 저장소는 public 이다. 운영 서버 주소는 코드에 두지 않는다 —
+# 셸 환경(예: ~/.zshrc 의 export KARROT_HOST='계정@호스트')에서 받는다.
+HOST="${KARROT_HOST:?KARROT_HOST 를 '계정@호스트' 형식으로 설정하세요}"
 KEY="${KARROT_KEY:-$HOME/.ssh/karrot_server}"
 APP='C:\karrot\delivery\integrated\manual_gui'
 SPOOL='C:\Windows\Temp\srv'

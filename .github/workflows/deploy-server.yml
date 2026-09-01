@@ -40,7 +40,19 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
 
       - name: 서버 갱신
+        env:
+          # 이 저장소는 public 이다. 배포 대상(계정@호스트)을 워크플로에 적어 두면
+          # 운영 서버 주소가 그대로 공개된다 — 실제로 그렇게 커밋돼 있었다.
+          # 리포지터리 변수 KARROT_DEPLOY_TARGET 에 `계정@호스트` 로 넣어 둔다.
+          DEPLOY_TARGET: ${{ vars.KARROT_DEPLOY_TARGET }}
         run: |
+          # 비어 있으면 조용히 다른 데로 붙는 대신 여기서 멈춘다.
+          if [ -z "$DEPLOY_TARGET" ]; then
+            echo "::error::리포지터리 변수 KARROT_DEPLOY_TARGET 이 비어 있습니다." \
+                 "Settings → Secrets and variables → Actions → Variables 에" \
+                 "'계정@호스트' 형식으로 등록하세요."
+            exit 1
+          fi
           # 보내는 명령은 무시된다 — authorized_keys 의 command= 가 이긴다.
           # ServerAlive 로 죽은 연결에 매달리지 않게 한다(재설치는 10분 넘게 걸린다).
           ssh -i ~/.ssh/deploy \
@@ -48,4 +60,4 @@ jobs:
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=20 \
               -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-              Administrator@108.181.252.171 deploy
+              "$DEPLOY_TARGET" deploy

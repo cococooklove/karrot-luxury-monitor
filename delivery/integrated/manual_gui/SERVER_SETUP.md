@@ -244,7 +244,15 @@ $u="$x\karrot-luxury-monitor-master\delivery\integrated\manual_gui\update.ps1"
 
 ## 5-5. 원격 실행 (tools/srv.sh)
 
-맥에서 서버 PowerShell 을 직접 부린다. `~/.ssh/karrot_server` 키로 붙는다.
+맥에서 서버 PowerShell 을 직접 부린다. 키는 `~/.ssh/karrot_server` 가 기본이다.
+
+**쓰기 전에 `KARROT_HOST` 를 반드시 내보내야 한다.** 이 저장소는 public 이라
+운영 서버 주소를 코드에 두지 않는다 — 기본값이 없고, 안 걸면 즉시 죽는다.
+
+```bash
+export KARROT_HOST='계정@호스트'      # 예: ~/.zshrc 에 넣어 둔다
+export KARROT_KEY=~/.ssh/karrot_server   # 기본값과 다를 때만
+```
 
 ```bash
 cd delivery/integrated/manual_gui
@@ -256,7 +264,10 @@ tools/srv.sh clean <이름>                  # 작업·로그 삭제
 tools/srv.sh push <로컬> <원격> / pull <원격> <로컬>
 ```
 
-호스트·키는 `KARROT_HOST` / `KARROT_KEY` 로 덮어쓴다.
+호스트는 `KARROT_HOST`(필수), 키는 `KARROT_KEY`(선택, 기본
+`~/.ssh/karrot_server`)로 준다. GitHub Actions 배포도 같은 이유로 대상 주소를
+리포지터리 변수 `KARROT_DEPLOY_TARGET` 에서 읽는다(`.github/workflows/deploy-server.yml`).
+비어 있으면 워크플로가 그 자리에서 실패한다 — 엉뚱한 데로 붙는 것보다 낫다.
 
 이 모양이 된 이유 — 전부 실측으로 부딪힌 것들이다:
 
