@@ -3027,11 +3027,17 @@ class MainWindow(QMainWindow):
         밀린 키워드가 안 보이면 사용자는 등록이 삼켜진 줄 안다. 대신 앱 목록을 못
         읽었다는 사실을 로그에 남겨, 짧아진 표를 '키워드가 사라졌다'로 읽지 않게 한다."""
         entries = self._queue_entries()
-        if not data and not entries:
+        routes = self._routes_map()
+        # 라우터가 **항상 있는 진실**이다. 엑셀로 넣은 조건은 등록이 끝나는 즉시
+        # 여기 들어오지만, 서버 목록 조회는 토큰이 없으면 실패한다. 예전에는 그때
+        # 표를 통째로 비워 두고 로그 한 줄만 남겼는데, 사용자에게는 '엑셀을
+        # 올렸는데 아무것도 안 뜬다'로 보였다. 셋을 합쳐 그린다.
+        if not data and not entries and not routes:
             return
         if not data:
             self._alog(
-                "[목록] 앱 등록 목록을 못 읽었습니다 — 검색 스윕 대기열만 표시합니다")
+                "[목록] 앱 등록 목록을 못 읽었습니다 — 저장된 조건으로 표시합니다"
+                " (삭제하려면 목록을 읽을 수 있어야 합니다)")
         kws = (data or {}).get("user_keywords") or []
         # 이 브랜치 이전에 일괄등록된 키워드는 routes 파일에 없다. 첫 실행에서
         # 그걸 인정하지 않으면 라우터는 함대가 비었다고 믿고 이미 꽉 찬 서버
@@ -3045,7 +3051,6 @@ class MainWindow(QMainWindow):
                         f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
             except Exception as e:
                 self._alog(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
-        routes = self._routes_map()
         self.alertTable.setRowCount(0)
         shown = set()
         for k in kws:
@@ -3069,6 +3074,19 @@ class MainWindow(QMainWindow):
                 price = f"{e.get('min') or ''}~{e.get('max') or ''}"
             self._alert_row(r, e["keyword"], routes.get(e["keyword"]), price,
                             ",".join(e.get("exclude") or []), "")
+        # 서버 목록에도 대기열에도 없지만 라우터가 아는 키워드 — 엑셀로 방금 넣은
+        # 것들이 여기 해당한다. 조건은 라우터의 cond 가 갖고 있다.
+        for kw, route in (routes or {}).items():
+            if kw in shown:
+                continue
+            cond = (route or {}).get("cond") or {}
+            r = self.alertTable.rowCount(); self.alertTable.insertRow(r)
+            price = ""
+            if cond.get("min") or cond.get("max"):
+                price = f"{cond.get('min') or ''}~{cond.get('max') or ''}"
+            self._alert_row(r, kw, route, price,
+                            ",".join(cond.get("exclude") or []), "")
+            shown.add(kw)
         subs = (data or {}).get("subscription_infos") or []
         if subs:
             txt = " · ".join(f"{s.get('name')}({s.get('ranged_regions_count')}지역"
