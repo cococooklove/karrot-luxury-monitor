@@ -59,6 +59,62 @@ class AccountStore:
                          and r.get("label") != refresh_or_label]
         self.save()
 
+    def set_proxy(self, key: str, proxy: str | None) -> bool:
+        """이 계정에 프록시를 지정한다. 성공하면 True.
+
+        `key` 는 code / label / refresh 중 아무거나 — 화면에 보이는 것이 code 라
+        그걸로도 찾을 수 있어야 한다.
+
+        **파일 전체를 덮어쓰지 않고, 락을 잡고 다시 읽어서 그 줄만 고친다.**
+        accounts.json 은 이 기계에서 재발급할 수 없는 세션 토큰의 유일한 사본이고,
+        수확기가 같은 파일을 병합하며 쓴다. 여기서 메모리에 들고 있던 옛 내용을
+        통째로 쓰면 그 사이 수확된 토큰이 사라진다 — 복구 경로는 폰 앱 스택뿐이다.
+        그래서 수확기와 **같은** 프로세스 간 파일락(ld_autoharvest)을 탄다.
+
+        락 모듈을 못 불러오면(다른 배포 형태) 락 없이 진행한다. 프록시 하나를
+        못 바꾸는 것보다 낫고, 최악이 lost update 로 되돌아갈 뿐이다.
+        """
+        key = str(key or "").strip()
+        if not key:
+            return False
+        proxy = (proxy or "").strip() or None
+        try:
+            from ld_autoharvest import _file_lock
+        except Exception:
+            import contextlib
+
+            @contextlib.contextmanager
+            def _file_lock(_fp, log=None):
+                yield False
+
+        with self._lock:
+            with _file_lock(self.path):
+                try:
+                    with open(self.path, encoding="utf-8") as f:
+                        rows = json.load(f)
+                except FileNotFoundError:
+                    rows = []
+                except Exception:
+                    return False
+                hit = None
+                for r in rows:
+                    if key in (str(r.get("code") or ""), str(r.get("label") or ""),
+                               str(r.get("refresh") or "")):
+                        hit = r
+                        break
+                if hit is None:
+                    return False
+                if proxy:
+                    hit["proxy"] = proxy
+                else:
+                    hit.pop("proxy", None)
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(rows, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+                self.rows = rows
+        return True
+
     def proxies(self) -> list[str]:
         return [r["proxy"] for r in self.rows if r.get("proxy")]
 

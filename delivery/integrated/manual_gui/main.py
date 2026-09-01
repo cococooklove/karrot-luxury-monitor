@@ -4584,10 +4584,19 @@ class MainWindow(QMainWindow):
         v = QtWidgets.QVBoxLayout(dlg)
 
         listw = QtWidgets.QListWidget(dlg)
+
+        def _name(r):
+            # 수확으로 들어온 계정은 label 이 비어 있고 code 만 있다. 화면에
+            # '(무명)' 만 뜨면 어느 계정에 프록시를 붙이는지 알 수 없다.
+            return (r.get("label") or r.get("code") or "(무명)")
+
         def reload_list():
+            keep = listw.currentRow()
             listw.clear()
             for r in store.rows:
-                listw.addItem(f"{r.get('label') or '(무명)'}  |  {r.get('proxy') or '프록시없음'}")
+                listw.addItem(f"{_name(r)}  |  {r.get('proxy') or '프록시없음'}")
+            if 0 <= keep < listw.count():
+                listw.setCurrentRow(keep)
         reload_list()
         v.addWidget(QtWidgets.QLabel("등록된 계정", parent=dlg))
         v.addWidget(listw)
@@ -4601,12 +4610,51 @@ class MainWindow(QMainWindow):
         form.addRow("프록시", proxyEdit)
         v.addLayout(form)
 
+        v.addWidget(QtWidgets.QLabel(
+            "계정을 고르면 그 계정의 프록시를 고쳐 저장할 수 있습니다. 비우고 저장하면 직결.\n"
+            "· 계정을 늘리는 건 아래 'refresh 토큰 추가'가 아니라 LDPlayer 에 .ldbk 를 복원하는 것입니다\n"
+            "  (PC 직접 갱신은 당근 WAF 가 막아 토큰은 에뮬레이터 앱에서만 나옵니다).",
+            parent=dlg))
+
         btns = QtWidgets.QHBoxLayout()
-        addBtn = QtWidgets.QPushButton("추가", dlg)
+        saveProxyBtn = QtWidgets.QPushButton("선택 계정에 프록시 저장", dlg)
+        saveProxyBtn.setObjectName("startBtn")
+        addBtn = QtWidgets.QPushButton("refresh 토큰 추가(레거시)", dlg)
         delBtn = QtWidgets.QPushButton("선택 삭제", dlg)
         closeBtn = QtWidgets.QPushButton("닫기", dlg)
-        btns.addWidget(addBtn); btns.addWidget(delBtn); btns.addStretch(1); btns.addWidget(closeBtn)
+        btns.addWidget(saveProxyBtn); btns.addWidget(addBtn); btns.addWidget(delBtn)
+        btns.addStretch(1); btns.addWidget(closeBtn)
         v.addLayout(btns)
+
+        def on_pick(i):
+            """선택한 계정의 현재 프록시를 입력칸에 올린다 — 고치려면 보여야 한다."""
+            if 0 <= i < len(store.rows):
+                r = store.rows[i]
+                proxyEdit.setText(r.get("proxy") or "")
+                labelEdit.setText(r.get("label") or "")
+        listw.currentRowChanged.connect(on_pick)
+
+        def do_save_proxy():
+            i = listw.currentRow()
+            if not (0 <= i < len(store.rows)):
+                QtWidgets.QMessageBox.warning(dlg, "확인", "먼저 계정을 고르세요.")
+                return
+            r = store.rows[i]
+            key = r.get("code") or r.get("label") or r.get("refresh")
+            val = proxyEdit.text().strip()
+            if store.set_proxy(key, val):
+                self._alog(f"[프록시] {_name(r)} → {val or '직결'}")
+                reload_list()
+                QtWidgets.QMessageBox.information(
+                    dlg, "저장됨",
+                    f"{_name(r)} 의 프록시를 {'지웠습니다(직결)' if not val else val} 로 바꿨습니다.\n"
+                    "다음 검색·폴링부터 적용됩니다.")
+            else:
+                QtWidgets.QMessageBox.warning(
+                    dlg, "실패",
+                    "저장하지 못했습니다. accounts.json 을 다른 프로그램이 쓰고 있는지"
+                    " 확인하세요(로그에 사유가 남습니다).")
+        saveProxyBtn.clicked.connect(do_save_proxy)
 
         def do_add():
             rf = refreshEdit.text().strip()
