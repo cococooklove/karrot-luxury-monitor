@@ -51,6 +51,42 @@ import time
 
 DEFAULT_SLOT_CAP = 30
 
+def _clean_cond(raw) -> dict:
+    """디스크에서 읽은 조건을 쓸 수 있는 모양으로만 남긴다.
+
+    사람이 손댈 수 있는 파일이라 모양을 믿지 않는다. 다만 **버리지도 않는다** —
+    이 함수가 생긴 이유가 조건이 조용히 사라지던 것이라, 읽을 수 있는 값은
+    최대한 살린다. 못 읽는 항목만 빠진다."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key in ("min", "max"):
+        v = raw.get(key)
+        if v is None:
+            continue
+        try:
+            out[key] = int(v)
+        except (TypeError, ValueError):
+            pass
+    for key in ("exclude", "extra"):
+        v = raw.get(key)
+        if isinstance(v, (list, tuple)):
+            vals = [str(x) for x in v if str(x).strip()]
+            if vals:
+                out[key] = vals
+        elif isinstance(v, str) and v.strip():
+            out[key] = [v.strip()]
+    d = raw.get("days")
+    if d is not None:
+        try:
+            d = int(d)
+            if d > 0:
+                out["days"] = d
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 ROUTE_APP = "app"
 ROUTE_SWEEP = "sweep"
 
@@ -77,6 +113,10 @@ class KeywordRouter:
         self._routes, self._observed_cap = self._load()
 
     # ── 영속 ──
+    @staticmethod
+    def _clean_cond(raw):
+        return _clean_cond(raw)
+
     def _load(self) -> tuple[dict, int | None]:
         try:
             with open(self.routes_fp, encoding="utf-8") as f:
@@ -114,6 +154,13 @@ class KeywordRouter:
                         e["retry_n"] = max(1, int(v.get("retry_n") or 1))
                     except Exception:
                         e["retry_n"] = 1
+                # 조건도 반드시 살려 읽는다. 예전에는 여기서 통째로 버려서
+                # **껐다 켜기만 해도** 엑셀 조건이 사라졌다 — 실서버에서
+                # 20/20 키워드가 조건 없이 남아 있던 진짜 이유다. 클라는
+                # 엑셀을 넣은 적이 있는데도 매번 다시 넣어야 했다.
+                cond = _clean_cond(v.get("cond"))
+                if cond:
+                    e["cond"] = cond
                 out[str(k)] = e
         return out, observed
 
@@ -284,7 +331,8 @@ class KeywordRouter:
                      .get("cond")) or {})
 
     def add(self, keyword, min_price=None, max_price=None, exclude=None,
-            core_only=False, log=None, extra=None, days=None) -> dict:
+            core_only=False, log=None, extra=None, days=None,
+            replace_cond=False) -> dict:
         log = log or (lambda m: None)
         keyword = str(keyword or "").strip()
         now = int(time.time())
@@ -293,14 +341,30 @@ class KeywordRouter:
 
         # 이미 배정된 키워드를 다시 태우는 경로가 여럿이다 — 일괄등록
         # (add_many 는 배치에 못 넣은 것을 add 로 돌린다), 승격, 재시도.
-        # 그 호출들은 추가키워드·끌올일수를 안 넘기므로, 그대로 쓰면 엑셀로
-        # 넣어둔 조건이 '명품20 전계정등록' 한 번에 지워진다. 명시적으로
-        # 넘어온 값만 덮어쓰고, 안 넘어온 것은 이전 조건을 잇는다.
+        # 그 호출들은 조건을 안 넘기므로, 그대로 쓰면 엑셀로 넣어둔 조건이
+        # '명품20 전계정등록' 한 번에 지워진다. 그래서 안 넘어온 값은 이전
+        # 조건을 잇는다.
+        #
+        # 예전에는 extra·days 만 이어받고 min·max·exclude 는 흘려보냈다.
+        # 그래서 클라가 엑셀을 한 번 넣어도 일괄등록이 한 번 돌면 가격·제외어가
+        # 사라졌다 — 실서버에서 20/20 키워드가 조건 없이 남아 있던 이유다.
+        # 조건은 프로그램을 껐다 켜도 유지돼야 한다. 이어받는 대상에 전부 넣는다.
+        #
+        # 조건을 **지우거나 통째로 바꾸는** 유일한 권한은 엑셀을 다시 불러오는
+        # 경로에 있다. 그쪽만 replace_cond=True 로 부른다 — 그래야 "엑셀에서
+        # 조건을 뺐다"가 실제로 반영된다.
         prev_cond = (self._routes.get(keyword) or {}).get("cond") or {}
-        if extra is None:
-            extra = prev_cond.get("extra")
-        if days is None:
-            days = prev_cond.get("days")
+        if not replace_cond:
+            if min_price is None:
+                min_price = prev_cond.get("min")
+            if max_price is None:
+                max_price = prev_cond.get("max")
+            if not exclude:
+                exclude = prev_cond.get("exclude")
+            if extra is None:
+                extra = prev_cond.get("extra")
+            if days is None:
+                days = prev_cond.get("days")
 
         cap_now = self.capacity()
         if cap_now["free"] <= 0:
@@ -345,7 +409,8 @@ class KeywordRouter:
         return {"keyword": keyword, "route": ROUTE_APP, "reason": "앱 알림 등록"}
 
     def add_many(self, keywords, min_price=None, max_price=None, exclude=None,
-                 core_only=False, log=None, extra=None, days=None) -> list[dict]:
+                 core_only=False, log=None, extra=None, days=None,
+                 replace_cond=False) -> list[dict]:
         """여러 키워드를 한 번에 배정한다(반환은 키워드별 결과 — 호출자가
         키워드마다 경로를 로그한다).
 
@@ -368,7 +433,7 @@ class KeywordRouter:
         return [{"keyword": k, "route": ROUTE_APP, "reason": "앱 알림 등록"}
                 if k in done else
                 self.add(k, min_price, max_price, exclude, core_only, log,
-                         extra, days)
+                         extra, days, replace_cond=replace_cond)
                 for k in items]
 
     def _register_batch(self, batch, min_price, max_price, exclude, core_only,

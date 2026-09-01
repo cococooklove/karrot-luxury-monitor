@@ -3112,13 +3112,20 @@ class MainWindow(QMainWindow):
                 for k, kws in groups.items()]
 
     def _route_conditions(self, conditions, core_only=False, log=None):
-        """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다."""
+        """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다.
+
+        여기만 replace_cond=True 다. 엑셀은 조건의 **출처**이므로 여기서 넘긴 값이
+        곧 최종값이어야 한다 — 조건을 지운 엑셀을 다시 불러오면 지워져야 한다.
+        나머지 경로(일괄등록·승격·재시도)는 조건을 안 넘기므로 이전 값을 잇는다.
+        그 구분이 없던 동안 '명품20 전계정등록' 한 번이 엑셀 조건을 통째로
+        지웠다."""
         log = log or self._alog
         out = []
         for kws, mn, mx, excl, extra, days in self._condition_groups(conditions):
             out.extend(self._router.add_many(kws, mn, mx, excl,
                                              core_only=core_only, log=log,
-                                             extra=extra, days=days) or [])
+                                             extra=extra, days=days,
+                                             replace_cond=True) or [])
         return out
 
     def _night_factor(self):
