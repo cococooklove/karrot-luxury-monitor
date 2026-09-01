@@ -164,6 +164,8 @@ def collect_region(
     cap: int = CAP,
     should_stop: Callable[[], bool] | None = None,
     proxies: list | None = None,
+    sort_option: str | None = None,
+    stop_before=None,
 ) -> tuple[list, dict]:
     """한 지역(구) 완전 수집. (articles, stats) 반환. 포화면 가격분할.
     proxies 풀 주면 시작 IP 만 풀에서 고르고, 빈응답이 나는 즉시 robust 가 다음 IP 로 넘긴다.
@@ -171,14 +173,21 @@ def collect_region(
 
     ★ 토큰이 있으면 app-API(search-bff)로 수집한다. 웹크롤(daangn.com)은 명품 브랜드
       키워드를 억제해 '샤넬' 0건이 나오지만, 앱API는 수천 건 + 페이징을 준다(app_api.py).
-      토큰 없거나 앱API 실패 시에만 웹크롤로 폴백."""
+      토큰 없거나 앱API 실패 시에만 웹크롤로 폴백.
+
+    sort_option / stop_before 는 **앱 분기 전용**이다(기본 None = 종전 동작).
+    웹크롤 경로(robust_fetch_articles)에는 정렬·정지 개념 자체가 없다. 그래서 정지
+    규칙을 요청했는데 웹으로 떨어지면 stats 에 그 사실을 남긴다 — 안 남기면 호출측이
+    웹 결과를 '이 시각 이후 전부'로 오해하고 다음 사이클의 stop_before 를 앞당겨
+    그 사이 매물을 영구히 잃는다(app_api_failed 를 남기는 것과 같은 이유)."""
     app_failed: str | None = None
     if access_token:
         try:
             src = _app_source_for(access_token)
             return src.collect_region(
                 keyword, region_in, only_on_sale=only_on_sale,
-                proxy=proxy, proxies=proxies, should_stop=should_stop)
+                proxy=proxy, proxies=proxies, should_stop=should_stop,
+                sort_option=sort_option, stop_before=stop_before)
         except Exception as _e:
             # 폴백은 안전망이라 유지한다. 다만 절대 조용히 넘어가지 않는다 —
             # 로그로 알리고 stats["app_api_failed"] 로 상위(sweep_engine/GUI)까지 올린다.
@@ -191,6 +200,13 @@ def collect_region(
     if app_failed:
         # 이 지역 결과가 '앱API 없이 얻은 것'임을 결과에 박아둔다.
         stats["app_api_failed"] = app_failed
+    # 앱 전용 인자를 요청받고도 웹으로 내려온 경우(폴백이든 토큰 없음이든) 그 사실을 남긴다.
+    # app_failed 유무와 무관하게 검사한다 — 토큰이 아예 없어 앱 분기를 못 탄 경우도
+    # 결과는 똑같이 '정지 규칙이 안 걸린 웹 결과'이기 때문이다.
+    if stop_before is not None:
+        stats["stop_before_unapplied"] = stop_before
+    if sort_option is not None:
+        stats["sort_option_unapplied"] = sort_option
     # 시작 IP 만 고정. 쿨다운 중인 IP 는 후보에서 제외.
     fixed_proxy = proxy or proxy_budget.pick(proxies)
 
@@ -300,6 +316,25 @@ def load_gu_regions(out_json_path: str) -> list[dict]:
     return list(gus.values())
 
 
+def region_arg(reg: dict, key: str, default=None):
+    """지역별 인자 읽기 — **지역 dict 에 실린 값이 함수 기본값을 이긴다**.
+
+    왜 별도 매핑({'역삼동-6035': ...})이 아니라 지역 dict 에 싣는가:
+      - collect_lanes 는 지역을 **공유 큐**로 레인들에 나눠준다. 큐를 타고 다니는 건
+        지역 dict 하나뿐이라, 값을 dict 에 붙여두면 어떤 레인이 집어가든 짝이 안 어긋난다.
+        별도 매핑이면 레인마다 조회 키(reg['in'])를 다시 맞춰야 하고, 그 조회는 실패해도
+        예외가 아니라 None(=정지 없음)이라 **조용히 전량 재수집**으로 퇴화한다.
+      - 지역 dict 은 이미 load_dong_regions 가 만들어 호출측이 늘려 쓰는 자료구조이고,
+        수집기가 읽는 키는 reg['in'] 뿐이라 추가 키는 어디서도 문제가 안 된다.
+      - on_region/on_result 콜백이 reg 를 그대로 넘겨받으므로, 어떤 stop_before 로
+        얻은 결과인지 호출측이 사후에 확인할 수 있다.
+
+    키가 **있으면** 값이 None 이어도 존중한다('이 지역만 정지 없음'을 표현할 수 있어야
+    한다). 없을 때만 함수 기본값으로 떨어진다.
+    """
+    return reg[key] if key in reg else default
+
+
 def collect_nationwide(
     keyword: str,
     regions: list[dict],
@@ -311,11 +346,17 @@ def collect_nationwide(
     should_stop: Callable[[], bool] | None = None,
     proxies: list | None = None,
     rest_range: tuple[float, float] | None = REGION_REST,
+    sort_option: str | None = None,
+    stop_before=None,
 ) -> tuple[list, dict]:
     """전국(구 목록) 적응형 수집. 전역 id 중복제거. (articles, summary).
-    rest_range 로 지역 사이 랜덤 휴식(등간격 폴링 = 봇 패턴 → 스로틀). None 이면 생략."""
+    rest_range 로 지역 사이 랜덤 휴식(등간격 폴링 = 봇 패턴 → 스로틀). None 이면 생략.
+
+    sort_option / stop_before 는 전 지역 기본값이고, 지역 dict 에
+    같은 이름의 키가 있으면 그 지역만 그 값을 쓴다(region_arg 참고).
+    지역마다 마지막 방문 시각이 다르므로 **지역별 stop_before** 가 기본 사용법이다."""
     seen: dict = {}
-    total_req = sat = rested = app_fb = 0
+    total_req = sat = rested = app_fb = sb_unapplied = 0
     app_fb_last = None
     for idx, reg in enumerate(regions):
         if should_stop and should_stop():
@@ -326,7 +367,9 @@ def collect_nationwide(
         arts, st = collect_region(keyword, reg["in"], proxy=proxy,
                                   only_on_sale=only_on_sale,
                                   access_token=access_token, next_proxy=next_proxy,
-                                  should_stop=should_stop, proxies=proxies)
+                                  should_stop=should_stop, proxies=proxies,
+                                  sort_option=region_arg(reg, "sort_option", sort_option),
+                                  stop_before=region_arg(reg, "stop_before", stop_before))
         for a in arts:
             seen[a["id"]] = a
         total_req += st.get("requests", 0)
@@ -334,6 +377,8 @@ def collect_nationwide(
         if st.get("app_api_failed"):
             app_fb += 1
             app_fb_last = st["app_api_failed"]
+        if st.get("stop_before_unapplied") is not None:
+            sb_unapplied += 1
         if on_region:
             on_region(reg, len(arts), st)
     return list(seen.values()), {"regions": len(regions), "requests": total_req,
@@ -341,7 +386,10 @@ def collect_nationwide(
                                  "rests": rested,
                                  # 앱API 폴백이 한 번이라도 있었으면 요약에도 남긴다
                                  "app_api_fallbacks": app_fb,
-                                 "app_api_failed": app_fb_last}
+                                 "app_api_failed": app_fb_last,
+                                 # 정지 규칙을 요청했지만 웹 결과라 못 건 지역 수.
+                                 # >0 이면 '이 시각 이후 전부'가 아니다.
+                                 "stop_before_unapplied_regions": sb_unapplied}
 
 
 async def collect_region_async(
@@ -476,6 +524,8 @@ def collect_lanes(
     max_lanes: int = 16,
     on_lane: Callable[[int, dict], None] | None = None,
     on_result: Callable[[dict, list, dict], None] | None = None,
+    sort_option: str | None = None,
+    stop_before=None,
 ) -> tuple[list, dict]:
     """지역 목록을 레인 N개로 병렬 수집. 레인끼리 프록시를 공유하지 않는다.
 
@@ -485,6 +535,10 @@ def collect_lanes(
     넘겨받아 스트리밍 처리(중복제거·알림)를 할 수 있게 한다 — 전체가 끝날 때까지
     기다리지 않아도 된다.
     반환은 collect_nationwide 와 같은 모양 + lanes/per_lane/skipped.
+
+    sort_option / stop_before 는 전 지역 기본값이고, 지역 dict 에 같은 이름의 키가
+    있으면 그 지역만 그 값을 쓴다(region_arg 참고). 지역은 공유 큐로 레인에 흩어지므로
+    지역별 값은 반드시 지역 dict 에 붙어 있어야 짝이 안 어긋난다.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -497,7 +551,7 @@ def collect_lanes(
     q_lock = threading.Lock()
     w_lock = threading.Lock()
     seen: dict = {}
-    total_req = sat = rested = app_fb = 0
+    total_req = sat = rested = app_fb = sb_unapplied = 0
     app_fb_last = None
     per_lane = [{"regions": 0, "requests": 0, "articles": 0, "proxies": len(s)}
                 for s in shards]
@@ -507,7 +561,7 @@ def collect_lanes(
             return queue.pop(0) if queue else None
 
     def lane(idx: int):
-        nonlocal total_req, sat, rested, app_fb, app_fb_last
+        nonlocal total_req, sat, rested, app_fb, app_fb_last, sb_unapplied
         pool = shards[idx] or None
         first = True
         while True:
@@ -523,7 +577,9 @@ def collect_lanes(
             first = False
             arts, st = collect_region(
                 keyword, reg["in"], only_on_sale=only_on_sale,
-                access_token=access_token, should_stop=should_stop, proxies=pool)
+                access_token=access_token, should_stop=should_stop, proxies=pool,
+                sort_option=region_arg(reg, "sort_option", sort_option),
+                stop_before=region_arg(reg, "stop_before", stop_before))
             with w_lock:
                 for a in arts:
                     seen[a["id"]] = a
@@ -534,6 +590,8 @@ def collect_lanes(
                 if st.get("app_api_failed"):
                     app_fb += 1
                     app_fb_last = st["app_api_failed"]
+                if st.get("stop_before_unapplied") is not None:
+                    sb_unapplied += 1
                 per_lane[idx]["regions"] += 1
                 per_lane[idx]["requests"] += st.get("requests", 0)
                 per_lane[idx]["articles"] += len(arts)
@@ -555,6 +613,8 @@ def collect_lanes(
         # 앱API 폴백이 몇 지역에서 일어났는지 + 마지막 예외 요약(운영자 통지용)
         "app_api_fallbacks": app_fb,
         "app_api_failed": app_fb_last,
+        # 정지 규칙을 요청했지만 웹 결과라 못 건 지역 수. >0 이면 '이 시각 이후 전부'가 아니다.
+        "stop_before_unapplied_regions": sb_unapplied,
     }
 
 

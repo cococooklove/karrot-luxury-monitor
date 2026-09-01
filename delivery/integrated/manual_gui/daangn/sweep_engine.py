@@ -21,8 +21,9 @@ import os
 import time
 import sqlite3
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+from daangn_ext.app_api import SORT_RECENT
 from daangn_ext.search_filters import KeywordRule
 from daangn_ext.adaptive import (collect_region, collect_lanes, load_dong_regions,
                                  get_app_fallback_logger,
@@ -79,6 +80,44 @@ def _noop(*_a, **_k):
     pass
 
 
+# 최신순 응답 한 페이지(20건)가 덮는 시간. 2026-09-01 실측 — 역삼동 23분,
+# 해운대 우동 22분, 제주 노형동 25분으로 지역 편차가 거의 없다(반경검색이
+# 택배·광역 매물을 함께 물어오기 때문). 아래 수렴 판정의 기준값이다.
+PAGE_SPAN_MIN = 23.0
+
+# 처음 보는 (조건,지역)은 어디서 멈춰야 할지 모른다 — 워터마크가 없다. 그렇다고
+# 끝까지 파면 첫 사이클이 통째로 과거 발굴이 되어 정작 신규를 못 따라간다.
+# 그래서 첫 방문은 이 구간만 훑고 워터마크를 세운다. 그 이전 매물은 '신규'가
+# 아니므로 안 봐도 된다 — 우리가 잡으려는 건 지금 올라오는 물건이다.
+FIRST_VISIT_WINDOW_MIN = 120.0
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _iso_ago(minutes):
+    return (datetime.now(timezone.utc)
+            - timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
+def sweep_capacity(req_per_sec, page_span_min=PAGE_SPAN_MIN):
+    """이 처리량으로 수렴 가능한 (지역수 x 조건수) 곱.
+
+    최신순 + 정지 규칙에서 사이클당 요청은
+        지역수 x 조건수 x (주기 / 한 페이지가 덮는 시간)
+    이고, 사이클이 주기 안에 끝나야 하므로 주기가 양변에서 약분된다:
+        지역수 x 조건수 = 한 페이지가 덮는 시간(초) x 초당요청수
+    이 곱을 넘기면 사이클이 주기보다 길어지고, 그러면 다음 사이클은 더 깊이
+    파야 해서 더 길어진다 — 발산한다. 지금까지 이 저장소의 스윕이 동 6537개를
+    설정해 두고도 앞쪽 몇십 개만 돌던 이유가 정확히 이것이다.
+    """
+    try:
+        return float(page_span_min) * 60.0 * float(req_per_sec)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _ckey(cond, region) -> str:
     """커서 키. 키워드만으로는 부족하다.
 
@@ -105,6 +144,17 @@ class _RegionCursor:
     한 바퀴를 다 돌면 기록을 비우고 새 패스를 시작한다 — 커버리지는 느릴 수 있어도
     공평해진다. 이 파일이 없거나 깨져도 그냥 처음부터 도는 것으로 퇴화할 뿐,
     스윕을 막지 않는다(수집이 커서보다 중요하다).
+
+    ── 워터마크 ──
+    검색을 최신순(FLEA_MARKET_SORT_OPTION_RECENT)으로 돌리면 응답이 publishedAt
+    내림차순으로 단조라, '지난 방문 시각까지만 페이징하고 멈춘다'가 성립한다.
+    그래서 (조건,지역)마다 **마지막으로 훑은 시각**을 같이 남긴다. 다음 방문은
+    그 시각까지만 파면 되므로 깊이가 볼륨에서 계산되고, 커버리지가 확률적 표본이
+    아니라 보장이 된다(관련도 정렬에서는 1페이지 재현율이 15% 였다).
+
+    워터마크는 '방문을 시작한 시각'이다. 그때 이후로 올라온 것은 다음 방문에서
+    반드시 보이고, 그 이전은 이번에 이미 훑었다. 수집이 불완전했던 지역(missed)은
+    워터마크를 올리지 않는다 — 올리면 그 구간을 영영 안 본다.
     """
 
     def __init__(self, path="./data/sweep_cursor.json", log=None, save_every=20):
@@ -113,6 +163,7 @@ class _RegionCursor:
         self.save_every = max(1, int(save_every))
         self.passes = 1
         self._done = set()
+        self._marks = {}
         self._since_write = 0
         self._load()
 
@@ -122,11 +173,47 @@ class _RegionCursor:
                 d = json.load(f)
             self.passes = int(d.get("pass") or 1)
             self._done = set(d.get("done") or [])
+            self._marks = dict(d.get("marks") or {})
         except FileNotFoundError:
             pass
         except Exception as e:
             # 깨진 커서 때문에 스윕을 멈추지 않는다. 처음부터 돌 뿐이다.
             self._log(f"[커서] 읽기 실패 — 처음부터 돕니다: {str(e)[:80]}")
+
+    def watermark(self, key):
+        """이 (조건,지역)을 마지막으로 훑은 시각(ISO8601). 처음이면 None.
+
+        None 이면 정지 규칙 없이 파야 한다 — 그 지역의 과거를 한 번도 안 봤으므로
+        어디서 멈춰야 할지 알 수 없다. 호출자가 첫 방문 깊이를 따로 정한다."""
+        return self._marks.get(key)
+
+    def set_watermark(self, key, iso):
+        """훑기 완료 시각 기록. 뒤로 돌리지 않는다 — 시계가 흔들려도 이미 본
+        구간을 다시 보는 건 낭비일 뿐이지만, 앞당기면 그 사이가 유실된다."""
+        if not key or not iso:
+            return
+        cur = self._marks.get(key)
+        if cur and str(iso) <= cur:
+            return
+        self._marks[key] = str(iso)
+        self._since_write += 1
+        if self._since_write >= self.save_every:
+            self._since_write = 0
+            self._write()
+
+    def forget_stale(self, keys):
+        """설정에서 사라진 (조건,지역)의 기록을 버린다. 안 버리면 파일이
+        영원히 커지고, 조건을 지웠다 되살릴 때 낡은 워터마크로 구멍이 난다."""
+        live = set(keys)
+        drop = [k for k in self._marks if k not in live]
+        for k in drop:
+            del self._marks[k]
+        gone = [k for k in self._done if k not in live]
+        for k in gone:
+            self._done.discard(k)
+        if drop or gone:
+            self._write()
+        return len(drop) + len(gone)
 
     def _write(self):
         try:
@@ -134,8 +221,8 @@ class _RegionCursor:
             os.makedirs(d, exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"pass": self.passes, "done": sorted(self._done)}, f,
-                          ensure_ascii=False)
+                json.dump({"pass": self.passes, "done": sorted(self._done),
+                           "marks": self._marks}, f, ensure_ascii=False)
             os.replace(tmp, self.path)
         except Exception as e:
             self._log(f"[커서] 저장 실패(진행은 계속): {str(e)[:80]}")
@@ -403,6 +490,8 @@ class SweepEngine:
                 reset_app_fallback_notices()   # 사이클마다 폴백 경고를 최소 1회 다시 크게
                 # 커서는 (조건, 지역) 쌍 단위다. 조건마다 전 지역을 돌기 때문에
                 # 지역만으로 기억하면 첫 조건이 끝낸 지역을 나머지 조건이 건너뛴다.
+                cycle_started = time.monotonic()
+                cycle_requests = 0
                 _pairs = [_ckey(c, r) for c in conditions for r in regions]
                 _pending = set(cursor.order(_pairs))
                 # ── 계정 안정화: 사이클마다 계정 라운드로빈 + 그 계정 고정프록시(없으면 KR네이티브) ──
@@ -493,6 +582,15 @@ class SweepEngine:
                                 f"수집 {len(filtered)} · 신규 {new}"
                                 + (f" · 변동 {chg}" if chg else "")
                                 + f"  (누적 신규 {total_new})")
+                            if cstats.get("stop_before_unapplied") is not None:
+                                # 앱API 가 죽어 웹크롤로 떨어진 지역이다. 웹 결과에는
+                                # 정지 규칙이 안 걸렸으므로 '이 시각 이후 전부'가
+                                # 아니다. 워터마크를 올리면 그 구간이 영영 빈다.
+                                self._log(
+                                    f"⚠️ [{reg}] 정지 규칙 미적용(웹크롤 폴백) — "
+                                    "이 지역은 다음 사이클에 같은 구간을 다시 훑는다")
+                            elif not cstats.get("missed"):
+                                cursor.set_watermark(_ckey(_cond, reg), visit_iso)
                             if not cstats.get("missed"):
                                 # 이 지역은 이번 패스에서 **끝났다**. 사이클이 중간에
                                 # 죽어도 다음 실행이 여기부터 이어간다.
@@ -513,13 +611,22 @@ class SweepEngine:
                         f"[레인] {n_lanes}개 병렬 (프록시 {len(cur_proxies)}개"
                         + (f", 레인당 IP {len(cur_proxies)//n_lanes}개 전용)"
                            if n_lanes > 1 else " — 1레인 순차)"))
+                    # 이번 방문의 기준 시각. 최신순 + 정지 규칙이라 이 시각 이후에
+                    # 올라온 것은 다음 방문에서 반드시 보인다. 지역이 끝나면
+                    # 워터마크를 여기로 올린다(수집이 온전했을 때만).
+                    visit_iso = _now_iso()
+                    first_iso = _iso_ago(FIRST_VISIT_WINDOW_MIN)
+                    region_payload = [
+                        {"in": r,
+                         "stop_before": cursor.watermark(_ckey(cond, r)) or first_iso}
+                        for r in cond_regions]
                     self._status(
                         f"사이클 {cycle} · [0/{len(cond_regions)}] "
                         f"'{cond['keyword']}' 수집 중… (레인 {n_lanes})")
                     try:
                         _, lsm = collect_lanes(
                             cond["keyword"],
-                            [{"in": r} for r in cond_regions],
+                            region_payload,
                             proxies=lane_proxies or None,
                             lanes=n_lanes,
                             only_on_sale=True,
@@ -527,7 +634,11 @@ class SweepEngine:
                             should_stop=lambda: self._stop,
                             rest_range=(gmin, gmax),
                             on_result=on_result,
+                            # 최신순이라야 정지 규칙이 성립한다. 관련도 정렬에서는
+                            # 최근 1시간 신규의 1페이지 재현율이 15% 뿐이었다.
+                            sort_option=cfg.get("sort_option", SORT_RECENT),
                         )
+                        cycle_requests += int(lsm.get("requests") or 0)
                         if lsm.get("skipped"):
                             self._log(f"[중단] 미처리 지역 {lsm['skipped']}개")
                         if lsm.get("app_api_fallbacks"):
@@ -559,6 +670,24 @@ class SweepEngine:
                         self._log(f"[커버리지] '{cond['keyword']}' 전 구간 확인 완료")
                 if self._stop:
                     break
+                # 사이클 1회를 실제로 돌아 봤으니 이 설정이 수렴하는지 말할 수 있다.
+                # 짐작이 아니라 방금 관측한 처리량으로 판정한다.
+                cyc_dt = time.monotonic() - cycle_started
+                if cyc_dt > 0 and cycle_requests > 0:
+                    rps = cycle_requests / cyc_dt
+                    cap = sweep_capacity(rps)
+                    load = len(regions) * len(conditions)
+                    self._log(
+                        f"[처리량] 요청 {cycle_requests}건 / {cyc_dt:.0f}s = "
+                        f"{rps:.1f} req/s · 이 속도로 감당 가능한 (지역x조건) "
+                        f"{cap:,.0f} · 현재 설정 {load:,}")
+                    if load > cap:
+                        self._log(
+                            f"⚠️ [수렴 불가] 현재 설정이 감당치를 {load / cap:.1f}배 "
+                            f"넘습니다. 이대로면 사이클이 갈수록 길어지고 뒤쪽 지역은 "
+                            f"사실상 방문되지 않습니다. 조건 {len(conditions)}개 기준 "
+                            f"지역을 {cap / max(1, len(conditions)):,.0f}개 이하로 줄이거나 "
+                            f"레인·프록시를 늘리세요.")
                 d = self._rest(rmin, rmax)
                 self._log(f"[휴식] {d:.0f}s")
         except Exception:

@@ -68,6 +68,8 @@ class AppSource:
                        proxy: str | None = None,
                        proxies=None, access_token=None,
                        should_stop: Callable[[], bool] | None = None,
+                       sort_option: str | None = None,
+                       stop_before=None,
                        **_ignored) -> tuple[list, dict]:
         """웹 collect_region 과 같은 형태. region_in 은 '역삼동-6035' → 뒤 숫자가 regionId.
 
@@ -87,6 +89,11 @@ class AppSource:
         (명품 억제 → '샤넬' 0건), 그 죽은 IP 가 다음 지역에서 또 뽑힌다.
         stabilize(레인당 고정 IP 1개)면 그 사이클 전 지역이 웹크롤로 떨어진다.
         재시도까지 실패하면 예외를 그대로 올려 adaptive 가 웹크롤로 폴백한다(안전망 유지).
+
+        sort_option / stop_before 는 app_api.collect 로 그대로 관통한다(기본 None =
+        종전 동작). 잘못된 조합(RECENT 아닌데 stop_before)은 collect 가 첫 요청 **전에**
+        ValueError 를 던지므로 여기서 다시 검사하지 않는다 — 검사를 두 군데 두면
+        허용값 목록이 갈라진다.
         """
         region_id = region_in.rsplit("-", 1)[-1] if "-" in region_in else region_in
         lat, lon = self._coords(region_id)
@@ -95,12 +102,13 @@ class AppSource:
         def _run(p):
             docs, st = collect(self.cfg, keyword, region_id, lat, lon,
                                max_pages=self.max_pages, should_stop=should_stop,
-                               proxy=p)
+                               proxy=p, sort_option=sort_option, stop_before=stop_before)
             if st.get("stopped_by") == "token":
                 if self._try_refresh() and not (should_stop and should_stop()):
                     docs, st = collect(self.cfg, keyword, region_id, lat, lon,
                                        max_pages=self.max_pages, should_stop=should_stop,
-                                       proxy=p)
+                                       proxy=p, sort_option=sort_option,
+                                       stop_before=stop_before)
             return docs, st
 
         try:
@@ -126,6 +134,10 @@ class AppSource:
             "stopped_by": st.get("stopped_by"),
             "token_expired": st.get("stopped_by") == "token",
             "proxy": use_proxy,
+            # 이 결과가 어떤 정렬로 나왔는지 / 정지 규칙이 실제로 걸렸는지.
+            # 상위가 '이 시각 이후는 전부 봤다'를 사후 확인할 수 있어야 한다.
+            "sort_option": st.get("sort_option"),
+            "stopped_by_stop_before": st.get("stopped_by") == "stop_before",
             # 웹 소스와 키를 맞춰 모니터가 동일 코드로 처리.
             # saturated/splits 가 빠지면 collect_lanes 의 st["saturated"] 가
             # KeyError 로 레인을 통째로 죽인다(앱API 성공 시에도).

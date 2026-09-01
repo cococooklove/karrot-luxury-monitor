@@ -212,6 +212,106 @@ ck("따라서 다음 실행이 그 지역을 다시 돈다",
    set(_RegionCursor(CUR2).order([SE._ckey(cond2, r) for r in REGIONS[:4]]))
    == {SE._ckey(cond2, r) for r in dirty})
 
+print("\n=== 11. 워터마크 원장 ===")
+# 최신순은 publishedAt 내림차순으로 단조라, 지난 방문 시각까지만 파면 된다.
+# 그 시각을 (조건,지역)마다 남긴다.
+WM = os.path.join(tmp, "wm.json")
+c11 = _RegionCursor(WM)
+k = SE._ckey({"keyword": "샤넬"}, "동1-1")
+ck("처음엔 워터마크가 없다", c11.watermark(k) is None)
+c11.set_watermark(k, "2026-09-01T00:00:00Z")
+c11.flush()
+ck("기록 후 읽힌다", _RegionCursor(WM).watermark(k) == "2026-09-01T00:00:00Z")
+c12 = _RegionCursor(WM)
+c12.set_watermark(k, "2026-08-31T00:00:00Z")      # 과거로 되돌리기 시도
+ck("워터마크는 뒤로 가지 않는다", c12.watermark(k) == "2026-09-01T00:00:00Z",
+   "앞당기면 그 사이가 유실된다")
+c12.set_watermark(k, "2026-09-01T12:00:00Z")
+ck("앞으로는 간다", c12.watermark(k) == "2026-09-01T12:00:00Z")
+
+c12.set_watermark(SE._ckey({"keyword": "없앨키워드"}, "동9-9"), "2026-09-01T00:00:00Z")
+c12.flush()
+dropped = c12.forget_stale([k])
+ck("설정에서 사라진 키는 버린다", dropped >= 1 and c12.watermark(k) is not None,
+   f"{dropped}건 정리")
+
+print("\n=== 12. 수렴 판정 산수 ===")
+# 사이클당 요청 = 지역 x 조건 x (주기 / 페이지폭). 사이클이 주기 안에 끝나야 하므로
+# 주기가 약분되고 '지역 x 조건 = 페이지폭(초) x 초당요청수' 가 남는다.
+ck("13 req/s 면 약 1.8만", 17000 < SE.sweep_capacity(13) < 19000,
+   f"{SE.sweep_capacity(13):,.0f}")
+ck("처리량에 비례한다", SE.sweep_capacity(26) == SE.sweep_capacity(13) * 2)
+ck("페이지폭 실측값이 상수로 있다", 20 <= SE.PAGE_SPAN_MIN <= 26,
+   f"{SE.PAGE_SPAN_MIN}분")
+ck("이상한 입력에도 안 죽는다", SE.sweep_capacity(None) == 0.0)
+# 실서버 설정(동 6537 x 브랜드 20)이 감당치를 넘는다는 것 자체를 고정한다.
+ck("6537동x20브랜드는 13 req/s 로 수렴 불가",
+   6537 * 20 > SE.sweep_capacity(13),
+   f"{6537 * 20:,} > {SE.sweep_capacity(13):,.0f}")
+
+print("\n=== 13. 엔진이 최신순 + 지역별 정지 규칙으로 부른다 ===")
+CUR3 = os.path.join(tmp, "wm_engine.json")
+DB3 = os.path.join(tmp, "seen3.db")
+seen_kwargs = {}
+
+
+def capture_lanes(keyword, regions, **kw):
+    seen_kwargs["sort_option"] = kw.get("sort_option")
+    seen_kwargs["regions"] = list(regions)
+    on_result = kw.get("on_result")
+    for i, r in enumerate(regions):
+        st = {"requests": 1, "saturated": False, "missed": []}
+        if i == 1:
+            # 이 지역은 앱API 가 죽어 웹크롤로 떨어졌다 — 정지 규칙 미적용
+            st["stop_before_unapplied"] = r.get("stop_before")
+        if on_result:
+            on_result(r, [], st)
+    return [], {"regions": len(regions), "requests": len(regions), "skipped": 0}
+
+
+def run_engine(cur_fp):
+    eng = SE.SweepEngine({"keyword": "샤넬", "scope": "regions",
+                          "regions": REGIONS[:3], "db_path": DB3,
+                          "cursor_fp": cur_fp, "rest_min": 10, "rest_max": 10})
+    _o = SE.collect_lanes
+    try:
+        def once(*a, **kw):
+            out = capture_lanes(*a, **kw)
+            eng.stop()
+            return out
+        SE.collect_lanes = once
+        eng.run()
+    finally:
+        SE.collect_lanes = _o
+
+
+run_engine(CUR3)
+ck("최신순으로 부른다", seen_kwargs.get("sort_option") == SE.SORT_RECENT,
+   f"{seen_kwargs.get('sort_option')}")
+ck("지역마다 stop_before 를 실어 보낸다",
+   all(isinstance(r, dict) and r.get("stop_before") for r in seen_kwargs["regions"]),
+   f"{seen_kwargs['regions'][0]}")
+ck("첫 방문은 최근 구간만 본다(끝까지 파지 않는다)",
+   SE.FIRST_VISIT_WINDOW_MIN > 0 and seen_kwargs["regions"][0]["stop_before"] < SE._now_iso(),
+   f"창 {SE.FIRST_VISIT_WINDOW_MIN:.0f}분")
+
+marks = json.load(open(CUR3, encoding="utf-8")).get("marks", {})
+c13 = {"keyword": "샤넬"}
+ck("정상 지역은 워터마크가 선다",
+   SE._ckey(c13, REGIONS[0]) in marks and SE._ckey(c13, REGIONS[2]) in marks,
+   f"{len(marks)}건")
+ck("웹크롤로 떨어진 지역은 워터마크를 안 올린다",
+   SE._ckey(c13, REGIONS[1]) not in marks,
+   "올리면 그 구간이 영영 빈다")
+
+# 2회차: 선 워터마크가 그대로 stop_before 로 들어가야 한다
+prev = marks[SE._ckey(c13, REGIONS[0])]
+seen_kwargs.clear()
+run_engine(CUR3)
+sb = {r["in"]: r["stop_before"] for r in seen_kwargs["regions"]}
+ck("2회차는 지난 방문 시각부터 훑는다", sb[REGIONS[0]] == prev, f"{sb[REGIONS[0]]}")
+ck("워터마크 없던 지역은 여전히 첫 방문 창", sb[REGIONS[1]] != prev)
+
 bad = [n for n, ok in R if not ok]
 print(f"\n{len(R) - len(bad)}/{len(R)} PASS")
 if bad:
