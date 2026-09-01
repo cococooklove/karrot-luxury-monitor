@@ -982,6 +982,27 @@ class _HarvestThread(QtCore.QThread):
         self._stop = True
 
 
+class _AddInstanceThread(QtCore.QThread):
+    """`.ldbk` 복원 워커. 복원은 몇 분 걸리므로 GUI 스레드에서 돌리면 안 된다."""
+    line = QtCore.pyqtSignal(str)
+    done = QtCore.pyqtSignal(object, object)     # (결과 dict|None, 오류문자열|None)
+
+    def __init__(self, ldbk, name):
+        super().__init__()
+        self.ldbk = ldbk
+        self.name = name
+
+    def run(self):
+        try:
+            import ld_instance
+            res = ld_instance.add_from_ldbk(
+                self.ldbk, self.name, app_dir=".", log=self.line.emit)
+        except Exception as e:
+            self.done.emit(None, f"{type(e).__name__}: {str(e)[:200]}")
+            return
+        self.done.emit(res, None)
+
+
 class _ThumbThread(QtCore.QThread):
     """매칭 썸네일 비동기 다운로드 — GUI 프리징 없이 사진 로드.
     jobs: [(QTableWidgetItem, url)]. 다운로드 후 (item, bytes) emit → 메인서 setIcon."""
@@ -1616,6 +1637,90 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(APP_QSS)                  # 전역 스타일
         self._apply_card_shadows()
 
+    def on_emul_add_clicked(self):
+        """계정 추가 — .ldbk 를 골라 새 인스턴스로 복원한다.
+
+        복원은 파일이 GB 단위라 몇 분 걸린다. GUI 스레드에서 돌리면 창이 얼어
+        사용자가 죽은 줄 알고 강제 종료한다 — 강제 종료는 인스턴스 설정을 잘라
+        영구 고장을 만든 전례가 있다. 그래서 워커 스레드에서 돌리고 진행 상황을
+        그대로 보여준다."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("계정 추가")
+        dlg.resize(680, 460)
+        v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
+        v.addWidget(QtWidgets.QLabel(
+            "계정 백업(.ldbk)을 새 에뮬레이터 인스턴스로 복원합니다.\n"
+            "복원한 인스턴스가 곧 계정입니다 — 프로그램에 토큰을 직접 넣는 방법은"
+            " 당근이 막아 두었습니다.", parent=dlg))
+
+        form = QtWidgets.QFormLayout()
+        pathEdit = QtWidgets.QLineEdit(dlg)
+        pathEdit.setPlaceholderText("계정 백업 파일 (.ldbk)")
+        pickBtn = QtWidgets.QPushButton("파일 선택", dlg)
+        row = QtWidgets.QHBoxLayout(); row.addWidget(pathEdit, 1); row.addWidget(pickBtn)
+        rowW = QtWidgets.QWidget(); rowW.setLayout(row)
+        nameEdit = QtWidgets.QLineEdit(dlg)
+        nameEdit.setPlaceholderText("이 계정을 알아볼 이름 (예: 강남1)")
+        form.addRow("백업 파일", rowW)
+        form.addRow("이름", nameEdit)
+        v.addLayout(form)
+
+        logView = QtWidgets.QPlainTextEdit(dlg)
+        logView.setReadOnly(True)
+        v.addWidget(logView, 1)
+
+        btns = QtWidgets.QHBoxLayout()
+        runBtn = QtWidgets.QPushButton("복원 시작", dlg); runBtn.setObjectName("startBtn")
+        closeBtn = QtWidgets.QPushButton("닫기", dlg)
+        btns.addStretch(1); btns.addWidget(closeBtn); btns.addWidget(runBtn)
+        v.addLayout(btns)
+
+        def pick():
+            p, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dlg, "계정 백업 선택", "", "LDPlayer 백업 (*.ldbk)")
+            if p:
+                pathEdit.setText(p)
+                if not nameEdit.text().strip():
+                    import os as _os
+                    nameEdit.setText(_os.path.splitext(_os.path.basename(p))[0])
+        pickBtn.clicked.connect(pick)
+
+        state = {"thread": None}
+
+        def done(res, err):
+            runBtn.setEnabled(True)
+            if err:
+                logView.appendPlainText("실패: " + err)
+                QtWidgets.QMessageBox.warning(dlg, "실패", err)
+                return
+            msg = (f"인덱스 {res['index']} 로 복원했습니다.\n\n"
+                   "다음 순서:\n"
+                   "1) 원격 접속(RDP)한 상태에서 그 인스턴스를 켜세요.\n"
+                   "   에뮬레이터는 화면이 붙어 있어야 켜집니다.\n"
+                   "2) 앱이 로그인돼 있으면 잠시 후 계정 목록에 자동으로 나타납니다.\n"
+                   "3) 매물 감시 → 계정+프록시 에서 프록시를 지정하세요.")
+            if res.get("warnings"):
+                msg += "\n\n확인 필요:\n· " + "\n· ".join(res["warnings"])
+            QtWidgets.QMessageBox.information(dlg, "복원 완료", msg)
+            self._emul_scan()
+
+        def run():
+            ldbk = pathEdit.text().strip()
+            name = nameEdit.text().strip()
+            if not ldbk or not name:
+                QtWidgets.QMessageBox.warning(dlg, "확인", "백업 파일과 이름을 정하세요.")
+                return
+            runBtn.setEnabled(False)
+            logView.appendPlainText("시작합니다. 파일이 커서 몇 분 걸립니다…")
+            th = _AddInstanceThread(ldbk, name)
+            state["thread"] = th                 # GC 로 스레드가 사라지지 않게 붙든다
+            th.line.connect(logView.appendPlainText)
+            th.done.connect(done)
+            th.start()
+        runBtn.clicked.connect(run)
+        closeBtn.clicked.connect(dlg.accept)
+        dlg.exec()
+
     def _apply_card_shadows(self):
         """그룹박스 카드에 소프트 그림자(토스 입체감). QSS box-shadow 대체."""
         from PyQt6.QtWidgets import QGraphicsDropShadowEffect
@@ -1675,10 +1780,19 @@ class MainWindow(QMainWindow):
         self.emulRefreshBtn.clicked.connect(lambda: self._emul_scan())
         self.emulCloseAllBtn = QtWidgets.QPushButton("열린 탭 모두 닫기", w)
         self.emulCloseAllBtn.clicked.connect(self._emul_detach_all)
-        for b in (self.emulRefreshBtn, self.emulCloseAllBtn):
+        # 계정을 늘리는 유일한 경로다. '계정+프록시' 의 refresh 토큰 추가는 당근
+        # WAF 이전 경로라 지금은 동작하지 않는다 — 토큰은 에뮬 안 앱에서만 나온다.
+        self.emulAddBtn = QtWidgets.QPushButton("계정 추가(.ldbk 복원)", w)
+        self.emulAddBtn.setObjectName("startBtn")
+        self.emulAddBtn.setToolTip(
+            "계정 백업(.ldbk)을 새 에뮬레이터 인스턴스로 복원합니다.\n"
+            "복원한 인스턴스가 곧 계정입니다.")
+        self.emulAddBtn.clicked.connect(self.on_emul_add_clicked)
+        for b in (self.emulRefreshBtn, self.emulCloseAllBtn, self.emulAddBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
         bar.addWidget(self.emulStatus); bar.addStretch(1)
+        bar.addWidget(self.emulAddBtn)
         bar.addWidget(self.emulStowChk); bar.addWidget(self.emulRefreshBtn)
         bar.addWidget(self.emulCloseAllBtn)
         v.addLayout(bar)
