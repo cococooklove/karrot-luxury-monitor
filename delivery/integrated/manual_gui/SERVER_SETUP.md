@@ -242,6 +242,36 @@ $u="$x\karrot-luxury-monitor-master\delivery\integrated\manual_gui\update.ps1"
 - `--watchdog` 이 앱을 되살리므로 정지는 재시도 루프로 한다. 그래도 안 죽으면
   중단하고 살아 있는 PID 를 찍는다 — 폴더가 잠긴 채 반쯤 지워지는 것보다 낫다.
 
+## 5-4b. SSH 는 키 전용이다 (2026-09-01)
+
+운영 서버 IP 가 공개 저장소 히스토리에 남아 있고 그건 지울 수 없다(포크·캐시·API).
+노출을 되돌릴 수 없으니 노출의 **가치**를 없앴다 — 공개된 IP + `Administrator` 는
+그대로 사전공격 대상이라 비밀번호 인증을 닫았다.
+
+`C:\ProgramData\ssh\sshd_config` (원본은 `.bak-20260901`):
+
+```
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+```
+
+**`Match` 블록보다 앞에 넣어야 한다.** 뒤에 적으면 그 블록 안에서만 유효하다.
+
+확인:
+```bash
+ssh -v -i ~/.ssh/karrot_server $KARROT_HOST exit 2>&1 | grep "Authentications that can continue"
+# publickey,keyboard-interactive  ← password 가 없으면 적용된 것
+```
+
+되돌리려면 백업을 복원하고 `Restart-Service sshd`. 잠기더라도 RDP(1098)가 복구
+경로다 — 포트는 22·1098 만 열려 있다(445·139·3389·5555·5985·2222 차단 확인).
+
+적용 스크립트는 `C:\Users\Administrator\harden_sshd.ps1` 에 둔다. **`C:\karrot`
+밖이어야 한다** — 배포가 그 폴더를 통째로 갈아끼우므로 안에 두면 지워진다.
+그리고 PowerShell 5.1 은 BOM 없는 UTF-8 을 ANSI 로 읽으므로 **BOM 을 붙여** 저장한다
+(한글 주석이 깨져 파서 오류가 난다).
+
 ## 5-5. 원격 실행 (tools/srv.sh)
 
 맥에서 서버 PowerShell 을 직접 부린다. 키는 `~/.ssh/karrot_server` 가 기본이다.
