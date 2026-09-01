@@ -16,13 +16,18 @@
   - 검색 반복 전 휴식 n~n초 랜덤, 검색 전 토큰 갱신(옵션)
 """
 import itertools
+import json
+import os
 import time
 import sqlite3
 import traceback
 from datetime import datetime, timedelta
 
 from daangn_ext.search_filters import KeywordRule
-from daangn_ext.adaptive import collect_region, collect_lanes, load_dong_regions
+from daangn_ext.adaptive import (collect_region, collect_lanes, load_dong_regions,
+                                 get_app_fallback_logger,
+                                 reset_app_fallback_notices,
+                                 set_app_fallback_logger)
 from daangn_ext import throttle
 from daangn_ext.rest_scheduler import _rand_between
 from daangn.notify import TelegramSender, SheetWriter
@@ -72,6 +77,101 @@ class _P:
 
 def _noop(*_a, **_k):
     pass
+
+
+def _ckey(cond, region) -> str:
+    """커서 키. 키워드만으로는 부족하다.
+
+    엑셀 조건표는 같은 키워드를 추가어·제외어·가격대만 달리해 여러 줄로 넣을 수
+    있다(load_conditions_from_excel 은 키워드로 중복제거하지 않는다). 키가
+    키워드뿐이면 조건 A 가 끝낸 지역을 조건 B 가 통째로 건너뛴다 — B 는 그 지역을
+    한 번도 본 적이 없는데도.
+    """
+    parts = [str(cond.get("keyword") or ""), str(cond.get("extra") or ""),
+             str(cond.get("exclude") or ""), str(cond.get("min") or ""),
+             str(cond.get("max") or ""), str(cond.get("days") or "")]
+    return "\x1f".join(parts) + "\t" + str(region)
+
+
+class _RegionCursor:
+    """지역 순회 진행 상황을 디스크에 남겨, 사이클이 완주하지 못해도 이어가게 한다.
+
+    왜 필요한가: 실서버 설정은 `sweep_regions` 에 동 6537개가 들어 있고 한 지역을
+    최대 200페이지까지 판다. 사이클 1회는 몇 달짜리인데 앱은 배포·재부팅으로
+    훨씬 자주 재시작된다. 재시작마다 목록 앞에서 다시 시작하면 앞쪽 지역만
+    영원히 반복 수집되고 뒤쪽 지역은 **단 한 번도 방문되지 않는다**. 그래서
+    '이번 패스에 이미 끝낸 지역'을 기억해 두고, 다음 실행은 남은 것부터 돈다.
+
+    한 바퀴를 다 돌면 기록을 비우고 새 패스를 시작한다 — 커버리지는 느릴 수 있어도
+    공평해진다. 이 파일이 없거나 깨져도 그냥 처음부터 도는 것으로 퇴화할 뿐,
+    스윕을 막지 않는다(수집이 커서보다 중요하다).
+    """
+
+    def __init__(self, path="./data/sweep_cursor.json", log=None, save_every=20):
+        self.path = path
+        self._log = log or (lambda m: None)
+        self.save_every = max(1, int(save_every))
+        self.passes = 1
+        self._done = set()
+        self._since_write = 0
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            self.passes = int(d.get("pass") or 1)
+            self._done = set(d.get("done") or [])
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            # 깨진 커서 때문에 스윕을 멈추지 않는다. 처음부터 돌 뿐이다.
+            self._log(f"[커서] 읽기 실패 — 처음부터 돕니다: {str(e)[:80]}")
+
+    def _write(self):
+        try:
+            d = os.path.dirname(os.path.abspath(self.path))
+            os.makedirs(d, exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"pass": self.passes, "done": sorted(self._done)}, f,
+                          ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            self._log(f"[커서] 저장 실패(진행은 계속): {str(e)[:80]}")
+
+    def order(self, regions):
+        """이번에 돌 지역 = 이 패스에서 아직 안 끝낸 것들.
+
+        설정이 바뀌어 목록에서 사라진 지역은 기록에 남아 있어도 무시된다.
+        남은 게 없으면 한 바퀴를 다 돈 것이므로 기록을 비우고 새 패스를 연다."""
+        regions = list(regions or [])
+        pending = [r for r in regions if r not in self._done]
+        if regions and not pending:
+            self.passes += 1
+            self._done.clear()
+            self._since_write = 0
+            self._write()
+            self._log(f"[커서] 전 지역 1회 순회 완료 — 패스 {self.passes} 시작")
+            return regions
+        if len(pending) != len(regions):
+            self._log(f"[커서] 패스 {self.passes} 이어서 — 남은 지역 "
+                      f"{len(pending)}/{len(regions)}개")
+        return pending
+
+    def mark(self, region):
+        """지역 하나 완료. 매번 쓰면 IO 가 과해 save_every 마다 모아 쓴다."""
+        if not region or region in self._done:
+            return
+        self._done.add(region)
+        self._since_write += 1
+        if self._since_write >= self.save_every:
+            self._since_write = 0
+            self._write()
+
+    def flush(self):
+        self._since_write = 0
+        self._write()
 
 
 class SweepEngine:
@@ -283,14 +383,28 @@ class SweepEngine:
         gmin, gmax = _clamp_range(cfg.get("gap_min", 0.4), cfg.get("gap_max", 1.2),
                                   REGION_GAP_MIN, REGION_GAP_MAX, 0.4, 1.2)
         cur_proxies = self._live_proxies()
+        # 앱API→웹크롤 폴백 경고를 운영자 로그로 끌어온다. 이걸 안 걸면 폴백이
+        # stderr 로만 나가 GUI/서버 로그에서는 '매물 없음'과 구분이 안 된다.
+        _prev_fallback_log = get_app_fallback_logger()
+        set_app_fallback_logger(self._log)
         self._log(f"[시작] 조건 {len(conditions)}개, 프록시 {len(cur_proxies)}개")
         self._log(f"[휴식] 사이클 {rmin:.0f}~{rmax:.0f}s · 지역 간 {gmin:.1f}~{gmax:.1f}s")
         try:
             regions = self._regions()
             self._log(f"[지역] {len(regions)}개 (동 단위)")
+            # 지역이 많으면 사이클은 사실상 완주하지 않는다(실서버 6537동 × 최대
+            # 200페이지). 그때 재시작마다 앞에서 다시 시작하면 뒤쪽 지역은 영영
+            # 방문되지 않으므로, 끝낸 지역을 기억해 다음 실행이 이어받는다.
+            cursor = _RegionCursor(cfg.get("cursor_fp", "./data/sweep_cursor.json"),
+                                   log=self._log)
             cycle = 0
             while not self._stop:
                 cycle += 1
+                reset_app_fallback_notices()   # 사이클마다 폴백 경고를 최소 1회 다시 크게
+                # 커서는 (조건, 지역) 쌍 단위다. 조건마다 전 지역을 돌기 때문에
+                # 지역만으로 기억하면 첫 조건이 끝낸 지역을 나머지 조건이 건너뛴다.
+                _pairs = [_ckey(c, r) for c in conditions for r in regions]
+                _pending = set(cursor.order(_pairs))
                 # ── 계정 안정화: 사이클마다 계정 라운드로빈 + 그 계정 고정프록시(없으면 KR네이티브) ──
                 cur_code = None
                 sched_proxies = None      # sched 활성 시 이 사이클의 프록시(계정 바인딩). None=네이티브
@@ -335,6 +449,12 @@ class SweepEngine:
                 for cond in conditions:
                     if self._stop:
                         break
+                    # 이 조건에서 아직 안 끝낸 지역만. 커서가 비어 있으면(새 패스)
+                    # 전 지역이 그대로 들어온다.
+                    cond_regions = [r for r in regions if _ckey(cond, r) in _pending]
+                    if not cond_regions:
+                        self._log(f"[커서] '{cond['keyword']}' 이 패스에서 완료 — 건너뜀")
+                        continue
                     rule = KeywordRule(required=[cond["keyword"]],
                                        extra=cond.get("extra") or None, extra_mode="and",
                                        exclude=cond.get("exclude") or None)
@@ -344,7 +464,7 @@ class SweepEngine:
                     n_lanes = self._plan_lanes(lane_proxies or [])
 
                     def on_result(reg_d, arts, cstats, _cond=cond, _rule=rule,
-                                  _lanes=n_lanes):
+                                  _lanes=n_lanes, _regs=cond_regions):
                         """지역 하나가 끝나는 즉시 호출. 레인들이 동시에 부르지만
                         collect_lanes 가 락으로 직렬화해 준다. 중복제거·알림을 여기서
                         스트리밍 처리 — 전국이 끝날 때까지 기다리지 않는다."""
@@ -369,15 +489,24 @@ class SweepEngine:
                             done += 1
                             total_new += new
                             self._log(
-                                f"[{done}/{len(regions)}] {reg} · '{_cond['keyword']}' "
+                                f"[{done}/{len(_regs)}] {reg} · '{_cond['keyword']}' "
                                 f"수집 {len(filtered)} · 신규 {new}"
                                 + (f" · 변동 {chg}" if chg else "")
                                 + f"  (누적 신규 {total_new})")
+                            if not cstats.get("missed"):
+                                # 이 지역은 이번 패스에서 **끝났다**. 사이클이 중간에
+                                # 죽어도 다음 실행이 여기부터 이어간다.
+                                #
+                                # 확인 못 한 가격구간이 남았으면 찍지 않는다 — 바로 위에서
+                                # "다음 사이클에 재시도"라고 알려 놓고 커서가 걸러버리면
+                                # 그 지역은 이 패스가 끝날 때까지(6537동 스코프에서는 몇 달)
+                                # 영영 불완전한 채로 남는다.
+                                cursor.mark(_ckey(_cond, reg))
                         except Exception as e:
                             done += 1
-                            self._log(f"[{done}/{len(regions)}] {reg} 오류: {e}")
+                            self._log(f"[{done}/{len(_regs)}] {reg} 오류: {e}")
                         self._status(
-                            f"사이클 {cycle} · [{done}/{len(regions)}] "
+                            f"사이클 {cycle} · [{done}/{len(_regs)}] "
                             f"'{_cond['keyword']}' 수집 중… (레인 {_lanes})")
 
                     self._log(
@@ -385,12 +514,12 @@ class SweepEngine:
                         + (f", 레인당 IP {len(cur_proxies)//n_lanes}개 전용)"
                            if n_lanes > 1 else " — 1레인 순차)"))
                     self._status(
-                        f"사이클 {cycle} · [0/{len(regions)}] "
+                        f"사이클 {cycle} · [0/{len(cond_regions)}] "
                         f"'{cond['keyword']}' 수집 중… (레인 {n_lanes})")
                     try:
                         _, lsm = collect_lanes(
                             cond["keyword"],
-                            [{"in": r} for r in regions],
+                            [{"in": r} for r in cond_regions],
                             proxies=lane_proxies or None,
                             lanes=n_lanes,
                             only_on_sale=True,
@@ -401,19 +530,31 @@ class SweepEngine:
                         )
                         if lsm.get("skipped"):
                             self._log(f"[중단] 미처리 지역 {lsm['skipped']}개")
+                        if lsm.get("app_api_fallbacks"):
+                            # 웹크롤은 명품 브랜드를 억제한다('샤넬' 0건). 이 줄이 없으면
+                            # 토큰만료·앱API 변경이 '매물 없음'으로만 보인다.
+                            self._log(
+                                f"🚨 [앱API 장애] '{cond['keyword']}' 지역 "
+                                f"{lsm['app_api_fallbacks']}/{len(cond_regions)}개가 웹크롤로 폴백 "
+                                f"({lsm.get('app_api_failed')}) — 명품 키워드는 0건으로 보일 수 있음. "
+                                "토큰/헤더(data/config.json) 확인 필요")
                         # 안정화: 이 계정의 일일 사용량 기록(≈지역수). 차단신호면 격리.
                         if sched and cur_code:
-                            sched.note(cur_code, len(regions))
+                            sched.note(cur_code, len(cond_regions))
                             if missed_total:
                                 sched.note_block(cur_code)
                     except Exception as e:
                         self._log(f"[수집 오류] {type(e).__name__}: {e}")
+                    finally:
+                        # 조건 하나가 끝나거나 죽어도 여기까지의 진행은 남긴다 —
+                        # 안 그러면 크래시할 때마다 같은 지역을 다시 판다.
+                        cursor.flush()
 
                     # 조건 1개 끝 — 커버리지 요약(누락을 눈에 보이게)
                     if missed_total:
                         self._log(
                             f"[커버리지] '{cond['keyword']}' 확인 실패 구간 {missed_total}개 "
-                            f"/ 지역 {len(regions)}개 — 이번 사이클 결과는 불완전할 수 있음")
+                            f"/ 지역 {len(cond_regions)}개 — 이번 사이클 결과는 불완전할 수 있음")
                     else:
                         self._log(f"[커버리지] '{cond['keyword']}' 전 구간 확인 완료")
                 if self._stop:
@@ -423,6 +564,13 @@ class SweepEngine:
         except Exception:
             self._log("[치명오류]\n" + traceback.format_exc())
         finally:
+            # 전역 로거를 원래대로. 스윕이 끝난 뒤에도 우리 _log 를 물고 있으면,
+            # GUI 가 AutoMonitor 를 정리한 뒤에는 수신자 0인 시그널로 흘러들어가
+            # 폴백 경고가 stderr 로도 안 남는다(고치려던 것보다 나빠진다).
+            try:
+                set_app_fallback_logger(_prev_fallback_log)
+            except Exception:
+                pass
             # 정지 시에도 대기 중인 알림은 마저 보낸다(유실 방지, 최대 30초)
             try:
                 self._flush_notify(final=True)
