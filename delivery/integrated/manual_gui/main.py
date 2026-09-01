@@ -1377,8 +1377,26 @@ class MainWindow(QMainWindow):
         "최대가격": "maximum",
     }
 
-    def __init__(self):
+    # 클라 요구(2026-09-01): 수동 검색과 '매물 감시+에뮬레이터'를 **별도 프로그램**으로
+    # 쓰고 싶다. 코드를 둘로 복제하면 두 벌을 따로 고쳐야 하고, 실제로 갈라야 하는
+    # 것은 화면과 백그라운드 기동뿐이다. 그래서 한 코드베이스에 실행 모드를 둔다.
+    #
+    # 상태는 파일로 공유된다. 수동 검색은 앱API 토큰이 있어야 하는데 그 토큰을
+    # 만드는 건 감시 프로그램의 수확기다 — 둘 다 accounts.json 을 본다. 동시에
+    # 쓰는 건 이미 프로세스 간 파일락이 막고 있다(ld_autoharvest._file_lock).
+    MODES = {
+        "all":    {"tabs": ("manual", "alert", "emul"), "background": True,
+                   "title": ""},
+        "manual": {"tabs": ("manual",), "background": False,
+                   "title": "수동 검색"},
+        "watch":  {"tabs": ("alert", "emul"), "background": True,
+                   "title": "매물 감시"},
+    }
+
+    def __init__(self, mode="all"):
         super().__init__()
+        self.mode = mode if mode in self.MODES else "all"
+        self._mode_cfg = self.MODES[self.mode]
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
@@ -1399,7 +1417,15 @@ class MainWindow(QMainWindow):
         self._setup_tabs()
         self.sb.showMessage("프로그램이 시작되었습니다.")
 
-        # 백그라운드 자동 수확 — 토큰 항상 신선 유지(수동 불필요). 20분 주기.
+        if self._mode_cfg["title"]:
+            self.setWindowTitle(self.windowTitle() + " — " + self._mode_cfg["title"])
+        # 수동 검색 전용 모드는 수확기를 돌리지 않는다. 두 프로그램이 동시에
+        # 함대를 깨우면 같은 인스턴스에 force-stop 이 겹치고, 수동 쪽은 토큰을
+        # 소비만 하면 되지 만들 필요가 없다(감시 프로그램이 만든 것을 파일로 읽는다).
+        if not self._mode_cfg["background"]:
+            self._harvest_thread = None
+            return
+        # 백그라운드 자동 수확 — 토큰 항상 신선 유지(수동 불필요).
         self._harvest_thread = _HarvestThread(accounts="./accounts.json")
         self._harvest_thread.tick.connect(self._on_harvest_tick)
         self._harvest_thread.start()
@@ -1439,12 +1465,23 @@ class MainWindow(QMainWindow):
         """기존 수동 UI 를 탭으로 감싸고 자동 탭 추가. 스크롤로 어떤 창크기든 다 보이게."""
         self.takeCentralWidget()                    # 기존 중앙위젯 버림(위젯은 재사용)
         self.tabs = QtWidgets.QTabWidget(self)
-        self.tabs.addTab(self._scroll(self._build_manual_tab()), "수동 검색")
+        # 위젯은 **모드와 무관하게 전부 만든다**. 화면에 안 띄울 뿐이다 —
+        # 여기저기서 서로의 위젯을 참조하고 있어 안 만들면 AttributeError 로
+        # 흩어진다. 에뮬 탭은 생성 시 창을 붙이지 않으므로(탭 활성화 때 붙는다)
+        # 안 보이는 채로 만들어 두는 비용이 없다.
+        show = self._mode_cfg["tabs"]
+        manual_w = self._scroll(self._build_manual_tab())
         # 검색 스윕 스레드 핸들 — 탭은 없어졌지만 엔진은 라우터가 부린다.
         self.auto_monitor = None
-        self.tabs.addTab(self._scroll(self._build_alert_tab()), "매물 감시")
+        alert_w = self._scroll(self._build_alert_tab())
         # 에뮬레이터는 실제 창을 끼워넣으므로 스크롤로 감싸지 않는다(크기 = 탭 영역).
-        self.tabs.addTab(self._build_emul_tab(), "에뮬레이터")
+        emul_w = self._build_emul_tab()
+        if "manual" in show:
+            self.tabs.addTab(manual_w, "수동 검색")
+        if "alert" in show:
+            self.tabs.addTab(alert_w, "매물 감시")
+        if "emul" in show:
+            self.tabs.addTab(emul_w, "에뮬레이터")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         # 명품 브랜드 헤더(골드 워드마크) + 탭
         central = QtWidgets.QWidget()
@@ -2164,7 +2201,8 @@ class MainWindow(QMainWindow):
             pass
         self.alertCrashChk.toggled.connect(self._on_crash_toggle)
         if self.alertAutoStartChk.isChecked():
-            QtCore.QTimer.singleShot(8000, self._autostart_poll)
+            if getattr(self, "_mode_cfg", {}).get("background", True):
+                QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
         return w
 
@@ -5102,11 +5140,16 @@ def _chdir_app_dir():
 
 
 def _child_cmd():
-    """자식(실제 앱) 실행 커맨드 — frozen exe면 exe --child, 개발이면 python main.py --child."""
+    """자식(실제 앱) 실행 커맨드 — frozen exe면 exe --child, 개발이면 python main.py --child.
+
+    실행 모드(--manual / --watch)는 **그대로 물려준다**. 안 물려주면 워치독이
+    한 번 재시작하는 순간 수동 전용으로 띄운 프로그램이 3탭짜리로 되살아나고,
+    수확기까지 같이 도는 프로그램이 두 개가 된다(함대를 동시에 깨운다)."""
     import sys as _sys
+    mode = [a for a in _sys.argv if a in ("--manual", "--watch")][:1]
     if getattr(_sys, "frozen", False):
-        return [_sys.executable, "--child"]
-    return [_sys.executable, os.path.abspath(__file__), "--child"]
+        return [_sys.executable, "--child"] + mode
+    return [_sys.executable, os.path.abspath(__file__), "--child"] + mode
 
 
 def _run_watchdog():
@@ -5144,7 +5187,15 @@ def _run_app():
         _f.setHintingPreference(QtGui.QFont.HintingPreference.PreferFullHinting)
         _f.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
         app.setFont(_f)
-        window = MainWindow()
+        # 클라가 두 프로그램으로 쓴다: --manual(수동 검색) / --watch(매물 감시+에뮬).
+        # 인자가 없으면 종전대로 3탭 전부 — 기존 바로가기·작업이 그대로 돈다.
+        import sys as _sysarg
+        _mode = "all"
+        if "--manual" in _sysarg.argv:
+            _mode = "manual"
+        elif "--watch" in _sysarg.argv:
+            _mode = "watch"
+        window = MainWindow(_mode)
         # closeEvent 를 안 거치는 종료(세션 로그아웃 등)에서도 임베드 창은 되돌린다.
         app.aboutToQuit.connect(window._emul_shutdown)
         window.show()

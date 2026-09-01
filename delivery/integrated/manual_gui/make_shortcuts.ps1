@@ -3,8 +3,13 @@
 #   powershell -ExecutionPolicy Bypass -File make_shortcuts.ps1
 #
 # 만드는 것:
-#   "당근 명품 모니터"        → 창 있는 GUI (pythonw, 콘솔 안 뜸)
+#   "당근 명품 모니터"        → 창 있는 GUI 3탭 전부 (pythonw, 콘솔 안 뜸)
+#   "당근 수동 검색"          → 수동 검색만 (--manual). 수확·폴링 안 함
+#   "당근 매물 감시"          → 매물 감시 + 에뮬레이터 (--watch). 수확·폴링은 여기서만
 #   "당근 모니터 (서버·무인)" → 헤드리스, 콘솔에 로그가 계속 찍힘
+#
+# 수동과 감시를 동시에 띄워도 된다 — 수확기는 감시 쪽만 돌리고, accounts.json
+# 동시 쓰기는 프로세스 간 파일락이 막는다.
 #
 # 두 바로가기 모두 작업 디렉토리를 이 폴더로 고정한다. main.py 가 OUT.json 을
 # cwd 상대경로로 열기 때문에, 작업 디렉토리가 다르면 지역 트리 로딩이 실패한다.
@@ -86,8 +91,16 @@ function New-Shortcut($name, $fallback, $exe, $argline, $desc) {
 }
 
 if (-not $NoGui) {
+    # 클라 요구(2026-09-01): 수동 검색과 '매물 감시+에뮬레이터'를 별도 프로그램으로.
+    # 한 코드베이스에 실행 모드만 다르다(main.py --manual / --watch). 상태는
+    # accounts.json 으로 공유되고, 동시 쓰기는 프로세스 간 파일락이 막는다.
+    # 종전 3탭짜리 아이콘도 남긴다 — 기존 사용자가 쓰던 것이 사라지면 안 된다.
     New-Shortcut "당근 명품 모니터" "Karrot Monitor (GUI)" $pyw "main.py" `
         "매물 감시 GUI — 키워드 등록, 매물 표, 가격 추적"
+    New-Shortcut "당근 수동 검색" "Karrot Manual Search" $pyw "main.py --manual" `
+        "수동 검색 전용 — 감시·수확은 돌지 않는다"
+    New-Shortcut "당근 매물 감시" "Karrot Watch" $pyw "main.py --watch" `
+        "매물 감시 + 에뮬레이터 — 토큰 수확과 폴링은 이쪽만 한다"
 }
 if (-not $NoHeadless) {
     New-Shortcut "당근 모니터 (서버·무인)" "Karrot Monitor (headless)" $py "main.py --headless" `

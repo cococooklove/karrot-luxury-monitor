@@ -19,6 +19,28 @@ $ErrorActionPreference = "Stop"
 function Log($m){ Write-Host ("[update] " + $m) -ForegroundColor Cyan }
 function Fail($m){ Write-Host ("[update][FAIL] " + $m) -ForegroundColor Red; exit 1 }
 
+# 앱을 내려놓은 **뒤에** 실패하면 반드시 다시 켜고 끝낸다.
+#
+# 실제로 이걸로 운영이 멈췄다(2026-09-01): 누군가 C:\karrot 안에 작업 폴더를 잡고
+# 있어 install.ps1 이 폴더를 못 옮겼고, update 는 "앱은 정지 상태입니다 — 고친 뒤
+# 다시 실행하세요"만 남기고 끝났다. 사람이 볼 때까지 감시가 죽어 있었다.
+# install.ps1 은 실패 시 **아무것도 지우지 않았다**고 보장하므로 기존 설치는
+# 멀쩡하다 — 되살리는 게 항상 옳다. 배포가 실패하는 것과 운영이 멈추는 것은
+# 전혀 다른 사건이고, 후자를 배포 실패의 부작용으로 만들면 안 된다.
+function FailAndRestart($m){
+  Write-Host "[update] 실패했지만 기존 설치는 그대로입니다 — 앱을 다시 켭니다" -ForegroundColor Yellow
+  try {
+    Start-ScheduledTask -TaskName karrotgui -ErrorAction Stop
+    Start-Sleep -Seconds 5
+    $alive = @(Get-Process pythonw -ErrorAction SilentlyContinue)
+    if ($alive.Count) { Write-Host ("[update]   재기동 확인: pythonw x" + $alive.Count) }
+    else { Write-Host "[update]   재기동했지만 프로세스가 안 보입니다 — RDP 세션 확인 필요" -ForegroundColor Yellow }
+  } catch {
+    Write-Host ("[update]   재기동 실패: " + $_.Exception.Message) -ForegroundColor Red
+  }
+  Fail $m
+}
+
 $appRel = "delivery\integrated\manual_gui"
 $app = "C:\karrot\$appRel"
 
@@ -105,10 +127,16 @@ Log "2/4 최신 ZIP 내려받기"
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 $zip = "$env:TEMP\karrot_upd_$ts.zip"
 $ext = "$env:TEMP\karrot_upd_$ts"
-Invoke-WebRequest "https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip" -OutFile $zip
-Expand-Archive $zip -DestinationPath $ext -Force
+# 이 단계도 앱을 내려놓은 뒤다 — 네트워크가 흔들려 여기서 죽으면 감시가 멈춘 채
+# 남는다. 그래서 던지지 말고 되살리고 끝낸다.
+try {
+  Invoke-WebRequest "https://github.com/cococooklove/karrot-luxury-monitor/archive/refs/heads/master.zip" -OutFile $zip
+  Expand-Archive $zip -DestinationPath $ext -Force
+} catch {
+  FailAndRestart ("ZIP 내려받기/풀기 실패: " + $_.Exception.Message)
+}
 $ins = Join-Path $ext "karrot-luxury-monitor-master\$appRel\install.ps1"
-if (-not (Test-Path $ins)) { Fail ("ZIP 안에 install.ps1 이 없습니다: " + $ins) }
+if (-not (Test-Path $ins)) { FailAndRestart ("ZIP 안에 install.ps1 이 없습니다: " + $ins) }
 
 # 3) 재설치 — 설정 백업/복원·의존성·스모크·자동실행 등록은 전부 install.ps1 몫이다.
 Log "3/4 install.ps1 실행"
@@ -116,10 +144,10 @@ $global:LASTEXITCODE = 0
 try {
   & $ins -ZipPath $zip
 } catch {
-  Fail ("install.ps1 오류: " + $_.Exception.Message + "`n앱은 정지 상태입니다 — 고친 뒤 다시 실행하세요.")
+  FailAndRestart ("install.ps1 오류: " + $_.Exception.Message)
 }
 if ($LASTEXITCODE -ne 0) {
-  Fail ("install.ps1 실패 (exit " + $LASTEXITCODE + "). 앱은 정지 상태입니다 — 고친 뒤 다시 실행하세요.")
+  FailAndRestart ("install.ps1 실패 (exit " + $LASTEXITCODE + ")")
 }
 
 # 4) 앱 재기동. install.ps1 이 karrotgui 작업을 다시 등록해 두었고, 이 작업에는
