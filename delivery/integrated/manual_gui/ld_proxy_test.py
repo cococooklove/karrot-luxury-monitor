@@ -110,6 +110,11 @@ ck("안 먹은 설정을 성공으로 보고하지 않는다",
 ck("왜 실패했는지 남긴다", any("반영 안 됨" in m for m in logs), str(logs))
 LP._adb = fake_adb
 
+# 아래 구간들은 '어떤 프록시를 어느 인덱스에 거는가'만 본다. 살아있음 확인은
+# 실제 소켓을 여는 일이라 여기서는 통과시키고, 9번에서 따로 다룬다.
+_real_alive = LP.proxy_alive
+LP.proxy_alive = lambda px, timeout=None, log=None: True
+
 print("\n=== 4. 계정 프록시를 그 계정이 있는 인스턴스에 건다 ===")
 state.clear(); calls.clear()
 write_accounts([
@@ -153,7 +158,32 @@ res = LP.apply_account_proxies(ACC, console="c",
 ck("릴레이 주소로 걸린다", res.get(1) == "127.0.0.1:19001",
    LP.get_guest_proxy("c", 1))
 
-print("\n=== 9. 없는/깨진 accounts.json 에도 안 죽는다 ===")
+print("\n=== 9. 죽은 프록시는 걸지 않는다 ===")
+# 죽은 프록시를 걸면 그 인스턴스가 통째로 오프라인이 되고 토큰이 멈춘다.
+# 지역이 안 맞는 것보다 계정이 죽는 게 나쁘다.
+state.clear()
+write_accounts([{"code": "452902", "proxy": "http://3.3.3.3:7000"}])
+LP.proxy_alive = lambda px, timeout=None, log=None: False
+logs = []
+res = LP.apply_account_proxies(ACC, console="c", log=logs.append)
+ck("죽었으면 안 건다", res.get(1) is None and LP.get_guest_proxy("c", 1) is None)
+ck("이유를 남긴다", any("응답하지 않아" in m for m in logs), str(logs[:2]))
+
+# 이미 걸려 있던 프록시가 죽으면 직결로 되돌린다
+state[1] = "3.3.3.3:7000"
+LP.apply_account_proxies(ACC, console="c", log=None)
+ck("죽은 프록시는 걷어낸다", LP.get_guest_proxy("c", 1) is None)
+
+LP.proxy_alive = lambda px, timeout=None, log=None: True
+state.clear()
+res = LP.apply_account_proxies(ACC, console="c", log=None)
+ck("살아 있으면 건다", res.get(1) == "3.3.3.3:7000")
+
+state.clear()
+res = LP.apply_account_proxies(ACC, console="c", check_alive=False, log=None)
+ck("확인을 끌 수도 있다", res.get(1) == "3.3.3.3:7000")
+
+print("\n=== 10. 없는/깨진 accounts.json 에도 안 죽는다 ===")
 logs = []
 r9 = LP.apply_account_proxies(os.path.join(tmp, "없는파일.json"), console="c",
                               log=logs.append)

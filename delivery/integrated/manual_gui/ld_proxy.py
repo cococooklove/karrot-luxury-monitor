@@ -135,6 +135,43 @@ def index_code(console, index):
     return str(code) if code else None
 
 
+# 프록시가 살아 있는지 볼 때 두드리는 곳. 당근 도메인을 쓰지 않는다 — 헬스체크
+# 트래픽까지 계정 IP 로 당근에 꽂을 이유가 없다.
+PROBE_URL = "https://www.gstatic.com/generate_204"
+PROBE_TIMEOUT = 8
+
+
+def proxy_alive(proxy_url, timeout=PROBE_TIMEOUT, log=None):
+    """이 프록시로 실제로 나갈 수 있나. 호스트에서 확인한다.
+
+    게스트에서 확인하지 않는 이유: 안드로이드 셸에 curl/wget 이 있으리라는 보장이
+    없고, ping 은 프록시를 안 탄다. 어차피 릴레이도 호스트에서 도므로 여기서 재는
+    게 같은 경로다.
+
+    **죽은 프록시를 거는 건 그 인스턴스를 통째로 오프라인으로 만드는 것과 같다.**
+    그러면 토큰이 갱신되지 않고, 그 계정은 조용히 죽는다. 그래서 걸기 전에 본다.
+    확인할 수단이 없으면(요청 라이브러리 없음) True 로 본다 — 확인 못 한다는
+    이유로 프록시를 못 쓰게 만들 이유는 없다.
+    """
+    log = log or (lambda m: None)
+    if not proxy_url:
+        return True
+    try:
+        from curl_cffi import requests as _rq
+    except Exception:
+        return True
+    try:
+        r = _rq.get(PROBE_URL, proxy=proxy_url, timeout=timeout,
+                    impersonate="safari_ios")
+    except Exception as e:
+        log(f"[프록시] 죽은 프록시로 판단({type(e).__name__}: {str(e)[:60]})")
+        return False
+    if r.status_code >= 400:
+        log(f"[프록시] 프록시가 HTTP {r.status_code} 로 거절")
+        return False
+    return True
+
+
 def _account_proxies(accounts_fp):
     """{code: proxy} — 프록시가 지정된 계정만."""
     import json
@@ -153,7 +190,8 @@ def _account_proxies(accounts_fp):
 
 
 def apply_account_proxies(accounts_fp="./accounts.json", console=None,
-                          app_dir=".", endpoint_for=None, log=None):
+                          app_dir=".", endpoint_for=None, log=None,
+                          check_alive=True):
     """계정에 지정된 프록시를 그 계정이 있는 인스턴스의 전역 프록시로 건다.
 
     `endpoint_for(proxy_url)` 는 게스트에 넣을 "host:port" 를 돌려주는 함수다.
@@ -198,6 +236,15 @@ def apply_account_proxies(accounts_fp="./accounts.json", console=None,
         else:
             ep = px.split("//", 1)[-1]
         if not ep:
+            out[idx] = None
+            continue
+        # 죽은 프록시를 걸면 그 인스턴스가 통째로 오프라인이 되고 토큰이 멈춘다.
+        # 직결로 두는 편이 낫다 — 지역이 안 맞는 것보다 계정이 죽는 게 나쁘다.
+        if check_alive and not proxy_alive(px, log=log):
+            log(f"[프록시] index {idx}({code[:6]}): 프록시가 응답하지 않아"
+                " 걸지 않습니다(직결 유지)")
+            if get_guest_proxy(console, idx):
+                set_guest_proxy(console, idx, None, log=log)
             out[idx] = None
             continue
         if get_guest_proxy(console, idx) == ep:
