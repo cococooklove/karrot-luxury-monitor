@@ -82,10 +82,11 @@ def mirror_app_keywords_to_sweep(router, queue, log=None, enabled=False) -> int:
     app / sweep 중 **하나로만** 배정한다. 브랜드 20개가 앱 슬롯(상한 30)에 다
     들어가면 스윕 큐가 비고, 스윕은 아예 뜨지 않는다 — 실서버가 정확히 그 상태였다.
 
-    그래서 '둘 다' 를 가능하게 한다. 다만 **기본은 꺼져 있다**: 켜면 설정된 지역
-    전체의 매물이 알림으로 나가므로(서울 806동이면 물량이 계정 알림과 비교가 안
-    된다) 받는 사람이 감당할지는 운영 판단이다. `alert_settings.json` 의
-    `sweep_mirror_app` 로 켠다.
+    그래서 '둘 다' 를 가능하게 한다. 예전에는 기본으로 꺼 두었다 — 켜면 설정된
+    지역 전체의 매물이 그대로 알림이 됐기 때문이다(키워드가 조건 없이 등록돼
+    있어 매칭이 곧 알림이었다). 조건표가 생기고 스윕도 그것을 보게 된 뒤로 그
+    이유가 사라졌다. 이제 **조건표가 있으면 켠다** — 조건이 물량을 정한다.
+    `alert_settings.json` 의 `sweep_mirror_app` 로 강제로 끌 수 있다.
     """
     _log = log or (lambda m: None)
     if not enabled or router is None or queue is None:
@@ -451,9 +452,29 @@ def sweep_conditions(entries, extra=None, exclude=None,
 # 헤드리스가 같은 이름으로 읽는다. 이름이 갈리면 서버는 GUI 설정을 못 본다.
 SWEEP_NATIONWIDE_KEY = "sweep_nationwide"
 
-# 지역을 아무도 고르지 않았을 때 쓸 기본 지역: 명품 밀집 5개 구(약 166동).
-DEFAULT_SWEEP_SIDO = "서울특별시"
-DEFAULT_SWEEP_GU = ("용산구", "성동구", "서초구", "강남구", "송파구")
+
+def sweep_mirror_enabled(settings, n_rules) -> bool:
+    """앱 알림 키워드를 스윕에도 돌릴지.
+
+    조건표가 있으면 켠다. 조건표가 물량을 정하므로 예전처럼 '켜면 지역 전체가
+    쏟아진다'가 성립하지 않는다. 조건표가 없으면 켜지 않는다 — 그때는 매칭이
+    곧 알림이라 서울·경기 물량이 그대로 나간다.
+
+    설정에 값을 적어 두면 그것이 이긴다(운영자 강제 스위치)."""
+    forced = (settings or {}).get("sweep_mirror_app")
+    if forced is not None:
+        return bool(forced)
+    return int(n_rules or 0) > 0
+
+# 지역을 아무도 고르지 않았을 때 훑을 기본 범위: 서울 + 경기(동 1,857곳).
+# 명품 물량이 여기 몰려 있고, 실측 수렴 한계(지역 × 조건 ≈ 17,900) 안에서
+# 브랜드 9개까지 소화한다. 그 위는 sweep_scope_for 가 구·시 단위로 낮춘다.
+DEFAULT_SWEEP_SIDO = ("서울특별시", "경기도")
+
+# 한 사이클이 주기 안에 끝나는 상한. 2026-09-01 실측: 최신순 한 페이지가
+# 23분을 덮고 토큰·IP 하나로 13 req/s 가 나온다 → 1380초 × 13 ≈ 17,900.
+# 넘기면 사이클이 주기보다 길어져 뒤로 밀린다(클라에게는 '알림이 늦다'로만 보인다).
+SWEEP_BUDGET = 17900
 
 
 def default_sweep_regions(out_json="./OUT.json"):
@@ -479,9 +500,7 @@ def default_sweep_regions(out_json="./OUT.json"):
         return []
     out, seen = [], set()
     for block in data or []:
-        if block.get("name1") != DEFAULT_SWEEP_SIDO:
-            continue
-        if block.get("name2") not in DEFAULT_SWEEP_GU:
+        if block.get("name1") not in DEFAULT_SWEEP_SIDO:
             continue
         for loc in block.get("locations") or []:
             code = f"{loc.get('name')}-{loc.get('id')}"
@@ -492,7 +511,50 @@ def default_sweep_regions(out_json="./OUT.json"):
     return out
 
 
-def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None):
+def default_sweep_regions_coarse(out_json="./OUT.json"):
+    """같은 범위를 구·시 단위로 줄인 목록(서울 25 + 경기 44 ≈ 69곳).
+
+    반경 검색이 인접 동을 함께 물어오므로 구 단위여도 커버는 남는다. 조건이
+    늘어 동 단위가 예산을 넘길 때 여기로 내려온다 — 조용히 뒤처지는 것보다
+    성기게라도 한 바퀴를 도는 편이 낫다."""
+    import json as _json
+    try:
+        with open(out_json, encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception:
+        return []
+    out, seen = [], set()
+    for block in data or []:
+        if block.get("name1") not in DEFAULT_SWEEP_SIDO:
+            continue
+        locs = block.get("locations") or []
+        if not locs:
+            continue
+        loc = locs[0]                       # 그 구·시의 대표 지점 하나
+        code = f"{loc.get('name')}-{loc.get('id')}"
+        if code not in seen:
+            seen.add(code)
+            out.append(code)
+    return out
+
+
+def sweep_fit_budget(regions, n_conditions, coarse, log=None):
+    """지역 × 조건이 예산을 넘으면 성긴 목록으로 내린다 → (지역, 낮췄는지).
+
+    넘긴 채로 두면 사이클이 주기보다 길어져 뒤로 밀리기만 한다. 그때 화면에
+    보이는 증상은 '알림이 늦다' 뿐이라 원인을 못 찾는다."""
+    n = max(1, int(n_conditions or 1))
+    if len(regions) * n <= SWEEP_BUDGET or not coarse:
+        return regions, False
+    if log:
+        log(f"[지역 훑기] 조건 {n}개 × {len(regions)}곳 = {len(regions) * n:,} —"
+            f" 한 사이클 예산({SWEEP_BUDGET:,})을 넘어 구·시 단위 {len(coarse)}곳으로"
+            f" 낮춰 돕니다 ({len(coarse) * n:,}건)")
+    return coarse, True
+
+
+def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None,
+                    n_conditions=1):
     """지역 설정 → cfg 의 scope/regions. GUI(_auto_cfg_base)·헤드리스 공용.
 
     셋 중 하나다:
@@ -508,9 +570,12 @@ def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None):
     if nationwide:
         return {"scope": "nationwide"}
     dflt = default_sweep_regions(out_json)
-    if log:
-        log(f"[검색스윕] 지역 미지정 — 기본 지역 {len(dflt)}곳으로 제한합니다"
-            " (전국을 훑으려면 '전국 훑기'를 켜세요)")
+    # 조건이 늘면 같은 지역 수라도 사이클이 길어진다. 예산을 넘으면 성긴
+    # 목록으로 내린다 — 조용히 뒤처지는 것보다 한 바퀴를 도는 편이 낫다.
+    dflt, lowered = sweep_fit_budget(
+        dflt, n_conditions, default_sweep_regions_coarse(out_json), log=log)
+    if log and not lowered:
+        log(f"[지역 훑기] 기본 범위 서울·경기 {len(dflt)}곳")
     return {"scope": "regions", "regions": dflt}
 
 
@@ -769,7 +834,8 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
     }
     cfg.update(sweep_scope_for(s.get("sweep_regions"),
                                s.get(SWEEP_NATIONWIDE_KEY),
-                               out_json=cfg["out_json"], log=log))
+                               out_json=cfg["out_json"], log=log,
+                               n_conditions=len(entries or []) or 1))
     cfg["conditions"] = sweep_conditions(
         entries,
         extra=[x for x in (s.get("sweep_extra") or []) if x],
@@ -2274,9 +2340,19 @@ class MainWindow(QMainWindow):
         # qt_ 로 시작하는 이름은 Qt 내부 위젯(콤보 팝업 스크롤 컨테이너 등)이라
         # 건드리지 않는다 — 표시 여부를 Qt 가 스스로 관리한다.
         on = bool(on)
+
+        def _kept_hidden(wdg):
+            """조건표로 옮겨간 옛 입력들 — 살려는 두되 화면에는 안 낸다."""
+            while wdg is not None and wdg is not box:
+                if getattr(wdg, "_keepHidden", False):
+                    return True
+                wdg = wdg.parentWidget()
+            return False
+
         for c in box.findChildren(QtWidgets.QWidget):
-            if not c.objectName().startswith("qt_"):
-                c.setVisible(on)
+            if c.objectName().startswith("qt_") or _kept_hidden(c):
+                continue
+            c.setVisible(on)
         # 체크박스 대신 화살표로 접힘을 알린다 — 설정을 켜고 끄는 것이 아니라
         # 펼치고 접는 것이므로 체크 표시는 뜻이 어긋난다.
         if box.objectName() == "sectionBox":
@@ -3772,7 +3848,9 @@ class MainWindow(QMainWindow):
                     log(f"[라우터] 승격 실패: {str(e)[:80]}")
                 mirror_app_keywords_to_sweep(
                     self._router, self._sweep_queue, log=log,
-                    enabled=bool(self._load_alert_settings().get("sweep_mirror_app")))
+                    enabled=sweep_mirror_enabled(
+                        self._load_alert_settings(),
+                        len(self._alert_rules.get())))
             return self._alert_fleet().poll_all(log=log, core_only=co)
 
         self._alert_run(job, self._match_populate, label="자동 폴링 중")
@@ -3908,10 +3986,12 @@ class MainWindow(QMainWindow):
 
         여기 있는 값은 앱 슬롯에 못 들어가 스윕으로 밀린 키워드에만 쓰인다.
         키워드 입력은 없다 — 라우터가 정한다."""
-        box = QtWidgets.QGroupBox("검색 스윕")
+        box = QtWidgets.QGroupBox("지역 훑기")
         gv = QtWidgets.QVBoxLayout(box)
         gv.addWidget(QtWidgets.QLabel(
-            "앱 알림 슬롯이 찼을 때 이 조건으로 지역을 훑어 커버한다."))
+            "앱 알림은 계정이 인증한 동네만 봅니다. 그 밖 지역은 여기서 훑습니다.\n"
+            "무엇을 알릴지는 [감시 조건] 의 엑셀이 정합니다 — 여기서는 어디를,"
+            " 얼마나 빠르게만 정합니다."))
 
         # 지역 — 미선택이면 기본 지역(명품 밀집 5개 구). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
@@ -3927,13 +4007,13 @@ class MainWindow(QMainWindow):
         _dflt_n = len(default_sweep_regions("./OUT.json"))
         self.autoNationwide.setToolTip(
             "체크하면 전국 동 단위(약 6537곳)를 훑는다. 한 사이클 요청 =\n"
-            "지역 수 × 키워드 수라 계정 하루 상한(300)을 금방 넘긴다 —\n"
+            "지역 수 × 조건 수라 계정 하루 상한(300)을 금방 넘긴다 —\n"
             f"끄면 위에서 고른 지역만, 아무것도 안 고르면 기본 {_dflt_n}동"
-            "(용산·성동·서초·강남·송파)만 훑는다.")
+            "(서울·경기)만 훑는다.")
         _nw = QtWidgets.QHBoxLayout(); _nw.setSpacing(8)
         _nw.addWidget(self.autoNationwide)
         _nw.addWidget(QtWidgets.QLabel(
-            f"미선택 시 기본 {_dflt_n}동만 훑습니다(전국 아님)"))
+            f"미선택 시 기본 서울·경기 {_dflt_n}동을 훑습니다(전국 아님)"))
         _nw.addStretch(1)
         gv.addLayout(_nw)
 
@@ -3978,16 +4058,22 @@ class MainWindow(QMainWindow):
             "LDPlayer 실행+로그인 상태면 별도 설정 불필요.")
         self._notify = self._load_notify()
 
-        s0 = QtWidgets.QHBoxLayout(); s0.setSpacing(8)
-        s0.addWidget(QtWidgets.QLabel("가격"))
-        s0.addWidget(self.autoMin); s0.addWidget(QtWidgets.QLabel("~")); s0.addWidget(self.autoMax)
-        s0.addStretch(1)
+        # 가격·추가·제외·끌올은 조건표가 정한다. 화면에 남겨 두면 적어도
+        # 아무 일이 안 일어나서 "적었는데 왜 안 걸리지"만 남는다. 위젯 자체는
+        # 살려 둔다 — 저장·복원과 옛 설정 파일이 이 값을 계속 쓴다.
+        self._sweepLegacy = QtWidgets.QWidget(box)
+        self._sweepLegacy._keepHidden = True
+        _lg = QtWidgets.QHBoxLayout(self._sweepLegacy)
+        _lg.setContentsMargins(0, 0, 0, 0)
+        for _w in (self.autoMin, self.autoMax, self.autoExtra,
+                   self.autoExclude, self.autoDays):
+            _lg.addWidget(_w)
+        self._sweepLegacy.setVisible(False)
+        gv.addWidget(self._sweepLegacy)
+
         s1 = QtWidgets.QHBoxLayout(); s1.setSpacing(8)
-        s1.addWidget(self.autoExtra, 1); s1.addWidget(self.autoExclude, 1)
-        s1.addSpacing(10); s1.addWidget(self.autoTokenRefresh)
+        s1.addWidget(self.autoTokenRefresh); s1.addStretch(1)
         s2 = QtWidgets.QHBoxLayout(); s2.setSpacing(8)
-        s2.addWidget(QtWidgets.QLabel("끌올")); s2.addWidget(self.autoDays); s2.addWidget(QtWidgets.QLabel("일 이내"))
-        s2.addSpacing(16)
         s2.addWidget(QtWidgets.QLabel("휴식")); s2.addWidget(self.autoRestMin)
         s2.addWidget(QtWidgets.QLabel("~")); s2.addWidget(self.autoRestMax); s2.addWidget(QtWidgets.QLabel("초"))
         s2.addSpacing(16)
@@ -3996,7 +4082,7 @@ class MainWindow(QMainWindow):
         s2.addSpacing(16)
         s2.addWidget(QtWidgets.QLabel("레인")); s2.addWidget(self.autoLanes)
         s2.addStretch(1)
-        gv.addLayout(s0); gv.addLayout(s1); gv.addLayout(s2)
+        gv.addLayout(s1); gv.addLayout(s2)
 
         # 액션 바 — 시작 버튼은 없다. 스윕은 감시 토글이 켜고 끈다.
         bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
@@ -4662,7 +4748,8 @@ class MainWindow(QMainWindow):
         cfg.update(sweep_scope_for(self._selected_auto_regions(),
                                    self.autoNationwide.isChecked(),
                                    out_json=cfg["out_json"],
-                                   log=self._alog))
+                                   log=self._alog,
+                                   n_conditions=len(self._queue_entries()) or 1))
         return cfg
 
     @staticmethod
@@ -6388,7 +6475,8 @@ def _run_headless():
                     log(f"[라우터] 승격 실패: {str(e)[:80]}")
                 mirror_app_keywords_to_sweep(
                     router, sweep_queue, log=log,
-                    enabled=bool(st.get("sweep_mirror_app")))
+                    enabled=sweep_mirror_enabled(
+                        st, len(load_alert_rules())))
             if sweep_runner is not None:
                 sweep_runner.resync()
             # 스윕 스레드가 넘긴 매물을 여기(폴링 스레드)서 워치리스트에 넣는다.

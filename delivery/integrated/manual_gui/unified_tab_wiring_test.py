@@ -161,8 +161,16 @@ if _win is not None:
        hasattr(_win, "advancedBox") and _win.advancedBox.isChecked() is False)
     if hasattr(_win, "advancedBox"):
         # qt_ 내부 위젯(콤보 팝업 스크롤 컨테이너 등)은 Qt 가 관리한다 — 제외.
+        def _kept_hidden(k):
+            """조건표로 옮겨간 옛 입력들 — 펼쳐도 안 보이는 게 맞다."""
+            while k is not None and k is not _win.advancedBox:
+                if getattr(k, "_keepHidden", False):
+                    return True
+                k = k.parentWidget()
+            return False
+
         _kids = [k for k in _win.advancedBox.findChildren(_QW.QWidget)
-                 if not k.objectName().startswith("qt_")]
+                 if not k.objectName().startswith("qt_") and not _kept_hidden(k)]
         # 체크 해제는 자식을 비활성화만 한다 — 실제로 접혔는지(숨겨졌는지) 본다.
         ck("고급 자식 숨김", _kids and all(k.isHidden() for k in _kids),
            f"{sum(1 for k in _kids if k.isHidden())}/{len(_kids)}")

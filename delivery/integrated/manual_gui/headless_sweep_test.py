@@ -419,9 +419,14 @@ try:
 except Exception:
     _nation = 0
 ck("전국 동 수를 읽었다", _nation > 1000, str(_nation))
-# 21배(6537 / daily_cap 300)가 문제였다 — 기본값은 전국의 극히 일부여야 한다.
-ck("기본 지역은 전국의 1/10 미만",
-   _nation and len(_dflt) * 10 < _nation, f"{len(_dflt)} vs {_nation}")
+# 기본값은 서울·경기다(명품 물량이 몰린 곳). 전국을 통째로 도는 일은 없어야
+# 하고, 조건 몇 개까지는 한 사이클 예산 안에 들어와야 한다.
+ck("기본 지역은 전국보다 훨씬 작다",
+   _nation and len(_dflt) < _nation / 2, f"{len(_dflt)} vs {_nation}")
+ck("기본 범위는 서울·경기",
+   set(m.DEFAULT_SWEEP_SIDO) == {"서울특별시", "경기도"}, str(m.DEFAULT_SWEEP_SIDO))
+ck("브랜드 하나는 예산 안에 넉넉히 들어온다",
+   len(_dflt) * 1 <= m.SWEEP_BUDGET, f"{len(_dflt)} / {m.SWEEP_BUDGET}")
 ck("OUT.json 이 없으면 빈 목록(전국 아님)",
    m.default_sweep_regions("./__없는파일__.json") == [])
 
@@ -437,7 +442,7 @@ ck("둘 다 아니면 기본 지역", _sc["scope"] == "regions" and _sc["regions
 _scl = []
 m.sweep_scope_for([], False, log=_scl.append)
 ck("기본으로 떨어지면 로그로 알린다",
-   _scl and "기본 지역" in _scl[0], str(_scl))
+   _scl and "기본 범위" in _scl[0], str(_scl))
 ck("OUT.json 도 없으면 빈 지역(전국으로 안 떨어짐)",
    m.sweep_scope_for([], False, out_json="./__없는파일__.json")
    == {"scope": "regions", "regions": []})
@@ -453,8 +458,23 @@ ck("헤드리스: 지역 지정이 전국 키를 이긴다",
 ck("전국 설정 키 이름", m.SWEEP_NATIONWIDE_KEY == "sweep_nationwide")
 _cfgl = []
 m.headless_sweep_cfg({}, E, {}, log=_cfgl.append)
-ck("헤드리스도 기본 범위를 로그로 알린다", any("기본 지역" in x for x in _cfgl),
+ck("헤드리스도 기본 범위를 로그로 알린다", any("기본 범위" in x for x in _cfgl),
    str(_cfgl))
+# 조건이 늘면 같은 지역 수라도 사이클이 길어진다 — 예산을 넘으면 구·시 단위로 내린다.
+_coarse = m.default_sweep_regions_coarse("./OUT.json")
+ck("구·시 단위 목록이 동 단위보다 훨씬 성기다",
+   0 < len(_coarse) < len(_dflt) / 5, f"{len(_coarse)} vs {len(_dflt)}")
+_fitl = []
+_kept, _low = m.sweep_fit_budget(_dflt, 1, _coarse, log=_fitl.append)
+ck("예산 안이면 그대로", _kept is _dflt and _low is False and not _fitl)
+_over = (m.SWEEP_BUDGET // len(_dflt)) + 1
+_kept2, _low2 = m.sweep_fit_budget(_dflt, _over, _coarse, log=_fitl.append)
+ck("예산 넘으면 구·시 단위로 내린다", _kept2 == _coarse and _low2 is True)
+ck("낮췄다는 사실을 로그로 알린다",
+   any("한 사이클 예산" in x for x in _fitl), str(_fitl))
+ck("조건 수가 범위 판정까지 간다",
+   len(m.headless_sweep_cfg({}, E, {})["regions"]) == len(_dflt),
+   "조건 2개 = 예산 안")
 # 범위 판정은 GUI 와 한 함수여야 한다 — 갈라지면 서버가 다른 범위를 돈다.
 ck("GUI cfg 가 공용 범위 판정 사용",
    "sweep_scope_for" in m.MainWindow._auto_cfg_base.__code__.co_names)
