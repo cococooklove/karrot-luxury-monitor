@@ -255,6 +255,12 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
     rules: list[AlertRule] = []
     errors: list[str] = []
     seen: set[tuple] = set()
+    # 브랜드를 첫 줄에만 적고 아래 줄은 비워 두는(또는 셀을 병합하는) 시트가
+    # 흔하다 — 병합 셀은 첫 칸만 값이 읽히고 나머지는 빈 칸으로 온다. 그 빈
+    # 칸을 제품명 첫 어절로 짐작하면 '트위스트'가 브랜드로 등록되고, 그 줄은
+    # '트위스트'만으로 매칭돼 남의 브랜드 매물까지 잡는다. 엑셀 관례대로
+    # 바로 위 브랜드를 이어받는다.
+    last_brand = ""
     # 행 번호는 엑셀에서 보이는 그대로여야 찾아갈 수 있다.
     for n, row in enumerate(rows[1:], start=head_row + 2):
         def cell(i):
@@ -262,6 +268,15 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
 
         brand = str(cell(i_brand) or "").strip()
         prod = str(cell(i_prod) or "").strip()
+        if i_brand is not None:
+            if brand:
+                last_brand = brand
+            elif prod:
+                if not last_brand:
+                    errors.append(f"{n}행 '{prod}': 위에 브랜드가 없어 이어받을 수"
+                                  " 없습니다 — 브랜드 칸을 채우세요 — 건너뜀")
+                    continue
+                brand = last_brand
         # '키워드' 한 열짜리 옛 시트와, '브랜드+제품명' 두 열짜리 새 시트를
         # 같은 규칙으로 읽는다. 매칭은 둘을 이어 붙인 말 전체로 한다.
         kw = str(cell(i_kw) or "").strip()
