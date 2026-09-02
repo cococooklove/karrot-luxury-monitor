@@ -47,7 +47,8 @@ ck("상한 도달을 한 번만 로그로 알린다",
    len([m for m in logs if "상한" in m]) == 1, str(logs))
 
 print("\n=== 3. 창이 지나면 다시 열리고, 눌린 건 요약된다 ===")
-s._window_start -= N.TG_CAP_WINDOW + 1        # 한 시간 지난 것처럼
+# 창은 같은 방을 쓰는 발신기끼리 공유한다(앱 알림 · 지역 훑기가 한 방으로 간다).
+N._CAP_WINDOWS[s._cap_key]["start"] -= N.TG_CAP_WINDOW + 1   # 한 시간 지난 것처럼
 s.enqueue("새 창 첫 건")
 joined = " ".join(s._q)
 ck("요약 줄이 들어간다", "보내지 않았습니다" in joined, joined[-80:])
@@ -75,6 +76,27 @@ print("\n=== 6. 기본 상한이 사람이 읽을 수 있는 수준 ===")
 ck("기본 상한이 있다", N.TG_HOURLY_CAP > 0, str(N.TG_HOURLY_CAP))
 ck("시간당 수백 건은 막힌다", N.TG_HOURLY_CAP <= 200, str(N.TG_HOURLY_CAP))
 ck("창은 1시간", N.TG_CAP_WINDOW == 3600.0)
+
+print("\n=== 6. 같은 방을 쓰는 발신기는 상한을 나눠 쓴다 ===")
+# 앱 알림과 지역 훑기가 각자 세면 받는 사람에게는 상한이 두 배가 된다.
+N._CAP_WINDOWS.clear()
+a = N.TelegramSender("tok", "chat", log=lambda m: None, hourly_cap=3)
+b = N.TelegramSender("tok", "chat", log=lambda m: None, hourly_cap=3)
+for _ in range(2):
+    a.enqueue("a")
+for _ in range(2):
+    b.enqueue("b")
+ck("둘이 합쳐 상한까지만", a.pending() + b.pending() == 3,
+   f"{a.pending()} + {b.pending()}")
+ck("넘긴 쪽이 눌린 건수를 센다", b._suppressed == 1, f"{b._suppressed}건")
+N._CAP_WINDOWS.clear()
+c = N.TelegramSender("tok", "다른방", log=lambda m: None, hourly_cap=3)
+d = N.TelegramSender("tok", "chat", log=lambda m: None, hourly_cap=3)
+for _ in range(3):
+    c.enqueue("c")
+d.enqueue("d")
+ck("방이 다르면 따로 센다", d.pending() == 1 and d._suppressed == 0,
+   f"{d.pending()} / {d._suppressed}")
 
 bad = [n for n, ok in R if not ok]
 print(f"\n{len(R) - len(bad)}/{len(R)} PASS")

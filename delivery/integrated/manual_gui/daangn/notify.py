@@ -26,6 +26,22 @@ TG_QUEUE_SOFT_CAP = 40       # 큐가 이만큼 쌓이면 호출측 flush 안 �
 TG_HOURLY_CAP = 120
 TG_CAP_WINDOW = 3600.0
 
+# 같은 방으로 보내는 발신기가 둘이다(앱 알림 경로 · 지역 훑기). 각자 세면
+# 상한이 사실상 두 배가 된다 — 받는 사람에게는 한 방이므로 창을 공유한다.
+# 키는 (토큰, 방) 이라 방이 다르면 따로 센다.
+_CAP_WINDOWS: dict = {}
+
+
+def match_line(keyword, title, price, region, source="", account="", url=""):
+    """신규 매물 알림 한 줄. 두 경로가 같은 모양이어야 한다.
+
+    예전에는 앱 알림과 지역 훑기가 각자 다른 문구를 썼다. 같은 제보인데
+    다르게 생겼고, 스윕 쪽에는 어느 조건에 걸렸는지도 없었다."""
+    price_s = f"{price:,}원" if isinstance(price, (int, float)) and price else (price or "-")
+    tail = " · ".join(x for x in (region or "-", source, account) if x)
+    return (f"🎯 [{keyword or ''}] {(title or '')[:50]}\n"
+            f"💰 {price_s} · 📍 {tail}\n{url or ''}")
+
 _TG_HINT = {
     400: "chat_id 가 잘못됐거나 메시지 형식 오류",
     401: "봇 토큰이 잘못됨",
@@ -58,8 +74,9 @@ class TelegramSender:
         self._fail_total = 0
         self._sent_total = 0
         self.hourly_cap = int(hourly_cap)
-        self._window_start = 0.0
-        self._window_sent = 0
+        # 창은 같은 방을 쓰는 발신기끼리 공유한다.
+        self._cap_key = (self.token, self.chat)
+        _CAP_WINDOWS.setdefault(self._cap_key, {"start": 0.0, "sent": 0})
         self._suppressed = 0          # 상한에 걸려 못 보낸 건수(요약해서 알린다)
         self._cap_told = False
 
@@ -72,8 +89,9 @@ class TelegramSender:
         """시간당 상한 안인가. 창이 지나면 새로 센다."""
         if self.hourly_cap <= 0:
             return True
+        win = _CAP_WINDOWS.setdefault(self._cap_key, {"start": 0.0, "sent": 0})
         now = time.time()
-        if now - self._window_start >= TG_CAP_WINDOW:
+        if now - win["start"] >= TG_CAP_WINDOW:
             # 창이 바뀐다. 직전 창에서 눌린 게 있으면 여기서 한 번 알린다.
             if self._suppressed:
                 self._q.append(
@@ -81,10 +99,10 @@ class TelegramSender:
                     f"{self._suppressed}건을 보내지 않았습니다. 감시 범위나 조건을 "
                     "좁히세요 — 이대로면 진짜 급매가 묻힙니다.")
                 self._suppressed = 0
-            self._window_start = now
-            self._window_sent = 0
+            win["start"] = now
+            win["sent"] = 0
             self._cap_told = False
-        return self._window_sent < self.hourly_cap
+        return win["sent"] < self.hourly_cap
 
     def enqueue(self, text):
         """전송 대기열에 넣는다. 미설정이면 조용히 버림(설정 자체가 선택)."""
@@ -97,7 +115,7 @@ class TelegramSender:
                 self._log(f"[텔레그램] 시간당 상한 {self.hourly_cap}건 도달 — "
                           "이번 창의 남은 알림은 묶어서 요약합니다")
             return
-        self._window_sent += 1
+        _CAP_WINDOWS[self._cap_key]["sent"] += 1
         self._q.append(str(text))
         if len(self._q) >= TG_QUEUE_SOFT_CAP:
             self.flush()

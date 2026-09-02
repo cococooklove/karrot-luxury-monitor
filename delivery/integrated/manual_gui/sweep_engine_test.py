@@ -166,8 +166,11 @@ eng = se.SweepEngine(_cfg(), on_log=logs.append, on_found=founds.append,
 art = {"id": "A1", "title": "샤넬백", "href": "https://x/1", "thumbnail": "t.jpg",
        "content": "설명", "boostedAt": "2026-08-26T00:00:00"}
 eng.notify("강남구", art, 1000000)
-ck("notify → on_log 문자열", len(logs) == 1 and "강남구" in logs[0] and "🆕 신규" in logs[0],
-   logs[:1])
+# 문구는 앱 알림 경로와 같은 모양이다 — 받는 사람에게는 한 방이라 두 경로가
+# 다르게 생기면 같은 제보인지 알아보기 어렵다. 출처만 다르게 붙인다.
+ck("notify → on_log 문자열",
+   len(logs) == 1 and "강남구" in logs[0] and "지역 훑기" in logs[0]
+   and "🎯" in logs[0], logs[:1])
 ck("notify → on_found dict 1건", len(founds) == 1 and isinstance(founds[0], dict))
 f = founds[0] if founds else {}
 ck("found 에 id 필드 유지", f.get("id") == "A1", str(f))

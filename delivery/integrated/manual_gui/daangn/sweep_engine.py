@@ -31,7 +31,7 @@ from daangn_ext.adaptive import (collect_region, collect_lanes, load_dong_region
                                  set_app_fallback_logger)
 from daangn_ext import throttle
 from daangn_ext.rest_scheduler import _rand_between
-from daangn.notify import TelegramSender, SheetWriter
+from daangn.notify import TelegramSender, SheetWriter, match_line
 
 
 # ── 휴식 안전 범위 (GUI/외부 cfg 값이 위험해도 여기서 강제 고정) ──
@@ -360,8 +360,15 @@ class SweepEngine:
     # ── 알림 ──
     def notify(self, region, article, price, changed=None):
         title = article.get("title", ""); url = article.get("href", "")
-        head = f"💱 가격변동 {changed:,}→{price:,}" if changed is not None else "🆕 신규"
-        msg = f"{head}\n[{region}] {title}\n{price:,}원\n{url}"
+        if changed is not None:
+            msg = (f"💱 가격변동 {changed:,}→{price:,}원\n"
+                   f"{title[:50]}\n📍 {region} · 지역 훑기\n{url}")
+        else:
+            # 앱 알림과 같은 모양으로 보낸다 — 받는 사람에게는 한 방이다.
+            _, rule = self._rules_now().verdict(title, price,
+                                                article.get("content") or "")
+            msg = match_line(rule.label() if rule else "",
+                             title, price, region, source="지역 훑기", url=url)
         self._log(msg)
         self._tg.enqueue(msg)
         self._sheet_writer.enqueue_row(
@@ -425,6 +432,9 @@ class SweepEngine:
         cutoff = datetime.now() - timedelta(days=days) if days else None
         cur = self.db
         rules = self._rules_now()
+        # 같은 매물을 앱 알림 경로가 이미 알렸을 수 있다. 저장소가 둘이라
+        # (watch.db / auto_seen.db) 각자 처음이면 같은 매물이 두 번 나간다.
+        seen_elsewhere = self.cfg.get("already_notified") or (lambda _id: False)
         new = changed = 0
         for a in arts:
             aid = str(a.get("id"))
@@ -448,6 +458,15 @@ class SweepEngine:
                     pass
             row = cur.execute("SELECT price FROM seen WHERE id=?", (aid,)).fetchone()
             if row is None:
+                try:
+                    dup = bool(seen_elsewhere(aid))
+                except Exception:
+                    dup = False
+                if dup:
+                    # 알리지는 않되 본 것으로 남긴다 — 다음 사이클에 또 묻지 않는다.
+                    cur.execute("INSERT OR REPLACE INTO seen VALUES(?,?,?,?)",
+                                (aid, price, region, a.get("title", "")))
+                    continue
                 self.notify(region, a, price)
                 cur.execute("INSERT OR REPLACE INTO seen VALUES(?,?,?,?)",
                             (aid, price, region, a.get("title", "")))
