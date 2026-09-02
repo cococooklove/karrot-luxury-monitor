@@ -249,6 +249,28 @@ def _post(cfg: AppApiConfig, body: dict, timeout: int = 20, retries: int = 2,
     raise AppApiError(f"요청 실패: {last}", status=last_status)
 
 
+ARTICLE_RESULT_TYPE = "FLEA_MARKET_LIST_VIEW"
+
+
+def is_article_result(it) -> bool:
+    """검색 results 항목이 실매물인가.
+
+    응답엔 매물 사이에 광고 중개 항목이 섞여 온다(type 이 다르고 id 가
+    "AdMediation/#NAVER:5378…" 꼴). 그대로 흘리면 buy-sell/-{id}/ 링크가
+    만들어져 열리지 않는 행이 표에 뜬다. type 이 매물이 아니거나 id 가
+    숫자가 아니면 버린다.
+    """
+    if not isinstance(it, dict):
+        return False
+    doc = it.get("document")
+    if not isinstance(doc, dict) or not doc:
+        return False
+    t = it.get("type")
+    if t is not None and t != ARTICLE_RESULT_TYPE:
+        return False
+    return str(doc.get("id", "")).isdigit()
+
+
 def search_page(cfg: AppApiConfig, keyword: str, region_id: str,
                 lat: float, lon: float, page_token: str | None = None,
                 proxy: str | None = None,
@@ -263,8 +285,7 @@ def search_page(cfg: AppApiConfig, keyword: str, region_id: str,
     if r.status_code != 200:
         raise AppApiError(f"HTTP {r.status_code}: {r.text[:200]}", status=r.status_code)
     j = r.json()
-    docs = [it["document"] for it in j.get("results", [])
-            if isinstance(it, dict) and it.get("document")]
+    docs = [it["document"] for it in j.get("results", []) if is_article_result(it)]
     return docs, j.get("nextToken"), bool(j.get("hasNextPage"))
 
 

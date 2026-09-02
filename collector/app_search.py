@@ -36,13 +36,28 @@ def build_body(query, region_id, lat, lon, page_token=None,
     return body
 
 
+ARTICLE_RESULT_TYPE = "FLEA_MARKET_LIST_VIEW"
+
+
 def documents(resp_json):
-    """응답 → document dict 리스트."""
+    """응답 → document dict 리스트. 실매물만.
+
+    매물 사이에 광고 중개 항목(type 이 다르고 id 가 "AdMediation/#NAVER:…"
+    꼴)이 섞여 오므로 type 이 매물이 아니거나 id 가 숫자가 아니면 버린다.
+    """
     out = []
     for r in resp_json.get("results") or []:
+        if not isinstance(r, dict):
+            continue
         doc = r.get("document")
-        if isinstance(doc, dict):
-            out.append(doc)
+        if not isinstance(doc, dict):
+            continue
+        t = r.get("type")
+        if t is not None and t != ARTICLE_RESULT_TYPE:
+            continue
+        if not str(doc.get("id", "")).isdigit():
+            continue
+        out.append(doc)
     return out
 
 

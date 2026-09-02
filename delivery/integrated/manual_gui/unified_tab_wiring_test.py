@@ -434,9 +434,9 @@ if _win is not None:
        _win.condBox.maximumHeight() < 100, str(_win.condBox.maximumHeight()))
     _win.condBox.setChecked(True)
     # 창을 띄우지 않은 테스트라 isVisible() 은 항상 False 다 — 숨김 플래그를 본다.
-    ck("펼치면 안이 보인다", not _win.rulesTable.isHidden()
+    ck("펼치면 안이 보인다", not _win.rulesSummary.isHidden()
        and _win.condBox.maximumHeight() > 1000,
-       f"hidden={_win.rulesTable.isHidden()} / {_win.condBox.maximumHeight()}")
+       f"hidden={_win.rulesSummary.isHidden()} / {_win.condBox.maximumHeight()}")
     _win.condBox.setChecked(False)
     ck("id 열은 감춘다", _win.alertTable.isColumnHidden(m.ALERT_COL_ID))
     # 전체 삭제는 표 옆에 두지 않는다 — 실서버서 등록 21건이 그렇게 날아갔다.
@@ -447,9 +447,15 @@ if _win is not None:
     ck("등록 표와 삭제는 고급 안에",
        _win.alertTable in _win.advancedBox.findChildren(_QtW.QWidget)
        and _win.alertDelBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
-    ck("감시 조건 안에는 조건표가 있다",
-       _win.rulesTable in _win.condBox.findChildren(_QtW.QWidget)
-       and _win.rulesSummary in _win.condBox.findChildren(_QtW.QLabel))
+    # 조건 수백 줄을 화면에 표로 그리지 않는다 — 엑셀이 원본이고 화면은
+    # 요약 + [엑셀 넣기/열기/다시 읽기]다. 표가 다시 생기면 여기서 잡는다.
+    ck("감시 조건 안에는 요약과 엑셀 버튼만",
+       not hasattr(_win, "rulesTable")
+       and _win.rulesSummary in _win.condBox.findChildren(_QtW.QLabel)
+       and all(b in _win.condBox.findChildren(_QtW.QPushButton)
+               for b in (_win.alertRulesBtn, _win.rulesOpenBtn, _win.rulesReloadBtn)))
+    ck("넣은 엑셀이 없으면 열기·다시 읽기는 꺼진다",
+       not _win.rulesOpenBtn.isEnabled() and not _win.rulesReloadBtn.isEnabled())
     ck("조건 수가 섹션 제목에 보인다", "조건" in _win.condBox.title(),
        _win.condBox.title())
     ck("조건이 없으면 그 사실을 말한다",

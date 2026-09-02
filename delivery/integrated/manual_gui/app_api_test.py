@@ -171,6 +171,25 @@ ck("링크가 매물 URL 형태", a["href"].endswith("-1234124135/"), a["href"])
 ck("앱 전용 신호 보존", a["watchesCount"] == 20 and a["chatRoomsCount"] == 3)
 ck("빈 문서도 크래시 없음", isinstance(to_article({}), dict))
 
+print("\n=== D2. 광고 중개 항목 제외 ===")
+
+from daangn_ext.app_api import is_article_result
+ck("실매물 통과", is_article_result({"type": "FLEA_MARKET_LIST_VIEW", "document": doc}))
+ck("type 없어도 숫자 id 면 통과", is_article_result({"document": {"id": 77}}))
+ck("AdMediation 항목 제외",
+   not is_article_result({"type": "AD_MEDIATION",
+                          "document": {"id": "AdMediation/#NAVER:5378454808504269439"}}))
+ck("type 매물이라도 id 비숫자면 제외",
+   not is_article_result({"type": "FLEA_MARKET_LIST_VIEW",
+                          "document": {"id": "AdMediation/#NAVER:1"}}))
+ck("document 없으면 제외", not is_article_result({"type": "FLEA_MARKET_LIST_VIEW"}))
+app_api.requests.post = lambda *a, **k: FakeResp(200, {"results": [
+    {"type": "FLEA_MARKET_LIST_VIEW", "document": {"id": "1"}},
+    {"type": "AD_MEDIATION", "document": {"id": "AdMediation/#NAVER:5378454808504269439"}},
+    {"type": "FLEA_MARKET_LIST_VIEW", "document": {"id": "2"}}]}, "")
+docs_p, _, _ = app_api.search_page(cfg, "샤넬", "6128", LAT, LON)
+ck("search_page 가 광고 걸러냄", [d["id"] for d in docs_p] == ["1", "2"], docs_p)
+
 # 기존 웹 필터가 그대로 먹는지
 from daangn_ext.search_filters import KeywordRule
 

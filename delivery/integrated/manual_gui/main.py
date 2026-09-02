@@ -2314,16 +2314,18 @@ class MainWindow(QMainWindow):
         "accounts": "alertFleetBtn",    # 계정 수 → 같은 팜 현황 다이얼로그
         "coverage": "alertCoverMode",   # 커버리지 → 전국/핵심 커버 모드
         "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
-        "rules": "rulesTable",          # 조건 수 → 조건표 자체
+        "rules": "alertRulesBtn",       # 조건 수 → 조건표 엑셀 넣는 자리
     }
 
     TAB_HELP = ("키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신.\n"
                 "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국.")
 
-    RULES_PREVIEW = 200      # 수백 줄을 다 그리면 창이 뜨는 데만 오래 걸린다
+    def _refresh_rules_view(self):
+        """조건표 요약을 파일 상태에 맞춘다.
 
-    def _refresh_rules_view(self):  # noqa: C901
-        """조건표 요약·표를 파일 상태에 맞춘다.
+        조건 수백 줄을 화면에 표로 그리지 않는다 — 보기도 고치기도 엑셀이
+        낫다. 화면은 '무엇이 언제 어느 파일에서 들어갔는지'만 말하고,
+        내용은 [엑셀 열기]로 그 파일을 띄워 본다.
 
         파일이 밖에서 바뀌어도(엑셀을 새로 넣거나 서버에서 교체) 캐시가
         mtime 으로 잡는다. 화면 숫자는 그 뒤에 따라와야 하므로 폴링 틱마다
@@ -2331,26 +2333,21 @@ class MainWindow(QMainWindow):
         from daangn_ext.alert_rules import brands
         table = self._alert_rules.get()
         rules = table.rules
-        self.rulesSummary.setText(table.detail())
-        shown = rules[:self.RULES_PREVIEW]
-        self.rulesTable.setRowCount(len(shown))
-        for r, rule in enumerate(shown):
-            prod = rule.product or ("" if rule.keyword.strip() == rule.brand_name()
-                                    else rule.keyword)
-            cells = [rule.brand_name(), prod,
-                     f"{rule.min_price:,}" if rule.min_price else "",
-                     f"{rule.max_price:,}" if rule.max_price else "",
-                     ", ".join(rule.exclude)]
-            for c, val in enumerate(cells):
-                self.rulesTable.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
-        _hh = self.rulesTable.horizontalHeader()
-        for c in range(len(self.RULE_COLS)):
-            _hh.setSectionResizeMode(
-                c, QtWidgets.QHeaderView.ResizeMode.Stretch if c == 1
-                else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        if len(rules) > len(shown):
-            self.rulesSummary.setText(
-                table.detail() + f"    ·    아래 표에는 앞 {len(shown)}줄만 보입니다")
+        src = table.source or ""
+        text = table.detail()
+        if rules and src:
+            text += f"    ·    파일: {os.path.basename(src)}"
+        self.rulesSummary.setText(text)
+        # 원본 엑셀이 있어야 열고 다시 읽을 수 있다. 옛 조건표(경로 없음)나
+        # 파일을 옮긴 뒤에는 버튼을 꺼서 '눌렀는데 아무 일도 없음'을 막는다.
+        have = bool(src) and os.path.exists(src)
+        self.rulesOpenBtn.setEnabled(have)
+        self.rulesReloadBtn.setEnabled(have)
+        tip = (src if have else
+               ("원본 엑셀을 찾을 수 없습니다 — [엑셀로 조건 넣기]로 다시 넣으세요"
+                if src else "아직 넣은 엑셀이 없습니다"))
+        self.rulesOpenBtn.setToolTip(tip)
+        self.rulesReloadBtn.setToolTip(tip)
         self._set_chip("rules",
                        f"조건 {len(rules)}" if rules else "조건 없음",
                        "ok" if rules else "off")
@@ -2515,26 +2512,29 @@ class MainWindow(QMainWindow):
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
 
-        # ── 감시 조건: 클라가 넣은 엑셀이 그대로 보여야 한다 ──
-        # 예전에는 이 자리에 '등록 표'(당근에 올라간 브랜드)만 있었다. 조건
-        # 수백 줄을 넣어도 화면에는 브랜드 20줄뿐이라 안 들어간 것처럼 보였다.
+        # ── 감시 조건: 조건표는 엑셀이 원본이다 ──
+        # 예전에는 여기 조건 수백 줄을 표로 그렸다. 스크롤 상자 안에서 7줄씩
+        # 보이는 표는 읽을 수도 고칠 수도 없다 — 엑셀이 둘 다 낫다. 화면은
+        # 무엇이 언제 어느 파일에서 들어갔는지만 말하고, 내용은 그 파일을 연다.
         self.rulesSummary = QtWidgets.QLabel("조건 없음")
         self.rulesSummary.setWordWrap(True)
         self.rulesSummary.setStyleSheet("font-size:14px; font-weight:700; color:#3A342B;")
         cond_v.addWidget(self.rulesSummary)
-        self.rulesTable = QtWidgets.QTableWidget(0, len(self.RULE_COLS), w)
-        self.rulesTable.setHorizontalHeaderLabels(self.RULE_COLS)
-        self.rulesTable.verticalHeader().setVisible(False)
-        self.rulesTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.rulesTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.rulesTable.setShowGrid(False)
-        self.rulesTable.horizontalHeader().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.rulesTable.setMinimumHeight(260)
-        cond_v.addWidget(self.rulesTable, 1)
+        self.rulesOpenBtn = QtWidgets.QPushButton("엑셀 열기")
+        self.rulesOpenBtn.setToolTip("넣은 조건표 엑셀을 엑셀 프로그램으로 엽니다")
+        self.rulesOpenBtn.clicked.connect(self.on_rules_open_excel)
+        self.rulesReloadBtn = QtWidgets.QPushButton("엑셀 다시 읽기")
+        self.rulesReloadBtn.setToolTip(
+            "엑셀에서 고쳐 저장한 뒤 누르면 같은 파일을 다시 읽어 적용합니다")
+        self.rulesReloadBtn.clicked.connect(self.on_rules_reload_excel)
         _rb = QtWidgets.QHBoxLayout()
-        _rb.addWidget(self.alertRulesBtn); _rb.addStretch(1)
+        _rb.addWidget(self.alertRulesBtn)
+        _rb.addWidget(self.rulesOpenBtn)
+        _rb.addWidget(self.rulesReloadBtn)
+        _rb.addStretch(1)
         cond_v.addLayout(_rb)
+        cond_v.addWidget(QtWidgets.QLabel(
+            "조건은 엑셀에서 고칩니다. 고쳐 저장한 뒤 [엑셀 다시 읽기]를 누르세요."))
 
         # 진행 표시 — 등록은 '계정 수 × 키워드 수' 만큼 요청이라 20초 넘게 걸린다.
         # 그동안 화면이 아무 말도 안 하면 사용자는 실패한 줄 알고 다시 누르거나
@@ -4542,7 +4542,6 @@ class MainWindow(QMainWindow):
         오지 않는다), 시트 전체를 알림 필터로 건다. 등록 상한은 브랜드
         수에만 걸리므로 조건은 수백 줄이어도 된다.
         """
-        from daangn_ext.alert_rules import RuleTable, brands, load_rules_from_excel
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("엑셀로 조건 넣기"); dlg.resize(660, 460)
         v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
@@ -4618,94 +4617,126 @@ class MainWindow(QMainWindow):
             wb.save(p)
             QtWidgets.QMessageBox.information(dlg, "저장됨", f"샘플 저장:\n{p}")
 
-        def save_table(table):
-            os.makedirs(os.path.dirname(ALERT_RULES_FILE), exist_ok=True)
-            table.save(ALERT_RULES_FILE)
-            self._alert_rules.get()          # mtime 캐시 갱신
-            self._refresh_rules_view()
-            show_stat()
-
-        def confirm(rules, bs, errors) -> bool:
-            """적용 전에 무엇이 들어가는지 먼저 보여준다 — 엉뚱한 파일을
-            고른 것을 되돌릴 수 있는 지점은 여기뿐이다."""
-            try:
-                free = int((self._router.capacity() or {}).get("free") or 0)
-                cap_line = f"슬롯 여유: {free}칸 (브랜드 {len(bs)}개 필요)"
-                if len(bs) > free:
-                    cap_line += f" — {len(bs) - free}개는 검색 스윕으로 돌립니다"
-            except Exception:
-                cap_line = "슬롯 여유: 확인 불가"
-            box = QtWidgets.QMessageBox(dlg)
-            box.setWindowTitle("이대로 적용할까요?")
-            box.setText(f"조건 {len(rules)}줄 읽음\n"
-                        f"등록할 브랜드 {len(bs)}개: {' · '.join(bs[:8])}"
-                        + (" …" if len(bs) > 8 else "") + f"\n{cap_line}"
-                        + (f"\n확인할 내용 {len(errors)}건" if errors else ""))
-            if errors:
-                box.setDetailedText("\n".join(errors))
-            box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok
-                                   | QtWidgets.QMessageBox.StandardButton.Cancel)
-            box.button(QtWidgets.QMessageBox.StandardButton.Ok).setText("적용")
-            box.button(QtWidgets.QMessageBox.StandardButton.Cancel).setText("취소")
-            return box.exec() == QtWidgets.QMessageBox.StandardButton.Ok
-
-        def register(bs, rules):
-            """브랜드만 등록한다. 가격·제외는 넘기지 않는다 — 당근 서버가
-            먼저 거르면 조건표가 볼 매물 자체가 없어진다."""
-            if not self._router:
-                self._alog("[조건표] 라우터가 없어 브랜드 등록을 건너뜁니다")
-                return
-            groups = brand_register_groups(bs, rules)
-            co = self._core_only()
-
-            def job(log):
-                res = []
-                for ks, d in groups:
-                    res.extend(self._router.add_many(
-                        ks, None, None, None, core_only=co, log=log,
-                        days=d, replace_cond=True) or [])
-                return {"routes": res, "list": self._safe_alert_list(log)}
-            # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
-            if not self._alert_run(job, self._alert_routes_done, queue=True,
-                                   label="브랜드 등록 중"):
-                QtWidgets.QMessageBox.warning(
-                    dlg, "등록 보류",
-                    "조건표는 적용했지만 지금은 브랜드 등록을 시작할 수 없습니다.\n"
-                    "로그를 확인하고 '목록 새로고침' 후 다시 시도하세요.")
-
         def do_load():
             p, _ = QtWidgets.QFileDialog.getOpenFileName(
                 dlg, "조건 엑셀 선택", "", "Excel (*.xlsx *.xlsm)")
             if not p:
                 return
-            try:
-                rules, errors = load_rules_from_excel(p)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(dlg, "오류", f"엑셀 로드 오류:\n{e}")
-                return
-            if not rules:
-                QtWidgets.QMessageBox.warning(
-                    dlg, "실패", "읽은 조건이 없습니다.\n" + "\n".join(errors[:3]))
-                return
-            bs = brands(rules)
-            if not confirm(rules, bs, errors):
-                return
-            for msg in errors[:8]:
-                self._alog(f"[조건표] {msg}")
-            save_table(RuleTable(rules))
-            self._alog(f"[조건표] {len(rules)}줄 적용 · 브랜드 {len(bs)}개 등록"
-                       f" ({', '.join(bs[:8])}{' …' if len(bs) > 8 else ''})")
-            register(bs, rules)
-            QtWidgets.QMessageBox.information(
-                dlg, "적용됨",
-                f"조건 {len(rules)}줄을 적용했습니다.\n"
-                f"브랜드 {len(bs)}개를 등록 중입니다 — 수집은 넓게,"
-                " 알림은 이 조건표로 거릅니다.")
+            if self._apply_rules_file(p, dlg):
+                show_stat()
 
         sampleBtn.clicked.connect(do_sample)
         loadBtn.clicked.connect(do_load)
         closeBtn.clicked.connect(dlg.reject)
         dlg.exec()
+
+    def _rules_source(self) -> str:
+        """넣은 조건표 엑셀의 경로. 없거나 파일이 사라졌으면 ''."""
+        src = self._alert_rules.get().source or ""
+        return src if src and os.path.exists(src) else ""
+
+    def on_rules_open_excel(self):
+        """조건표 엑셀을 엑셀 프로그램으로 연다 — 보고 고치는 자리는 거기다."""
+        src = self._rules_source()
+        if not src:
+            QtWidgets.QMessageBox.information(
+                self, "엑셀 없음",
+                "넣은 조건표 엑셀을 찾을 수 없습니다.\n[엑셀로 조건 넣기]로 다시 넣으세요.")
+            return
+        QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(os.path.abspath(src)))
+
+    def on_rules_reload_excel(self):
+        """엑셀에서 고쳐 저장한 것을 같은 파일에서 다시 읽어 적용한다."""
+        src = self._rules_source()
+        if not src:
+            QtWidgets.QMessageBox.information(
+                self, "엑셀 없음",
+                "넣은 조건표 엑셀을 찾을 수 없습니다.\n[엑셀로 조건 넣기]로 다시 넣으세요.")
+            return
+        self._apply_rules_file(src, self)
+
+    def _apply_rules_file(self, p, parent) -> bool:
+        """엑셀 한 파일을 읽어 확인받고 조건표로 저장하고 브랜드를 등록한다.
+
+        [엑셀로 조건 넣기] 다이얼로그와 [엑셀 다시 읽기]가 같은 길을 탄다 —
+        두 경로가 갈라지면 한쪽만 고쳐지고 다른 쪽은 옛 동작으로 남는다.
+        경로는 조건표에 같이 저장한다(source). 그래야 다음에 열고 다시 읽는다."""
+        from daangn_ext.alert_rules import RuleTable, brands, load_rules_from_excel
+        try:
+            rules, errors = load_rules_from_excel(p)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(parent, "오류", f"엑셀 로드 오류:\n{e}")
+            return False
+        if not rules:
+            QtWidgets.QMessageBox.warning(
+                parent, "실패", "읽은 조건이 없습니다.\n" + "\n".join(errors[:3]))
+            return False
+        bs = brands(rules)
+        if not self._confirm_rules(parent, rules, bs, errors):
+            return False
+        for msg in errors[:8]:
+            self._alog(f"[조건표] {msg}")
+        os.makedirs(os.path.dirname(ALERT_RULES_FILE), exist_ok=True)
+        RuleTable(rules, source=os.path.abspath(p)).save(ALERT_RULES_FILE)
+        self._alert_rules.get()          # mtime 캐시 갱신
+        self._refresh_rules_view()
+        self._alog(f"[조건표] {len(rules)}줄 적용 · 브랜드 {len(bs)}개 등록"
+                   f" ({', '.join(bs[:8])}{' …' if len(bs) > 8 else ''})")
+        self._register_rule_brands(parent, bs, rules)
+        QtWidgets.QMessageBox.information(
+            parent, "적용됨",
+            f"조건 {len(rules)}줄을 적용했습니다.\n"
+            f"브랜드 {len(bs)}개를 등록 중입니다 — 수집은 넓게,"
+            " 알림은 이 조건표로 거릅니다.")
+        return True
+
+    def _confirm_rules(self, parent, rules, bs, errors) -> bool:
+        """적용 전에 무엇이 들어가는지 먼저 보여준다 — 엉뚱한 파일을
+        고른 것을 되돌릴 수 있는 지점은 여기뿐이다."""
+        try:
+            free = int((self._router.capacity() or {}).get("free") or 0)
+            cap_line = f"슬롯 여유: {free}칸 (브랜드 {len(bs)}개 필요)"
+            if len(bs) > free:
+                cap_line += f" — {len(bs) - free}개는 검색 스윕으로 돌립니다"
+        except Exception:
+            cap_line = "슬롯 여유: 확인 불가"
+        box = QtWidgets.QMessageBox(parent)
+        box.setWindowTitle("이대로 적용할까요?")
+        box.setText(f"조건 {len(rules)}줄 읽음\n"
+                    f"등록할 브랜드 {len(bs)}개: {' · '.join(bs[:8])}"
+                    + (" …" if len(bs) > 8 else "") + f"\n{cap_line}"
+                    + (f"\n확인할 내용 {len(errors)}건" if errors else ""))
+        if errors:
+            box.setDetailedText("\n".join(errors))
+        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok
+                               | QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.button(QtWidgets.QMessageBox.StandardButton.Ok).setText("적용")
+        box.button(QtWidgets.QMessageBox.StandardButton.Cancel).setText("취소")
+        return box.exec() == QtWidgets.QMessageBox.StandardButton.Ok
+
+    def _register_rule_brands(self, parent, bs, rules):
+        """브랜드만 등록한다. 가격·제외는 넘기지 않는다 — 당근 서버가
+        먼저 거르면 조건표가 볼 매물 자체가 없어진다."""
+        if not self._router:
+            self._alog("[조건표] 라우터가 없어 브랜드 등록을 건너뜁니다")
+            return
+        groups = brand_register_groups(bs, rules)
+        co = self._core_only()
+
+        def job(log):
+            res = []
+            for ks, d in groups:
+                res.extend(self._router.add_many(
+                    ks, None, None, None, core_only=co, log=log,
+                    days=d, replace_cond=True) or [])
+            return {"routes": res, "list": self._safe_alert_list(log)}
+        # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
+        if not self._alert_run(job, self._alert_routes_done, queue=True,
+                               label="브랜드 등록 중"):
+            QtWidgets.QMessageBox.warning(
+                parent, "등록 보류",
+                "조건표는 적용했지만 지금은 브랜드 등록을 시작할 수 없습니다.\n"
+                "로그를 확인하고 '목록 새로고침' 후 다시 시도하세요.")
 
     def _account_proxies(self):
         """accounts.json 프록시 — mtime 캐시 (자동 모니터가 구마다 호출하므로)."""
@@ -6295,7 +6326,7 @@ def _run_headless():
         tok, chat = nt.get("tg_token"), nt.get("tg_chat")
         if tok and chat:
             try:
-                from daangn.notify import TelegramSender
+                from daangn.notify import TelegramSender, item_block
                 tg = TelegramSender(tok, chat, log=log)
                 for m in items:
                     tg.enqueue_item(item_block(
@@ -6324,7 +6355,7 @@ def _run_headless():
         tok, chat = nt.get("tg_token"), nt.get("tg_chat")
         if tok and chat:
             try:
-                from daangn.notify import TelegramSender, item_block
+                from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=log)
                 _enqueue_watch_blocks(tg, events, lines)
                 tg.flush()
