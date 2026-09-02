@@ -99,6 +99,98 @@ ck("제외어는 설명에도 걸린다",
    apply_filter([P("샤넬 가방", "가품입니다")],
                 KeywordRule(required=["샤넬"], exclude=["가품"])) == [])
 
+# 클라 요구: "띄어쓰기 상관없이 그 글자가 다 포함된 글이면 잡아낸다".
+kw = "루이비통 오버 더 문"
+spaced = [P("루이비통 오버 더 문 팝니다", ""), P("루이비통 오버더 문", ""),
+          P("루이비통 오 버더문", ""), P("루이비통", "내용~~~~ 오버더문"),
+          P("노에 나노 루이비통", "")]
+ck("띄어쓰기 달라도 어절이 다 있으면 잡는다",
+   len(apply_filter(spaced[:4], KeywordRule(required=[kw]))) == 4,
+   str([p.name for p in apply_filter(spaced[:4], KeywordRule(required=[kw]))]))
+ck("어순이 뒤집혀도 잡는다",
+   len(apply_filter([spaced[4]], KeywordRule(required=["루이비통 나노 노에"]))) == 1)
+ck("무관 매물은 안 잡는다",
+   apply_filter([P("샤넬 클래식 미디움", "")], KeywordRule(required=[kw])) == [])
+
+# 숫자 어절은 앞 어절에 붙어 있어야 한다 — 안 그러면 "50만원"이 사이즈로 걸린다.
+num_rule = KeywordRule(required=["루이비통 반둘리에 50"])
+ck("숫자 사이즈: 붙어 있으면 잡는다",
+   len(apply_filter([P("루이비통 반둘리에 50 정품", ""),
+                     P("루이비통 반둘리에 사이즈 50", "")], num_rule)) == 2)
+ck("숫자 사이즈: 다른 사이즈 + 가격의 숫자는 안 잡는다",
+   apply_filter([P("루이비통 반둘리에25 급처", "가격 50만원 네고")], num_rule) == [])
+
+ck("삽니다 글은 컷",
+   apply_filter([P("루이비통 오버더문 삽니다", "")], KeywordRule(required=[kw])) == [])
+ck("drop_wanted=False 면 삽니다도 통과",
+   len(apply_filter([P("루이비통 오버더문 삽니다", "")],
+                    KeywordRule(required=[kw], drop_wanted=False))) == 1)
+# 공백을 지운 채 표식을 찾으면 "친구 함께"가 "구함"이 되어 판매글이 사라졌다.
+from daangn_ext.search_filters import looks_wanted_ad
+ck("'친구 함께'·'가구 함'은 구매글이 아니다",
+   not looks_wanted_ad("루이비통 노에 친구 함께 쓰던 가방")
+   and not looks_wanted_ad("명품 수납 가구 함 판매")
+   and looks_wanted_ad("루이비통 지갑 삽니다"))
+
+# 제목 끝 글자와 본문 첫 글자가 붙어 없던 단어가 생기면 안 된다.
+ck("제목·본문 경계를 넘는 어절은 안 잡는다",
+   apply_filter([P("루이비통 오버 더", "문의주세요")], KeywordRule(required=[kw])) == [])
+# 한 글자 어절('더','문')을 따로 찾으면 아무 데나 걸린다 → 앞 어절에 붙인다.
+from daangn_ext.search_filters import keyword_patterns
+ck("한 글자 어절은 앞 어절에 붙는다",
+   [p.pattern for p in keyword_patterns(kw)] == ["루이비통", "오버더문"],
+   str([p.pattern for p in keyword_patterns(kw)]))
+ck("앞 어절 없는 숫자는 다른 수의 일부로 안 걸린다",
+   not apply_filter([P("가방 550000원", "")], KeywordRule(required=["50 가방"]))
+   and len(apply_filter([P("50 가방", "")], KeywordRule(required=["50 가방"]))) == 1)
+
+print("\n=== B-2. 알림 룰 테이블 ===")
+from daangn_ext.alert_rules import RuleTable, parse_rule_rows, HIT, WATCH, CUT, PASS
+
+rule_rows = [("키워드", "최소가격", "최대가격"),
+             ("루이비통 오버 더 문", 500000, 1500000),
+             ("루이비통 반둘리에 50", 600000, 2000000),
+             ("루이비통 반둘리에 25", 1000000, 2000000),
+             ("루이비통 몽테뉴 GM", "700,000", "1,000,000"),
+             ("", None, None),
+             ("루이비통 역전", 900000, 100000)]
+_rules, _errs = parse_rule_rows(rule_rows)
+ck("빈 줄은 건너뛰고 최소>최대 줄은 오류로 남긴다",
+   len(_rules) == 4 and len(_errs) == 1, f"{len(_rules)} / {_errs}")
+rt = RuleTable(_rules)
+ck("룰 테이블 판정",
+   all(rt.verdict(t, p)[0] == v for t, p, v in [
+       ("루이비통 오버더문 급처", "900,000원", HIT),
+       ("루이비통 오 버더 문", 1200000, HIT),
+       ("루이비통 오버더문", "285만원", WATCH),      # 상한 초과 → 추적
+       ("루이비통 오버더문", 300000, CUT),           # 하한 미달
+       ("루이비통 오버더문 삽니다", 900000, CUT),
+       ("샤넬 클래식", 900000, CUT),
+       ("루이비통 몽테뉴gm", 800000, HIT),
+       ("루이비통 오버더문", None, HIT),             # 가격 못 읽음 → 버리지 않는다
+   ]))
+ck("숫자 사이즈는 룰끼리도 안 섞인다",
+   rt.verdict("루이비통 반둘리에25 급처 50만원", 1500000)[1].keyword
+   == "루이비통 반둘리에 25")
+ck("빈 테이블은 아무것도 안 거른다", RuleTable().verdict("아무거나", 1)[0] == PASS)
+ck("제목·본문 경계를 넘는 어절은 안 잡는다",
+   rt.verdict("루이비통 오버 더", 900000, body="문의주세요")[0] == CUT
+   and rt.verdict("루이비통", 900000, body="상세: 오버더문 정품")[0] == HIT)
+_exc, _ = parse_rule_rows([("키워드", "최소가격", "최대가격", "제외"),
+                           ("루이비통 오버 더 문", 500000, 1500000, "A급 레플리카, 부속품")])
+_ert = RuleTable(_exc)
+ck("제외는 쉼표로만 나눈다(구절 단위)",
+   _exc[0].exclude == ("A급 레플리카", "부속품")
+   and _ert.verdict("루이비통 오버더문 A급 레플리카", 900000)[0] == CUT
+   and _ert.verdict("루이비통 오버더문 A급 정품", 900000)[0] == HIT)
+ck("'285만원' 같은 축약가도 읽는다",
+   rt.verdict("루이비통 오버더문", "125만원")[0] == HIT)
+_p = tempfile.mktemp(suffix=".json")
+rt.save(_p)
+ck("저장·복원", len(RuleTable.load(_p)) == len(rt)
+   and RuleTable.load(_p).verdict("루이비통 오버더문", 900000)[0] == HIT)
+ck("없는 파일은 빈 테이블", len(RuleTable.load(tempfile.mktemp())) == 0)
+
 print("\n=== C. 계정·프록시 저장소 ===")
 from daangn_ext.account_store import AccountStore
 

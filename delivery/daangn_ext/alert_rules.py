@@ -1,0 +1,185 @@
+"""
+알림 룰 테이블 — "브랜드로 넓게 수집하고, 엑셀 조건에 맞는 것만 알린다".
+
+앱 알림 경로는 당근 서버가 판정하고 키워드 등록에 상한이 있다(수십 개).
+그래서 모델별 가격대 수백 줄을 키워드로 등록할 수 없다. 대신 브랜드
+("루이비통") 하나로 넓게 받아 놓고, 엑셀 수백 줄을 알림 직전 필터로 태운다.
+
+  엑셀 한 줄 = 룰 하나 = "키워드 + 최소가격 ~ 최대가격"
+  매물은 룰 중 하나라도 맞으면 알린다(OR).
+
+가격이 상한만 넘긴 매물은 버리지 않고 추적한다 — 값이 내려와 범위 안에
+들어오면 그때 알린다(mark_range_entries 와 같은 정책).
+
+키워드 매칭은 search_filters 의 어절 AND 규칙을 그대로 쓴다(띄어쓰기 무시).
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+
+from .price import parse_price_text
+from .search_filters import (FIELD_SEP, contains_keyword, looks_wanted_ad,
+                             normalize_text)
+
+# verdict
+HIT = "hit"       # 알린다
+WATCH = "watch"   # 키워드는 맞지만 상한 초과 — 인하 대기로 추적
+CUT = "cut"       # 어떤 룰에도 안 맞음
+PASS = "pass"     # 룰 테이블이 비었음 — 필터하지 않는다
+
+
+@dataclass(frozen=True)
+class AlertRule:
+    keyword: str
+    min_price: int | None = None
+    max_price: int | None = None
+    exclude: tuple[str, ...] = ()
+    row: int = 0                      # 엑셀 행번호(로그·디버깅용)
+
+    def label(self) -> str:
+        lo = f"{self.min_price:,}" if self.min_price else ""
+        hi = f"{self.max_price:,}" if self.max_price else ""
+        return f"{self.keyword} ({lo}~{hi})" if (lo or hi) else self.keyword
+
+    def to_dict(self) -> dict:
+        return {"keyword": self.keyword, "min": self.min_price,
+                "max": self.max_price, "exclude": list(self.exclude),
+                "row": self.row}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AlertRule":
+        return cls(keyword=str(d.get("keyword") or ""),
+                   min_price=_as_int(d.get("min")),
+                   max_price=_as_int(d.get("max")),
+                   exclude=tuple(str(x) for x in (d.get("exclude") or []) if x),
+                   row=int(d.get("row") or 0))
+
+
+def _as_int(v) -> int | None:
+    """'1,300,000' · '900,000원' · '285만원' · 1300000.0 · None 을 모두 받는다.
+
+    알림 payload 의 가격은 '285만원'처럼 줄여 쓴 문자열이라 숫자만 뽑으면
+    백만 배 어긋난다. 파싱은 price.parse_price_text 한 곳에만 둔다
+    (article_watch 는 manual_gui 트리에만 있어 여기서 부르면 안 된다).
+    """
+    if v is None or v == "" or isinstance(v, bool):
+        return None
+    return parse_price_text(v) or None
+
+
+@dataclass
+class RuleTable:
+    rules: list[AlertRule] = field(default_factory=list)
+    drop_wanted: bool = True          # 삽니다/구합니다 글 컷
+
+    def __len__(self) -> int:
+        return len(self.rules)
+
+    def verdict(self, title, price=None, body="") -> tuple[str, AlertRule | None]:
+        """(판정, 맞은 룰). 룰이 없으면 (PASS, None) — 아무것도 거르지 않는다."""
+        if not self.rules:
+            return PASS, None
+        if self.drop_wanted and looks_wanted_ad(title):
+            return CUT, None
+        # 제목과 본문은 경계 표식으로 잇는다 — 그냥 붙이면 제목 끝 글자와
+        # 본문 첫 글자가 한 어절로 뭉쳐 없던 단어가 생긴다.
+        text = FIELD_SEP.join(normalize_text(x) for x in (title, body) if x)
+        price = _as_int(price)
+        watched: AlertRule | None = None
+        for r in self.rules:
+            if not contains_keyword(text, r.keyword):
+                continue
+            if any(contains_keyword(text, x) for x in r.exclude):
+                continue
+            # 가격을 못 읽으면 가격 조건은 건너뛴다 — 못 읽었다는 이유로 버리지 않는다.
+            if price is None:
+                return HIT, r
+            if r.min_price is not None and price < r.min_price:
+                continue
+            if r.max_price is not None and price > r.max_price:
+                watched = watched or r
+                continue
+            return HIT, r
+        return (WATCH, watched) if watched else (CUT, None)
+
+    # ── 저장/복원 ──
+    def to_json(self) -> str:
+        return json.dumps({"rules": [r.to_dict() for r in self.rules],
+                           "drop_wanted": self.drop_wanted},
+                          ensure_ascii=False, indent=1)
+
+    def save(self, path) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.to_json())
+
+    @classmethod
+    def load(cls, path) -> "RuleTable":
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            return cls()
+        return cls(rules=[AlertRule.from_dict(x) for x in (d.get("rules") or [])],
+                   drop_wanted=bool(d.get("drop_wanted", True)))
+
+
+# ── 엑셀 로더 ──
+# 클라 시트: 키워드 | 최소가격 | 최대가격 (+ 선택: 제외).
+# 머리글은 부분일치로 잡는다 — "최소가격"·"최소금액"·"최소 가격" 다 받는다.
+def load_rules_from_excel(path) -> tuple[list[AlertRule], list[str]]:
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))   # type: ignore
+    finally:
+        wb.close()
+    return parse_rule_rows(rows)
+
+
+def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
+    """엑셀 행 튜플 목록 → (룰, 오류메시지). 테스트가 엑셀 없이 쓴다."""
+    if not rows:
+        return [], ["엑셀에 데이터가 없습니다"]
+
+    head = [normalize_text(c) for c in rows[0]]
+
+    def col(*names) -> int | None:
+        for i, h in enumerate(head):
+            if h and any(normalize_text(n) in h for n in names):
+                return i
+        return None
+
+    i_kw, i_min = col("키워드", "keyword"), col("최소")
+    i_max, i_exc = col("최대"), col("제외")
+    if i_kw is None:
+        return [], ["엑셀 첫 행에 '키워드' 열이 필요합니다"]
+
+    rules: list[AlertRule] = []
+    errors: list[str] = []
+    seen: set[tuple] = set()
+    for n, row in enumerate(rows[1:], start=2):
+        def cell(i):
+            return row[i] if (i is not None and i < len(row)) else None
+
+        kw = str(cell(i_kw) or "").strip()
+        if not kw:
+            continue
+        lo, hi = _as_int(cell(i_min)), _as_int(cell(i_max))
+        if lo is not None and hi is not None and lo > hi:
+            errors.append(f"{n}행 '{kw}': 최소가격이 최대가격보다 큽니다 — 건너뜀")
+            continue
+        # 제외는 쉼표로만 나눈다 — 공백으로 나누면 "A급 레플리카" 가 "A급"
+        # 하나로 쪼개져 멀쩡한 매물까지 날아간다. 한 칸이 한 구절이다.
+        exc = tuple(x.strip() for x in str(cell(i_exc) or "").split(",") if x.strip())
+        key = (normalize_text(kw), lo, hi, exc)
+        if key in seen:
+            continue
+        seen.add(key)
+        rules.append(AlertRule(keyword=kw, min_price=lo, max_price=hi,
+                               exclude=exc, row=n))
+    if not rules and not errors:
+        errors.append("엑셀에서 읽은 키워드가 없습니다")
+    return rules, errors

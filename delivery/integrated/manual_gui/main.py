@@ -126,6 +126,36 @@ def harvest_interval() -> int:
     except Exception:
         return 1200
 
+# 브랜드로 넓게 등록해 받고, 모델별 조건 수백 줄은 이 파일이 들고 있다가
+# 알림 직전에 건다. 앱 알림 키워드 등록에는 상한이 있어(수십 개) 모델별
+# 가격대를 키워드로 등록할 방법이 없기 때문이다.
+ALERT_RULES_FILE = "./data/alert_rules.json"
+
+
+def load_alert_rules(path=ALERT_RULES_FILE):
+    """저장된 알림 룰 테이블. 없으면 빈 테이블(= 아무것도 안 거른다)."""
+    from daangn_ext.alert_rules import RuleTable
+    return RuleTable.load(path)
+
+
+class AlertRulesCache:
+    """룰 파일이 바뀌면 다시 읽는다 — 엑셀을 새로 넣어도 재시작이 필요 없다."""
+
+    def __init__(self, path=ALERT_RULES_FILE):
+        self.path = path
+        self._mtime = None
+        self._table = None
+
+    def get(self):
+        try:
+            mt = os.path.getmtime(self.path)
+        except OSError:
+            mt = None
+        if self._table is None or mt != self._mtime:
+            self._mtime, self._table = mt, load_alert_rules(self.path)
+        return self._table
+
+
 _WATCH_LABELS = {
     "entered_range": "🎯 조건 진입(가격 인하)",
     "price_down": "↓ 가격 인하",
@@ -136,7 +166,7 @@ _WATCH_LABELS = {
 }
 
 
-def mark_range_entries(events, store, router):
+def mark_range_entries(events, store, router, rules=None):
     """가격이 내려와 조건 범위에 '들어온' 이벤트를 따로 표시한다.
 
     상한보다 비싸 알림을 보내지 않은 매물도 추적은 하고 있다(라우터가 당근에
@@ -147,8 +177,10 @@ def mark_range_entries(events, store, router):
     판정 근거는 인하 전후 가격이다. 내리기 전에는 범위 밖이었고 내린 뒤
     범위 안이면 '조건 진입'이다. 원래부터 범위 안이던 매물의 인하는 지금처럼
     '가격 인하'로 남는다."""
-    if not events or store is None or router is None:
+    has_rules = rules is not None and len(rules)
+    if not events or store is None or (router is None and not has_rules):
         return events
+    from daangn_ext.alert_rules import HIT
     out = []
     for e in events:
         if e.get("kind") != "price_down":
@@ -156,15 +188,26 @@ def mark_range_entries(events, store, router):
             continue
         try:
             row = store.get(e.get("id")) or {}
-            cond = router.condition_for(row.get("keyword"))
-            mx = cond.get("max")
-            mn = cond.get("min")
             new, old = int(e.get("new") or 0), int(e.get("old") or 0)
-            if mx and new and old:
+            if has_rules:
+                # 룰 테이블이 있으면 그게 조건의 진실이다. 제목으로 어느 룰에
+                # 맞는지 다시 판정한다 — 등록 키워드(브랜드)에는 모델별
+                # 가격대가 없다.
+                title = e.get("title") or row.get("title") or ""
+
+                def inside(v):
+                    return rules.verdict(title, v)[0] == HIT
+                ok = bool(new and old)
+            else:
+                cond = router.condition_for(row.get("keyword"))
+                mx = cond.get("max")
+                mn = cond.get("min")
+
                 def inside(v):
                     return (mn is None or v >= int(mn)) and v <= int(mx)
-                if inside(new) and not inside(old):
-                    e = dict(e, kind="entered_range")
+                ok = bool(mx and new and old)
+            if ok and inside(new) and not inside(old):
+                e = dict(e, kind="entered_range")
         except Exception:
             pass
         out.append(e)
@@ -834,7 +877,7 @@ class HeadlessSweepRunner:
             self.start()
 
 
-def filter_by_conditions(matches, router, log=None):
+def filter_by_conditions(matches, router, log=None, rules=None):
     """앱 경로 매칭에 등록 조건을 한 번 더 태운다.
 
     앱 알림은 당근 서버가 판정하고, 우리가 넘길 수 있는 건 최소가·최대가·
@@ -843,17 +886,43 @@ def filter_by_conditions(matches, router, log=None):
     등록된 20개 브랜드가 전부 app 경로였고 추가키워드·끌올일수가 하나도
     안 걸리고 있었다).
 
+    rules(알림 조건 엑셀)가 있으면 그게 조건의 진실이다 — 등록은 브랜드
+    단위라 모델별 가격대를 담을 수 없기 때문이다. 표의 한 줄이라도 맞으면
+    알리고, 상한만 넘긴 매물은 추적으로 돌린다.
+
     앱 매칭 payload 에는 제목·가격만 있고 본문과 끌올 시각이 없다. 그래서
     여기서는 제목과 가격까지만 본다 — 본문에만 있는 제외어와 끌올일수는
     이 경로에서 거를 수 없고 검색 스윕이 맡는다. 가격을 못 읽으면 가격
     조건은 건너뛴다(못 읽었다는 이유로 버리지 않는다).
     """
     items = list(matches or [])
-    if not items or router is None:
+    has_rules = rules is not None and len(rules)
+    if not items or (router is None and not has_rules):
         return items, [], 0
+    from daangn_ext.alert_rules import HIT, WATCH
     from daangn_ext.article_watch import parse_price_text
+    from daangn_ext.search_filters import (contains_keyword, looks_wanted_ad,
+                                           normalize_text)
     kept, watch_only, cut = [], [], 0
     for m in items:
+        raw_title = m.get("title") or ""
+        # 삽니다/구합니다 글은 조건 유무와 무관하게 판매 매물이 아니다.
+        if looks_wanted_ad(raw_title):
+            cut += 1
+            continue
+        if has_rules:
+            # 룰 테이블이 있으면 등록 키워드에 걸린 조건 대신 이걸 쓴다.
+            # 등록은 브랜드 단위라 모델별 가격대를 담을 수 없다.
+            verdict, rule = rules.verdict(raw_title, m.get("price"))
+            if verdict == HIT:
+                # 어느 줄에 걸렸는지 알림에 남긴다 — 등록 키워드는 브랜드라
+                # "[루이비통]" 만 뜨면 어떤 조건에 맞았는지 알 수 없다.
+                kept.append(dict(m, _rule=rule.label()))
+            elif verdict == WATCH:
+                watch_only.append(m)
+            else:
+                cut += 1
+            continue
         try:
             cond = router.condition_for(m.get("keyword"))
         except Exception:
@@ -861,11 +930,13 @@ def filter_by_conditions(matches, router, log=None):
         if not cond:
             kept.append(m)
             continue
-        title = (m.get("title") or "").lower()
+        title = normalize_text(raw_title)
         over_max = False
-        ok = all(str(x).lower() not in title for x in (cond.get("exclude") or []) if x)
+        ok = True
         if ok:
-            ok = all(str(x).lower() in title for x in (cond.get("extra") or []) if x)
+            ok = all(not contains_keyword(title, x) for x in (cond.get("exclude") or []) if x)
+        if ok:
+            ok = all(contains_keyword(title, x) for x in (cond.get("extra") or []) if x)
         if ok and (cond.get("min") is not None or cond.get("max") is not None):
             price = parse_price_text(m.get("price"))
             if price:
@@ -1051,7 +1122,8 @@ class _NotifyThread(QtCore.QThread):
                 from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=emit)
                 for m in self.items:
-                    line = (f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
+                    line = (f"🎯 [{m.get('_rule') or m.get('keyword') or ''}]"
+                            f" {(m.get('title') or '')[:50]}\n"
                             f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
                             f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
                     tg.enqueue(line)
@@ -2189,7 +2261,10 @@ class MainWindow(QMainWindow):
         self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 전계정등록(전국)")
         self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
+        # 등록은 브랜드 단위로 넓게, 모델별 조건 수백 줄은 이 엑셀이 맡는다.
+        self.alertRulesBtn = QtWidgets.QPushButton("알림 조건 엑셀")
         r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkAllBtn)
+        r1.addWidget(self.alertRulesBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
         v.addWidget(form)
@@ -2347,11 +2422,13 @@ class MainWindow(QMainWindow):
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
         self.alertPollBtn.clicked.connect(self.on_alert_poll)
         self.alertBulkAllBtn.clicked.connect(self.on_alert_bulk_all)
+        self.alertRulesBtn.clicked.connect(self.on_alert_rules_excel)
         self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
         self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
         self.alertFleetBtn.clicked.connect(self.on_alert_fleet)
         self.alertTgTestBtn.clicked.connect(self.on_alert_tg_test)
         self._alert_worker = None
+        self._alert_rules = AlertRulesCache()
         self._match_links = {}
         self._last_harvest_ts = 0
         self._last_poll_ts = 0
@@ -3248,7 +3325,8 @@ class MainWindow(QMainWindow):
             self._last_new = 0
             return
         matches, watch_only, _ = filter_by_conditions(
-            matches, getattr(self, "_router", None), self._alog)
+            matches, getattr(self, "_router", None), self._alog,
+            rules=self._alert_rules.get())
         new_items, dropped = dedupe_new_matches(
             matches, self._watch_store, self._match_seen_fallback)
         new = len(new_items)
@@ -3313,7 +3391,8 @@ class MainWindow(QMainWindow):
 
     def _notify_watch_events(self, events):
         events = mark_range_entries(events, self._watch_store,
-                                    getattr(self, "_router", None))
+                                    getattr(self, "_router", None),
+                                    rules=self._alert_rules.get())
         lines = watch_event_lines(events)
         if not lines:
             return
@@ -4248,6 +4327,141 @@ class MainWindow(QMainWindow):
             dlg.accept()
 
         sampleBtn.clicked.connect(do_sample)
+        loadBtn.clicked.connect(do_load)
+        closeBtn.clicked.connect(dlg.reject)
+        dlg.exec()
+
+    RULE_COLS = ["키워드", "최소가격", "최대가격", "제외"]
+    RULE_SAMPLE = [
+        ["루이비통 오버 더 문", 500000, 1500000, ""],
+        ["루이비통 반둘리에 50", 600000, 2000000, "레플 미러"],
+        ["루이비통 몽테뉴 GM", 700000, 1000000, ""],
+    ]
+
+    def on_alert_rules_excel(self):
+        """알림 조건 엑셀 — 수백 줄짜리 모델별 조건표를 알림 필터로 건다.
+
+        앱 알림 키워드 등록에는 상한이 있어(수십 개) 모델 수백 개를 키워드로
+        등록할 수 없다. 그래서 '루이비통' 같은 브랜드로 넓게 받아 놓고, 이
+        표에 맞는 매물만 알린다. 한 줄이라도 맞으면 알린다.
+        """
+        from daangn_ext.alert_rules import load_rules_from_excel, RuleTable
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("알림 조건 엑셀"); dlg.resize(620, 420)
+        v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
+        v.addWidget(QtWidgets.QLabel(
+            "브랜드로 넓게 등록해 받은 매물 중, 이 표의 조건에 맞는 것만 알립니다.\n"
+            "키워드만 필수. 띄어쓰기는 무시합니다"
+            " — '루이비통 오버 더 문'은 '루이비통오버더문'도 잡습니다."))
+        cap = QtWidgets.QLabel(dlg)
+        v.addWidget(cap)
+        tbl = QtWidgets.QTableWidget(0, len(self.RULE_COLS), dlg)
+        tbl.setHorizontalHeaderLabels(self.RULE_COLS)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        v.addWidget(tbl, 1)
+
+        PREVIEW = 50            # 수백 줄을 다 그리면 창이 뜨는 데만 오래 걸린다
+
+        def fill_table():
+            """적용 중인 조건이 있으면 그걸 보여준다 — 샘플을 현재 조건으로
+            착각하는 일을 막는다."""
+            rules = self._alert_rules.get().rules
+            if rules:
+                shown = rules[:PREVIEW]
+                cap.setText(f"적용 중인 조건 {len(rules)}줄"
+                            + (f" (앞 {PREVIEW}줄만 표시)" if len(rules) > PREVIEW else ""))
+                rows = [[r.keyword, r.min_price or "", r.max_price or "",
+                         ", ".join(r.exclude)] for r in shown]
+            else:
+                cap.setText("적용 중인 조건 없음 — 아래는 엑셀 형식 예시입니다")
+                rows = self.RULE_SAMPLE
+            tbl.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                for c, val in enumerate(row):
+                    tbl.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
+            tbl.resizeColumnsToContents()
+        v.addWidget(QtWidgets.QLabel(
+            "· 최대가격을 넘긴 매물은 알리지 않고 추적하다가, 값이 내려와"
+            " 범위에 들어오면 그때 알립니다\n"
+            "· '삽니다/구합니다' 글은 자동으로 걸러집니다\n"
+            "· 키워드 등록의 최소/최대가는 비워 두세요"
+            " — 당근 서버가 먼저 걸러버리면 여기까지 오지 않습니다\n"
+            "· 제외는 쉼표로 구분합니다 — 'A급 레플리카, 부속품'은 두 구절입니다"))
+        stat = QtWidgets.QLabel(dlg)
+
+        def show_stat():
+            n = len(self._alert_rules.get())
+            stat.setText(f"현재 적용 중인 조건: {n}줄"
+                         if n else "현재 적용 중인 조건 없음 — 전부 알립니다")
+            fill_table()
+        show_stat()
+        v.addWidget(stat)
+
+        bb = QtWidgets.QHBoxLayout()
+        sampleBtn = QtWidgets.QPushButton("샘플 엑셀 저장", dlg)
+        clearBtn = QtWidgets.QPushButton("조건 비우기", dlg)
+        loadBtn = QtWidgets.QPushButton("파일 선택해서 불러오기", dlg)
+        loadBtn.setObjectName("startBtn")
+        closeBtn = QtWidgets.QPushButton("닫기", dlg)
+        bb.addWidget(sampleBtn); bb.addWidget(clearBtn); bb.addStretch(1)
+        bb.addWidget(closeBtn); bb.addWidget(loadBtn)
+        v.addLayout(bb)
+
+        def do_sample():
+            p, _ = QtWidgets.QFileDialog.getSaveFileName(
+                dlg, "샘플 저장", "알림조건_샘플.xlsx", "Excel (*.xlsx)")
+            if not p:
+                return
+            from openpyxl import Workbook
+            wb = Workbook(); ws = wb.active; ws.title = "조건"
+            ws.append(self.RULE_COLS)
+            for row in self.RULE_SAMPLE:
+                ws.append(row)
+            wb.save(p)
+            QtWidgets.QMessageBox.information(dlg, "저장됨", f"샘플 저장:\n{p}")
+
+        def save_table(table):
+            os.makedirs(os.path.dirname(ALERT_RULES_FILE), exist_ok=True)
+            table.save(ALERT_RULES_FILE)
+            self._alert_rules.get()          # mtime 캐시 갱신
+            show_stat()
+
+        def do_clear():
+            if QtWidgets.QMessageBox.question(
+                    dlg, "조건 비우기",
+                    "알림 조건을 모두 지웁니다. 이후 등록 키워드에 걸린 조건으로"
+                    " 돌아갑니다. 진행할까요?") != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            save_table(RuleTable())
+            self._alog("[알림조건] 조건표를 비웠습니다 — 등록 조건으로 돌아갑니다")
+
+        def do_load():
+            p, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dlg, "알림 조건 엑셀 선택", "", "Excel (*.xlsx *.xlsm)")
+            if not p:
+                return
+            try:
+                rules, errors = load_rules_from_excel(p)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(dlg, "오류", f"엑셀 로드 오류:\n{e}")
+                return
+            for msg in errors[:5]:
+                self._alog(f"[알림조건] {msg}")
+            if not rules:
+                QtWidgets.QMessageBox.warning(
+                    dlg, "실패", "읽은 조건이 없습니다.\n" + ("\n".join(errors[:3])))
+                return
+            save_table(RuleTable(rules))
+            self._alog(f"[알림조건] {len(rules)}줄 적용 — 이 조건에 맞는 매물만 알립니다")
+            QtWidgets.QMessageBox.information(
+                dlg, "적용됨",
+                f"조건 {len(rules)}줄을 적용했습니다.\n"
+                "키워드 등록은 브랜드 단위로 유지하세요 — 수집은 넓게,"
+                " 알림은 이 표로 거릅니다.")
+
+        sampleBtn.clicked.connect(do_sample)
+        clearBtn.clicked.connect(do_clear)
         loadBtn.clicked.connect(do_load)
         closeBtn.clicked.connect(dlg.reject)
         dlg.exec()
@@ -5827,7 +6041,8 @@ def _run_headless():
                 from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=log)
                 for m in items:
-                    tg.enqueue(f"🎯 [{m.get('keyword') or ''}] {(m.get('title') or '')[:50]}\n"
+                    tg.enqueue(f"🎯 [{m.get('_rule') or m.get('keyword') or ''}]"
+                               f" {(m.get('title') or '')[:50]}\n"
                                f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
                                f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
                 tg.flush(); log(f"[텔레그램] {len(items)}건 전송")
@@ -5896,6 +6111,7 @@ def _run_headless():
     # ── 라우터 · 검색 스윕 — GUI(MainWindow.__init__)와 같은 생성 경로 ──
     # 이게 없으면 앱 슬롯 상한을 넘긴 키워드는 서버에서 아무도 안 본다.
     router = sweep_queue = sweep_runner = None
+    alert_rules = AlertRulesCache()
     seed_state = {}
     # 스윕 스레드가 찾은 매물은 여기로만 건너온다 — sqlite 는 폴링 스레드 소유다.
     import queue as _queue
@@ -6050,7 +6266,8 @@ def _run_headless():
                 matches = m.poll_all(core_only=core_only, log=log)
             except Exception as e:
                 log(f"[폴링] 실패: {str(e)[:60]}"); matches = []
-            matches, watch_only, _ = filter_by_conditions(matches, router, log)
+            matches, watch_only, _ = filter_by_conditions(
+                matches, router, log, rules=alert_rules.get())
             fresh, dropped = dedupe_new_matches(matches, watch_store, fallback_seen)
             if dropped:
                 log(f"[매칭] id 없는 payload {dropped}건 건너뜀")
@@ -6084,7 +6301,7 @@ def _run_headless():
                         watch_budget.reload()
                         lines = watch_event_lines(mark_range_entries(
                             watch_tracker.sweep(watch_budget.next, budget),
-                            watch_store, router))
+                            watch_store, router, rules=alert_rules.get()))
                         if getattr(watch_tracker, "last_sweep_exhausted", False):
                             log("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
                         if lines:
