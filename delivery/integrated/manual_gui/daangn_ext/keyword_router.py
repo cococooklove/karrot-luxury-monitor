@@ -169,8 +169,12 @@ class KeywordRouter:
                 out[str(k)] = e
         return out, observed
 
-    def _save(self) -> None:
+    def _save(self, clear_cap: bool = False) -> None:
         """디스크와 **병합**해서 쓴다. 통째로 덮지 않는다.
+
+        clear_cap 은 '관측 상한을 지우려고 저장한다'는 뜻이다. 평소 병합은
+        상한을 하강만 시키므로, 그냥 저장하면 방금 지운 값을 디스크에서 도로
+        집어온다 — reset 이 아무 일도 안 한 것이 된다.
 
         이 파일은 한 프로세스만 쓰지 않는다. 클라는 `--manual`(수동검색)과
         `--watch`(매물감시)를 두 프로그램으로 띄우고, 실수로 같은 창이 둘 뜨는
@@ -213,7 +217,9 @@ class KeywordRouter:
                     else:
                         merged[k] = mine
                 cap = self._observed_cap
-                if cap is None:
+                if clear_cap:
+                    cap = None                  # 지우려는 저장 — 디스크 값도 버린다
+                elif cap is None:
                     cap = disk_cap
                 elif disk_cap is not None:
                     cap = min(cap, disk_cap)    # 상한 관측은 하강만 한다
@@ -302,7 +308,7 @@ class KeywordRouter:
         if self._observed_cap is None:
             return False
         self._observed_cap = None
-        self._save()
+        self._save(clear_cap=True)
         if log:
             log("  앱 슬롯 상한 관측치 초기화")
         return True
@@ -338,7 +344,7 @@ class KeywordRouter:
             # 믿기로 한 것이다 — 남아 있던 관측 상한(예: 예전에 다 지워진
             # 뒤에도 파일에 남았던 값)도 같이 씻어낸다.
             self._observed_cap = None
-            self._save()
+            self._save(clear_cap=True)
         return n
 
     # ── 배정 ──

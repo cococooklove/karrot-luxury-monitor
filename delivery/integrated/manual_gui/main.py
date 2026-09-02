@@ -3244,6 +3244,9 @@ class MainWindow(QMainWindow):
                         f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
             except Exception as e:
                 self._alog(f"[라우터] 기존 등록 인식 실패: {str(e)[:80]}")
+            # 씨딩이 방금 route 를 만들었다 — 위에서 읽어 둔 맵은 그걸 모른다.
+            # 낡은 맵으로 그리면 경로 열이 전부 '-' 로 뜬다.
+            routes = self._routes_map()
         self.alertTable.setRowCount(0)
         shown = set()
         for k in kws:
