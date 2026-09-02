@@ -81,6 +81,43 @@ ck("서브프로세스에서 알림 페이로드까지 나옴",
    str(data.get("founds"))[:120])
 ck("stop() 이 플래그를 세움", data.get("stopped") is True)
 
+print("\n=== A-2. 조건표를 스윕도 본다 ===")
+# 브랜드는 가격 제한 없이 등록한다. 스윕이 등록 조건만 보던 동안, 그 브랜드
+# 전 매물이 조건표를 무시하고 알림으로 나갔다.
+import tempfile as _tf
+from daangn.sweep_engine import SweepEngine as _SE
+from daangn_ext.alert_rules import RuleTable as _RT, parse_rule_rows as _prr
+
+_d = _tf.mkdtemp()
+_rp = os.path.join(_d, "alert_rules.json")
+_RT(_prr([("브랜드", "제품명", "최소가격", "최대가격", "제외"),
+          ("루이비통", "오버 더 문", 500000, 1500000, ""),
+          ("루이비통", "반둘리에 50", 600000, 2000000, "레플리카")])[0]).save(_rp)
+_arts = [{"id": "1", "title": "루이비통 오버더문 급처", "price": 900000, "content": ""},
+         {"id": "2", "title": "루이비통 오버더문", "price": 3000000, "content": ""},
+         {"id": "3", "title": "루이비통 오버더문", "price": 200000, "content": ""},
+         {"id": "4", "title": "루이비통 반둘리에50 레플리카", "price": 900000, "content": ""},
+         {"id": "5", "title": "루이비통 스피디 30", "price": 900000, "content": ""},
+         {"id": "6", "title": "루이비통 오버더문 삽니다", "price": 900000, "content": ""},
+         {"id": "7", "title": "루이비통 가방", "price": 900000,
+          "content": "상세 오버더문 정품"}]
+
+def _run(rules_path, min_p=None, max_p=None):
+    sent = []
+    eng = _SE({"db_path": os.path.join(_d, os.path.basename(rules_path) + ".db"),
+               "rules_path": rules_path, "tg_token": "", "tg_chat": ""})
+    eng.notify = lambda region, a, price: sent.append(a["title"])
+    eng._dedup_notify(_arts, "강남구", min_p, max_p, None)
+    return sent
+
+_sent = _run(_rp)
+ck("조건표가 있으면 그것만 알린다",
+   _sent == ["루이비통 오버더문 급처", "루이비통 가방"], str(_sent))
+ck("본문에만 있는 제품명도 잡는다", "루이비통 가방" in _sent)
+ck("상한 초과·하한 미달·제외어·삽니다·표에 없는 건 안 알린다", len(_sent) == 2)
+ck("조건표가 없으면 예전처럼 등록 가격범위로",
+   len(_run(os.path.join(_d, "none.json"), 500000, 1500000)) == 5)
+
 print("\n=== B. 모듈 분리 형태 ===")
 
 import daangn.sweep_engine as se

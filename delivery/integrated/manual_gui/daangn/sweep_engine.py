@@ -275,6 +275,12 @@ class SweepEngine:
         self.on_found = on_found or _noop
         self.on_status = on_status or _noop
         self._stop = False
+        # 조건표 — 앱 알림과 같은 파일을 본다. 이게 없던 동안 스윕은 등록
+        # 조건(브랜드 + 가격)만 봤는데, 브랜드는 가격 제한 없이 등록하므로
+        # 사실상 그 브랜드 전 매물이 알림으로 나갔다.
+        self._rules_path = cfg.get("rules_path", "./data/alert_rules.json")
+        self._rules_mtime = None
+        self._rules = None
         self.db = sqlite3.connect(cfg.get("db_path", "./auto_seen.db"),
                                   check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS seen("
@@ -404,14 +410,35 @@ class SweepEngine:
             return [r["in"] for r in load_dong_regions(self.cfg["out_json"])]
         return self.cfg.get("regions", [])
 
+    def _rules_now(self):
+        """조건표. 파일이 바뀌면 다시 읽는다(엑셀을 새로 넣어도 재시작 불필요)."""
+        try:
+            mt = os.path.getmtime(self._rules_path)
+        except OSError:
+            mt = None
+        if self._rules is None or mt != self._rules_mtime:
+            from daangn_ext.alert_rules import RuleTable
+            self._rules_mtime, self._rules = mt, RuleTable.load(self._rules_path)
+        return self._rules
+
     def _dedup_notify(self, arts, region, min_p, max_p, days):
         cutoff = datetime.now() - timedelta(days=days) if days else None
         cur = self.db
+        rules = self._rules_now()
         new = changed = 0
         for a in arts:
             aid = str(a.get("id"))
             price = _pi(a.get("price"))
-            if (min_p and price < min_p) or (max_p and price > max_p):
+            if len(rules):
+                # 조건표가 있으면 그게 진실이다 — 등록 조건 대신 이걸 쓴다.
+                # 스윕에는 '상한 초과 추적'이 없다(워치리스트는 앱 경로가 만든다).
+                # 조건 밖이면 seen 에도 남기지 않는다 — 나중에 값이 내려와
+                # 조건 안으로 들어오면 그때 처음 알려야 한다.
+                from daangn_ext.alert_rules import HIT
+                if rules.verdict(a.get("title") or "", price,
+                                 a.get("content") or "")[0] != HIT:
+                    continue
+            elif (min_p and price < min_p) or (max_p and price > max_p):
                 continue
             if cutoff:
                 try:
