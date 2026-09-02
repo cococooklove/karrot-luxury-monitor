@@ -177,6 +177,20 @@ if _win is not None:
            f"{sum(1 for k in _kids if k.isHidden())}/{len(_kids)}")
         _win.advancedBox.setChecked(True)
         ck("펼치면 다시 보임", not any(k.isHidden() for k in _kids))
+        # 지역 훑기 상자를 없앴다 — 펼쳐도 지역 트리·전국 체크만 보이고
+        # 휴식·지역 간·레인·주기·커버 스핀박스는 안 보인다.
+        # isHidden 은 자기 자신에 hide 를 불렀을 때만 참이다 — 숨긴 것은
+        # 컨테이너라 isVisibleTo(고급) 로 본다.
+        _ab = _win.advancedBox
+        ck("펼쳐도 튜닝 스핀박스는 숨김",
+           not any(w.isVisibleTo(_ab) for w in (
+               _win.autoRestMin, _win.autoGapMin, _win.autoLanes,
+               _win.alertPollInterval, _win.alertCoverMode)))
+        ck("지역 트리·전국 체크는 보임",
+           _win.autoAreaTree.isVisibleTo(_ab) and _win.autoNationwide.isVisibleTo(_ab))
+        ck("'지역 훑기' 상자 없음",
+           not any(b.title() == "지역 훑기"
+                   for b in _win.advancedBox.findChildren(_QW.QGroupBox)))
         _win.advancedBox.setChecked(False)
     # ── 상태칩 → 고급 패널 항목 (설계 §1: 칩 클릭은 해당 항목으로 스크롤) ──
     ck("상태칩 존재",
@@ -194,20 +208,22 @@ if _win is not None:
        all(any(getattr(_win, a) in b.findChildren(_QW.QWidget) for b in _sections)
            for a in _win.CHIP_TARGETS.values()), str(_win.CHIP_TARGETS))
     ck("탭이 스크롤 영역 안에 있다",
-       _win._enclosing_scroll(_win.alertCoverMode) is not None)
+       _win._enclosing_scroll(_win.autoAccountsBtn) is not None)
     _win.advancedBox.setChecked(False)
-    _moved = _win.on_chip_clicked("coverage")
+    _moved = _win.on_chip_clicked("token")
     ck("칩을 누르면 접힌 고급 패널이 펴진다",
        _moved and _win.advancedBox.isChecked())
-    ck("커버리지 칩 → 커버 모드로 데려간다",
-       _win.focusWidget() is _win.alertCoverMode, str(_win.focusWidget()))
-    ck("펴진 목적지는 보인다", not _win.alertCoverMode.isHidden())
-    ck("이미 펴져 있어도 데려간다", _win.on_chip_clicked("poll"))
-    ck("다음폴링 칩 → 폴링 주기", _win.focusWidget() is _win.alertPollInterval,
-       str(_win.focusWidget()))
-    ck("토큰·계정 칩 → 계정+프록시",
-       _win.on_chip_clicked("token") and _win.on_chip_clicked("accounts")
+    ck("토큰 칩 → 계정+프록시로 데려간다",
+       _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
+    ck("펴진 목적지는 보인다", not _win.autoAccountsBtn.isHidden())
+    ck("이미 펴져 있어도 데려간다", _win.on_chip_clicked("accounts")
        and _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
+    # 커버 모드·폴링 주기는 화면에서 뺐다 — 칩은 값만 보여주고 데려가지 않는다.
+    ck("커버리지·폴링 칩은 목적지가 없다",
+       "coverage" not in _win.CHIP_TARGETS and "poll" not in _win.CHIP_TARGETS)
+    ck("커버 모드·주기 위젯은 살아 있되 숨김",
+       not _win.alertCoverMode.isVisibleTo(_win.advancedBox)
+       and not _win.alertPollInterval.isVisibleTo(_win.advancedBox))
     # 대응 항목 없는 칩은 아무 데도 데려가지 않는다(엉뚱한 목적지보다 낫다).
     ck("추적중은 목적지가 없다", "watch" not in _win.CHIP_TARGETS)
     ck("모르는 칩은 무시", _win.on_chip_clicked("watch") is False)

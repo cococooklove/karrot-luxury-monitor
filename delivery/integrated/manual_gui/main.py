@@ -1363,6 +1363,33 @@ class _AlertWorker(QtCore.QThread):
             self.done.emit(None)
 
 
+def emul_reconcile(rows, attached, is_window):
+    """스캔 행 + 부착 중인 창 → (live, detach).
+
+    attached: ld index -> 탭에 부착된 child hwnd.
+    부착된 창은 WS_CHILD 라 EnumWindows(top-level 열거)에 안 잡힌다. 그래서
+    스캔 결과에 없거나 다른 창(같은 pid 의 툴바 등)으로 잡혀도 '사라졌다'가
+    아니다 — 부착 창의 생사는 IsWindow 로만 본다. 죽었으면 detach 에 넣고,
+    그 인스턴스가 새 창으로 다시 떴으면 스캔이 준 새 창을 live 에 남긴다.
+    """
+    live = {r["index"]: r for r in rows
+            if r["running"] and r["top_hwnd"] and is_window(r["top_hwnd"])}
+    by_index = {r["index"]: r for r in rows}
+    detach = []
+    for idx, hwnd in attached.items():
+        if not is_window(hwnd):
+            detach.append(idx)
+            continue
+        r = dict(live.get(idx) or by_index.get(idx)
+                 or {"index": idx, "name": "", "pid": 0})
+        r["top_hwnd"] = hwnd
+        r["running"] = True
+        if not r.get("title"):
+            r["title"] = r.get("name") or f"인스턴스 {idx}"
+        live[idx] = r
+    return live, detach
+
+
 class _LdListThread(QtCore.QThread):
     """ldconsole list2 조회 — LDPlayer 가 hang 해도 GUI 가 멈추지 않게 별도 스레드."""
     rows = QtCore.pyqtSignal(object)
@@ -1954,13 +1981,12 @@ class MainWindow(QMainWindow):
 
     # ── 에뮬레이터 탭 (LDPlayer 인스턴스를 한 화면에서) ────────────────
     # LDPlayer 는 인스턴스마다 독립 창을 띄우고 탭 UI 가 없다. 계정이 늘면
-    # 창이 화면을 뒤덮는다. 그래서:
-    #   1) 안 보는 인스턴스 창은 화면 밖으로 치워 둔다(프로세스는 계속 동작)
-    #   2) 왼쪽에 인스턴스 썸네일 그리드 — 100개도 한 화면에서 훑는다
-    #   3) 카드를 누른 것만 오른쪽에 탭으로 부착해 직접 조작
-    # 전부 부착하지 않는 이유: 앱이 죽으면 자식 창이 같이 파괴되므로 노출을
-    # 실제로 보고 있는 몇 개로 제한한다.
-    EMUL_MAX_ATTACH = 4          # 동시에 탭으로 여는 최대 인스턴스
+    # 창이 화면을 뒤덮는다. 그래서 LDPlayer 창은 앱 바깥에 절대 두지 않는다:
+    #   1) 스캔이 찾은 실행 중 인스턴스는 전부 오른쪽 탭으로 부착한다
+    #   2) 부착 못 한 창(실패·틈새)은 화면 밖으로 치우고 다음 스캔에서 재시도
+    #   3) 왼쪽 카드는 탭으로 가는 목차
+    # 대가: 앱이 비정상 종료하면 자식이 된 인스턴스 창이 같이 파괴된다.
+    # 정상 종료는 _emul_shutdown 이 창을 전부 되돌린다.
     EMUL_THUMB_BATCH = 6         # 한 틱에 캡처할 인스턴스 수(라운드로빈)
 
     def _build_emul_tab(self):
@@ -1985,16 +2011,8 @@ class MainWindow(QMainWindow):
         bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
         self.emulStatus = QtWidgets.QLabel("확인 중…")
         self.emulStatus.setStyleSheet("color:#5C5449; font-size:13px;")
-        self.emulStowChk = QtWidgets.QCheckBox("안 보는 창 치우기", w)
-        self.emulStowChk.setChecked(True)
-        self.emulStowChk.setToolTip(
-            "탭으로 열지 않은 인스턴스 창을 화면 밖으로 보내 작업표시줄에서도 감춘다.\n"
-            "인스턴스는 그대로 돌아가고 썸네일도 계속 갱신된다. 끄면 원래 자리로 복귀.")
-        self.emulStowChk.toggled.connect(self._emul_stow_toggled)
         self.emulRefreshBtn = QtWidgets.QPushButton("새로고침", w)
         self.emulRefreshBtn.clicked.connect(lambda: self._emul_scan())
-        self.emulCloseAllBtn = QtWidgets.QPushButton("열린 탭 모두 닫기", w)
-        self.emulCloseAllBtn.clicked.connect(self._emul_detach_all)
         # 계정을 늘리는 유일한 경로다. '계정+프록시' 의 refresh 토큰 추가는 당근
         # WAF 이전 경로라 지금은 동작하지 않는다 — 토큰은 에뮬 안 앱에서만 나온다.
         self.emulAddBtn = QtWidgets.QPushButton("계정 추가(.ldbk 복원)", w)
@@ -2003,13 +2021,12 @@ class MainWindow(QMainWindow):
             "계정 백업(.ldbk)을 새 에뮬레이터 인스턴스로 복원합니다.\n"
             "복원한 인스턴스가 곧 계정입니다.")
         self.emulAddBtn.clicked.connect(self.on_emul_add_clicked)
-        for b in (self.emulRefreshBtn, self.emulCloseAllBtn, self.emulAddBtn):
+        for b in (self.emulRefreshBtn, self.emulAddBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
         bar.addWidget(self.emulStatus); bar.addStretch(1)
         bar.addWidget(self.emulAddBtn)
-        bar.addWidget(self.emulStowChk); bar.addWidget(self.emulRefreshBtn)
-        bar.addWidget(self.emulCloseAllBtn)
+        bar.addWidget(self.emulRefreshBtn)
         v.addLayout(bar)
 
         split = QtWidgets.QSplitter(Qt.Orientation.Horizontal, w)
@@ -2018,7 +2035,7 @@ class MainWindow(QMainWindow):
         left = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(6)
-        cap = QtWidgets.QLabel("인스턴스 — 클릭하면 오른쪽 탭으로 열림")
+        cap = QtWidgets.QLabel("인스턴스 — 클릭하면 그 탭으로 이동")
         cap.setStyleSheet("color:#8A6D1F; font-weight:800; font-size:14px;")
         lv.addWidget(cap)
         gridHost = QtWidgets.QWidget()
@@ -2042,11 +2059,9 @@ class MainWindow(QMainWindow):
         rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
         self.emulTabs = QtWidgets.QTabWidget(right)
         self.emulTabs.setDocumentMode(True)
-        self.emulTabs.setTabsClosable(True)
-        self.emulTabs.tabCloseRequested.connect(self._emul_tab_closed)
+        self.emulTabs.setTabsClosable(False)   # 닫으면 창이 바탕화면으로 나간다
         self.emulHint = QtWidgets.QLabel(
-            "왼쪽 카드를 클릭하면 그 인스턴스 화면이 여기 탭으로 붙습니다 "
-            f"(동시 최대 {self.EMUL_MAX_ATTACH}개).")
+            "실행 중인 인스턴스 화면이 여기 탭으로 자동으로 붙습니다.")
         self.emulHint.setWordWrap(True)
         self.emulHint.setStyleSheet("color:#78705F; font-size:13px;")
         rv.addWidget(self.emulHint)
@@ -2068,8 +2083,7 @@ class MainWindow(QMainWindow):
 
         if not ldwin.IS_WINDOWS:
             self.emulStatus.setText("Windows 전용 기능입니다.")
-            for c in (self.emulRefreshBtn, self.emulCloseAllBtn, self.emulStowChk):
-                c.setEnabled(False)
+            self.emulRefreshBtn.setEnabled(False)
         elif not self._emul_console:
             self.emulStatus.setText("ldconsole.exe 를 못 찾음 — LDPlayer 설치경로 확인")
         else:
@@ -2104,8 +2118,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "_emul_closing", True):   # 종료 중 도착한 신호는 무시
             return
         ld = self._ldwin
-        live = {r["index"]: r for r in rows
-                if r["running"] and r["top_hwnd"] and ld.is_window(r["top_hwnd"])}
+        attached = {idx: host.child_hwnd for idx, host in self._emul_hosts.items()}
+        live, detach = emul_reconcile(rows, attached, ld.is_window)
 
         if not self._emul_rescued:
             # 지난 세션이 크래시로 죽었으면 화면 밖에 창이 남아 있다 — 되살린다.
@@ -2116,10 +2130,8 @@ class MainWindow(QMainWindow):
         self._emul_live = live
 
         changed = False
-        for idx, host in list(self._emul_hosts.items()):
-            r = live.get(idx)
-            if r is None or r["top_hwnd"] != host.child_hwnd:
-                self._emul_detach(idx, restow=False)
+        for idx in detach:                   # 부착 창이 정말 죽은 경우만
+            self._emul_detach(idx)
         for idx in list(self._emul_cards):
             if idx not in live:
                 card = self._emul_cards.pop(idx)
@@ -2136,10 +2148,13 @@ class MainWindow(QMainWindow):
         if changed:
             self._emul_relayout()
 
-        if self.emulStowChk.isChecked():
-            for idx, r in live.items():
-                if idx not in self._emul_hosts:
-                    self._emul.stow(r["top_hwnd"])
+        # 실행 중 인스턴스는 전부 탭으로. 못 붙인 창은 바탕화면 대신 화면 밖으로.
+        for idx in sorted(live):
+            if idx not in self._emul_hosts:
+                self._emul_attach(idx)
+        for idx, r in live.items():
+            if idx not in self._emul_hosts:
+                self._emul.stow(r["top_hwnd"])
         self._emul.prune()
         self._emul_sync_states()
 
@@ -2160,30 +2175,25 @@ class MainWindow(QMainWindow):
     def _emul_sync_states(self):
         for idx, card in self._emul_cards.items():
             if idx in self._emul_hosts:
-                card.set_state("탭에서 보는 중", True)
-            elif self.emulStowChk.isChecked():
-                card.set_state("동작 중 · 창 치움", False)
+                card.set_state("탭에 붙음", True)
             else:
-                card.set_state("동작 중", False)
+                card.set_state("부착 대기 · 창 치움", False)
         self.emulHint.setVisible(not self._emul_hosts)
         self.emulStatus.setText(
-            f"인스턴스 {len(self._emul_live)}개 · 탭 {len(self._emul_hosts)}"
-            f"/{self.EMUL_MAX_ATTACH}개")
+            f"인스턴스 {len(self._emul_live)}개 · 탭 {len(self._emul_hosts)}개")
 
     # -- 부착/분리 -----------------------------------------------------------
     def _emul_card_clicked(self, idx):
         host = self._emul_hosts.get(idx)
         if host is not None:
-            self.emulTabs.setCurrentWidget(host)     # 이미 열려 있으면 그 탭으로
+            self.emulTabs.setCurrentWidget(host)
             return
-        self._emul_attach(idx)
+        self._emul_attach(idx)               # 아직 못 붙은 창이면 지금 재시도
 
     def _emul_attach(self, idx):
         r = self._emul_live.get(idx)
-        if r is None:
+        if r is None or idx in self._emul_hosts:
             return
-        while len(self._emul_order) >= self.EMUL_MAX_ATTACH:
-            self._emul_detach(self._emul_order[0])    # 가장 오래된 탭부터 정리
 
         host = _EmbedHost(self._emul, self.emulTabs)
         pos = self.emulTabs.addTab(host, r.get("title") or r["name"]
@@ -2195,15 +2205,18 @@ class MainWindow(QMainWindow):
             host.child_hwnd = 0
             self.emulTabs.removeTab(pos)
             host.deleteLater()
-            self.emulStatus.setText(f"인스턴스 {idx} 화면 부착 실패 — 창이 사라졌을 수 있음")
+            self._emul.stow(r["top_hwnd"])   # 바탕화면에 두지 않는다 — 다음 스캔에서 재시도
+            self.emulStatus.setText(f"인스턴스 {idx} 화면 부착 실패 — 다음 스캔에서 재시도")
             return
         self._emul_hosts[idx] = host
         self._emul_order.append(idx)
-        self.emulTabs.setCurrentIndex(pos)
+        if self.emulTabs.count() == 1:
+            self.emulTabs.setCurrentIndex(pos)   # 첫 탭만 — 보던 탭을 뺏지 않는다
         self._emul_sync_states()
 
-    def _emul_detach(self, idx, restow=True):
-        """탭을 닫고 창을 원래 top-level 로 복구. 정책이 켜져 있으면 다시 치운다."""
+    def _emul_detach(self, idx):
+        """탭을 걷고 창을 top-level 로 되돌린 뒤 바로 화면 밖으로 치운다.
+        (살아 있는 창이 바탕화면에 나타나는 순간이 없어야 한다)"""
         host = self._emul_hosts.pop(idx, None)
         if idx in self._emul_order:
             self._emul_order.remove(idx)
@@ -2215,28 +2228,7 @@ class MainWindow(QMainWindow):
         if pos >= 0:
             self.emulTabs.removeTab(pos)
         host.deleteLater()
-        if restow and self.emulStowChk.isChecked():
-            self._emul.stow(hwnd)
-        self._emul_sync_states()
-
-    def _emul_tab_closed(self, pos):
-        w = self.emulTabs.widget(pos)
-        for idx, host in list(self._emul_hosts.items()):
-            if host is w:
-                self._emul_detach(idx)
-                return
-
-    def _emul_detach_all(self):
-        for idx in list(self._emul_order):
-            self._emul_detach(idx)
-
-    def _emul_stow_toggled(self, on):
-        if on:
-            for idx, r in self._emul_live.items():
-                if idx not in self._emul_hosts:
-                    self._emul.stow(r["top_hwnd"])
-        else:
-            self._emul.unstow_all()
+        self._emul.stow(hwnd)
         self._emul_sync_states()
 
     # -- 썸네일 --------------------------------------------------------------
@@ -2311,8 +2303,9 @@ class MainWindow(QMainWindow):
     CHIP_TARGETS = {
         "token": "autoAccountsBtn",     # 토큰 유효/만료 → 계정+프록시(안에 계정 현황)
         "accounts": "autoAccountsBtn",  # 계정 수 → 같은 곳
-        "coverage": "alertCoverMode",   # 커버리지 → 전국/핵심 커버 모드
-        "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
+        # coverage·poll 칩은 목적지가 없다 — 커버 모드·폴링 주기는 화면에서
+        # 뺐다(감시 시작이 정한다). 보이지 않는 위젯으로 데려가면 아무 일도
+        # 안 일어난 것처럼 보이므로 아예 안 데려간다.
         "rules": "alertRulesBtn",       # 조건 수 → 조건표 엑셀 넣는 자리
     }
 
@@ -2589,13 +2582,20 @@ class MainWindow(QMainWindow):
         self.advancedBox.setChecked(False)
         av = QtWidgets.QVBoxLayout(self.advancedBox)
         self.advancedBox.toggled.connect(self._sync_advanced_visible)
+        sweep = self._build_sweep_settings()
 
-        a1 = QtWidgets.QHBoxLayout()
-        a1.addWidget(QtWidgets.QLabel("주기")); a1.addWidget(self.alertPollInterval)
-        a1.addSpacing(12); a1.addWidget(QtWidgets.QLabel("커버"))
-        a1.addWidget(self.alertCoverMode)
+        # 첫 줄 = 다른 창으로 가는 입구 + 되돌리기. 주기·커버는 감시 시작이
+        # 알아서 정하는 값이라 화면에서 뺐다(위젯은 살아 있고 저장값도 읽는다).
+        a1 = QtWidgets.QHBoxLayout(); a1.setSpacing(8)
+        a1.addWidget(self.autoNotifyBtn)
+        a1.addWidget(self.autoAccountsBtn)
+        a1.addWidget(self.healthLabel)
         a1.addStretch(1); a1.addWidget(self.alertDelAllBtn)
         av.addLayout(a1)
+
+        # 훑을 지역 — 고급에서 클라가 고를 것은 이것 하나다.
+        av.addWidget(QtWidgets.QLabel("── 훑을 지역 ──"))
+        av.addWidget(sweep)
 
         # 등록 상태 — 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
         # 조건과 같은 자리에 두면 둘을 같은 것으로 읽는다.
@@ -2603,7 +2603,6 @@ class MainWindow(QMainWindow):
         av.addWidget(self.alertSubLabel)
         av.addWidget(self.alertTable, 1)
 
-        av.addWidget(self._build_sweep_settings())
         # 체크 해제는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨겨야 하고,
         # setChecked(False) 는 toggled 를 쏘지 않으므로 한 번은 손으로 부른다.
         self._sync_advanced_visible(self.advancedBox.isChecked())
@@ -3886,18 +3885,17 @@ class MainWindow(QMainWindow):
                 if it.checkState(0) == Qt.CheckState.Checked]
 
     def _build_sweep_settings(self):
-        """검색 스윕 설정 — 자동 모니터 탭에서 이사. 값 의미와 위젯 종류는 그대로다.
+        """훑을 지역 — 고급 패널에 그대로 들어가는 위젯(테두리 없음).
 
-        여기 있는 값은 앱 슬롯에 못 들어가 스윕으로 밀린 키워드에만 쓰인다.
-        키워드 입력은 없다 — 라우터가 정한다."""
-        box = QtWidgets.QGroupBox("지역 훑기")
+        예전엔 '지역 훑기' 상자에 휴식·지역 간 간격·레인 스핀박스가 같이
+        있었다. 클라가 만질 값이 아니고, 나란히 있으면 지역을 고르다 그것도
+        건드린다. 화면에는 지역 트리와 전국 체크 하나만 남긴다 — 나머지는
+        살려 두되 숨긴다(저장·복원과 옛 설정 파일이 계속 그 값을 쓴다)."""
+        box = QtWidgets.QWidget(self)
         gv = QtWidgets.QVBoxLayout(box)
-        gv.addWidget(QtWidgets.QLabel(
-            "앱 알림은 계정이 인증한 동네만 봅니다. 그 밖 지역은 여기서 훑습니다.\n"
-            "무엇을 알릴지는 [감시 조건] 의 엑셀이 정합니다 — 여기서는 어디를,"
-            " 얼마나 빠르게만 정합니다."))
+        gv.setContentsMargins(0, 0, 0, 0); gv.setSpacing(6)
 
-        # 지역 — 미선택이면 기본 지역(명품 밀집 5개 구). 전국은 아래 체크박스로만.
+        # 지역 — 미선택이면 기본 지역(서울·경기). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
         area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
         area.setMaximumHeight(280)
@@ -3917,7 +3915,7 @@ class MainWindow(QMainWindow):
         _nw = QtWidgets.QHBoxLayout(); _nw.setSpacing(8)
         _nw.addWidget(self.autoNationwide)
         _nw.addWidget(QtWidgets.QLabel(
-            f"미선택 시 기본 서울·경기 {_dflt_n}동을 훑습니다(전국 아님)"))
+            f"아무것도 안 고르면 서울·경기 {_dflt_n}동을 훑습니다"))
         _nw.addStretch(1)
         gv.addLayout(_nw)
 
@@ -3959,50 +3957,37 @@ class MainWindow(QMainWindow):
         # 유일한 경로라(PC 직접 갱신은 WAF 가 막는다) 끄는 순간 토큰 0 이 된다.
         self._notify = self._load_notify()
 
-        # 가격·추가·제외·끌올은 조건표가 정한다. 화면에 남겨 두면 적어도
-        # 아무 일이 안 일어나서 "적었는데 왜 안 걸리지"만 남는다. 위젯 자체는
-        # 살려 둔다 — 저장·복원과 옛 설정 파일이 이 값을 계속 쓴다.
+        # 가격·추가·제외·끌올은 조건표가, 휴식·지역 간 간격·레인은 기본값이
+        # 정한다. 화면에 남겨 두면 적어도 아무 일이 안 일어나서 "적었는데 왜
+        # 안 걸리지"만 남는다. 위젯 자체는 살려 둔다 — 저장·복원과 옛 설정
+        # 파일이 이 값을 계속 쓴다.
         self._sweepLegacy = QtWidgets.QWidget(box)
         self._sweepLegacy._keepHidden = True
         _lg = QtWidgets.QHBoxLayout(self._sweepLegacy)
         _lg.setContentsMargins(0, 0, 0, 0)
         for _w in (self.autoMin, self.autoMax, self.autoExtra,
-                   self.autoExclude, self.autoDays):
+                   self.autoExclude, self.autoDays,
+                   self.autoRestMin, self.autoRestMax,
+                   self.autoGapMin, self.autoGapMax, self.autoLanes,
+                   self.alertPollInterval, self.alertCoverMode):
             _lg.addWidget(_w)
         self._sweepLegacy.setVisible(False)
         gv.addWidget(self._sweepLegacy)
 
-        s2 = QtWidgets.QHBoxLayout(); s2.setSpacing(8)
-        s2.addWidget(QtWidgets.QLabel("휴식")); s2.addWidget(self.autoRestMin)
-        s2.addWidget(QtWidgets.QLabel("~")); s2.addWidget(self.autoRestMax); s2.addWidget(QtWidgets.QLabel("초"))
-        s2.addSpacing(16)
-        s2.addWidget(QtWidgets.QLabel("지역 간")); s2.addWidget(self.autoGapMin)
-        s2.addWidget(QtWidgets.QLabel("~")); s2.addWidget(self.autoGapMax); s2.addWidget(QtWidgets.QLabel("초"))
-        s2.addSpacing(16)
-        s2.addWidget(QtWidgets.QLabel("레인")); s2.addWidget(self.autoLanes)
-        s2.addStretch(1)
-        gv.addLayout(s2)
-
-        # 액션 바 — 시작 버튼은 없다. 스윕은 감시 토글이 켜고 끈다.
-        bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
+        # 다른 창으로 가는 버튼은 고급 패널 첫 줄이 배치한다. 시작 버튼은
+        # 없다 — 스윕은 감시 토글이 켜고 끈다.
         # 엑셀은 '매물 감시' 탭의 [엑셀로 조건 넣기] 하나로 모았다. 여기에도
         # 엑셀 버튼이 있던 동안, 등록용과 알림용이 따로 있는 줄 알고 클라가
         # 같은 시트를 양쪽에 넣었다.
-        self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", box)
+        self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", self)
         self.autoNotifyBtn.clicked.connect(self.on_auto_notify_clicked)
         # 계정 현황·프록시 목록·프록시 진단은 계정+프록시 창 안에 있다 —
         # 전부 같은 accounts.json 을 보는 화면이라 한 입구로 모았다.
-        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", box)
+        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", self)
         self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
         for b in (self.autoNotifyBtn, self.autoAccountsBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
-        bar.addWidget(self.autoNotifyBtn)
-        bar.addWidget(self.autoAccountsBtn)
-        bar.addStretch(1)
-        # 프록시 상태 — 상태바에서 옮겨 왔다. 쓰는 탭에만 둔다.
-        bar.addWidget(self.healthLabel)
-        gv.addLayout(bar)
 
         # 복원이 먼저, 배선이 나중이다 — 순서가 바뀌면 복원값이 저장을 유발해
         # 첫 실행에서 '기본값을 사용자가 고른 값'으로 굳혀 버린다.
