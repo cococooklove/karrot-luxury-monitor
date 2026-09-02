@@ -64,3 +64,7 @@ dist/
 # ── 작업 격리 ──
 .claude/worktrees/
 .superpowers/
+
+# 운영 설정 백업(.bak.<타임스탬프>) — accounts.json 백업에는 refresh 토큰이
+# 그대로 들어 있다. 이 저장소는 public 이라 한 번 올라가면 히스토리에 남는다.
+*.bak.*

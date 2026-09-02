@@ -2882,15 +2882,49 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _alert_run(self, fn, on_done=None):
+    def _alert_run(self, fn, on_done=None, queue=False) -> bool:
+        """작업 하나를 워커로 돌린다. **시작했거나 대기에 넣었으면 True.**
+
+        예전에는 바쁠 때 아무 값도 안 돌려줬고, 부르는 쪽은 그걸 안 봤다. 엑셀
+        불러오기는 작업이 버려진 뒤에도 "배정 중입니다"를 띄웠다 — 사용자는
+        성공으로 읽고, 표가 비어 있으니 '전체 삭제'를 눌러 등록을 통째로 날렸다
+        (실서버 2026-09-02 00:14 로그).
+
+        queue=True 는 거절 대신 **한 자리 대기열**에 넣는다. 무인 서버는
+        자동수확·자동폴링이 수시로 돌아서 사용자가 누른 순간이 그 창에 겹치는 게
+        일상이다. 사용자가 방금 시킨 일은 미뤄서라도 해야지 버리면 안 된다.
+        자리가 하나뿐인 이유는 같은 버튼을 연타했을 때 같은 일을 여러 번 하지
+        않기 위해서다 — 마지막 것이 이긴다."""
         if self._alert_worker and self._alert_worker.isRunning():
-            self.alert("이전 작업 진행 중 — 잠시 후"); return
+            if not queue:
+                self.alert("이전 작업 진행 중 — 잠시 후")
+                return False
+            self._alert_pending = (fn, on_done)
+            self._alog("[대기] 이전 작업이 끝나면 이어서 실행합니다")
+            return True
         self._alog("── 작업 시작 ──")
         self._alert_worker = _AlertWorker(fn)
         self._alert_worker.log.connect(lambda m: self._alog(m))
         if on_done:
             self._alert_worker.done.connect(on_done)
+        self._alert_worker.finished.connect(self._alert_drain)
         self._alert_worker.start()
+        return True
+
+    def _alert_drain(self):
+        """앞 작업이 끝났다 — 대기시켜 둔 작업이 있으면 이어서 돌린다.
+
+        `finished` 는 run() 이 막 반환한 시점이라 isRunning() 이 아직 True 일 수
+        있다. 그때 바로 시작하면 스스로를 다시 대기열에 넣어 영원히 안 돈다.
+        그래서 아직 돌고 있으면 조금 뒤에 다시 본다."""
+        pend = getattr(self, "_alert_pending", None)
+        if not pend:
+            return
+        if self._alert_worker and self._alert_worker.isRunning():
+            QtCore.QTimer.singleShot(200, self._alert_drain)
+            return
+        self._alert_pending = None
+        self._alert_run(pend[0], pend[1], queue=True)
 
     def _pi(self, s):
         s = (s or "").strip().replace(",", "")
@@ -2980,6 +3014,12 @@ class MainWindow(QMainWindow):
     def on_alert_delete_all(self):
         if QtWidgets.QMessageBox.question(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?") \
                 != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        # 워커가 바쁘면 아래 _alert_run 이 거절한다. 그런데 라우터 비우기는 그
+        # 앞에서 이미 끝나 있어, 배정만 사라지고 앱 등록은 남는 반쪽 상태가 됐다.
+        # 지울 수 없으면 아무것도 건드리지 않는다.
+        if self._alert_worker and self._alert_worker.isRunning():
+            self.alert("이전 작업 진행 중 — 잠시 후")
             return
         # 라우터 배정도 함께 비운다 — 남겨두면 슬롯이 찬 채로 전부 스윕행이 된다.
         if self._router:
@@ -4135,7 +4175,14 @@ class MainWindow(QMainWindow):
             def job(log):
                 res = self._route_conditions(conds, core_only=co, log=log)
                 return {"routes": res, "list": self._safe_alert_list(log)}
-            self._alert_run(job, self._alert_routes_done)
+            # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
+            # 여기서 반환값을 안 보고 성공 메시지를 띄운 것이 "엑셀을 넣어도
+            # 반영이 안 된다"의 정체였다.
+            if not self._alert_run(job, self._alert_routes_done, queue=True):
+                QtWidgets.QMessageBox.warning(
+                    dlg, "실패", "지금은 배정을 시작할 수 없습니다."
+                    " 로그를 확인하고 다시 시도하세요.")
+                return
             QtWidgets.QMessageBox.information(
                 dlg, "불러옴", f"조건 {len(conds)}개를 라우터로 배정 중입니다.")
             dlg.accept()
