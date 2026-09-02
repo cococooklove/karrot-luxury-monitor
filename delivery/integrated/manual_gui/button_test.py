@@ -60,7 +60,7 @@ print("=== 버튼 → 핸들러 연결 ===")
 # receivers() 가 0 이면 눌러도 아무 일이 없다 — 런타임에만 드러나는 고장이다.
 for attr in ("alertAddBtn", "alertRefreshBtn",
              "alertDelBtn", "alertDelAllBtn", "alertPollBtn", "alertPollAllBtn",
-             "alertBulkAllBtn", "alertCoverageBtn", "alertFleetBtn",
+             "alertCoverageBtn", "alertFleetBtn",
              "alertTgTestBtn", "watchToggleBtn", "alertRulesBtn", "autoNotifyBtn",
              "autoAccountsBtn", "autoProxyViewBtn"):
     b = getattr(w, attr, None)

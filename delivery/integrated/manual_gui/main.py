@@ -2322,15 +2322,15 @@ class MainWindow(QMainWindow):
         fl.addLayout(r0)
         r1 = QtWidgets.QHBoxLayout()
         self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
-        # 단일계정 일괄등록은 없앴다 — register_all 은 전 계정에 같은 키워드를 쓰고
-        # 라우터 capacity() 도 함대 기준이라, 한 계정만 건드리면 집계가 조용히 어긋난다.
-        self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품 브랜드 {len(LUXURY_BRANDS)}개 등록")
-        self.alertBulkAllBtn.setToolTip("전 계정에 명품 브랜드를 등록합니다(전국 커버)")
-        self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
-        # 등록은 브랜드 단위로 넓게, 모델별 조건 수백 줄은 이 엑셀이 맡는다.
+        # 등록 경로는 엑셀 하나다. 예전에는 '명품20 전계정등록' 버튼이 따로 있어
+        # 브랜드만 등록해 놓고 조건표를 안 넣는 상태가 만들어졌다 — 그러면
+        # 모델·가격대와 무관하게 브랜드 전 매물이 알림으로 쏟아진다.
         self.alertRulesBtn = QtWidgets.QPushButton("엑셀로 조건 넣기")
-        r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkAllBtn)
+        self.alertRulesBtn.setObjectName("startBtn")
+        self.alertRulesBtn.setToolTip(
+            "엑셀 한 장으로 브랜드 등록과 알림 조건을 함께 넣습니다")
+        r1.addWidget(self.alertAddBtn)
         r1.addWidget(self.alertRulesBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
@@ -2505,7 +2505,6 @@ class MainWindow(QMainWindow):
         self.alertDelBtn.clicked.connect(self.on_alert_delete)
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
         self.alertPollBtn.clicked.connect(self.on_alert_poll)
-        self.alertBulkAllBtn.clicked.connect(self.on_alert_bulk_all)
         self.alertRulesBtn.clicked.connect(self.on_alert_rules_excel)
         self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
         self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
@@ -3227,7 +3226,7 @@ class MainWindow(QMainWindow):
     def on_alert_delete_all(self):
         if not ask_yes_no(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?",
                           "앱 등록과 라우터 배정이 함께 지워집니다."
-                          " 다시 넣으려면 엑셀 조건이나 일괄등록을 새로 눌러야 합니다.",
+                          " 다시 넣으려면 [엑셀로 조건 넣기]를 새로 눌러야 합니다.",
                           danger=True):
             return
         # 워커가 바쁘면 아래 _alert_run 이 거절한다. 그런데 라우터 비우기는 그
@@ -3589,16 +3588,6 @@ class MainWindow(QMainWindow):
             return bool(self.alertCoverMode.currentData())
         except Exception:
             return False
-
-    def on_alert_bulk_all(self):
-        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
-        co = self._core_only()
-        if not self._router:
-            self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
-        def job(log):
-            res = self._router.add_many(LUXURY_BRANDS, mn, mx, core_only=co, log=log)
-            return {"routes": res, "list": self._safe_alert_list(log)}
-        self._alert_run(job, self._alert_routes_done, label="키워드 일괄 등록 중")
 
     def _night_factor(self):
         """야간 감속 배수 — 새벽0~7시 ×3, 늦밤22~24·이른7~9시 ×2, 그외 ×1."""
@@ -6200,23 +6189,35 @@ def _run_headless():
         else:
             log("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
 
-    # 서버 부트스트랩: 명품 키워드 일괄 등록 (--register) 후 --once면 종료
+    # 서버 부트스트랩: 조건표의 브랜드 등록 (--register) 후 --once면 종료
     if "--register" in argv:
         st = _settings(); co = bool(st.get("core_only"))
-        log(f"[등록] 명품 {len(LUXURY_BRANDS)}브랜드 등록 (커버 {'핵심' if co else '전국'})")
-        # register_all 을 직접 부르면 라우터가 모르는 키워드가 서버에 생긴다 —
-        # 그러면 상한 계산이 어긋나고 스윕 대기열도 만들어지지 않는다.
+        # 등록 경로는 조건표 하나다. 브랜드만 등록해 놓고 조건표가 없으면
+        # 모델·가격대와 무관하게 브랜드 전 매물이 알림으로 쏟아진다.
+        from daangn_ext.alert_rules import brands as _rule_brands
+        _rules = load_alert_rules().rules
+        _brands = _rule_brands(_rules)
         if router is None:
             log("[등록] 라우터가 없어 등록을 건너뜁니다 — 초기화 실패 로그를 확인하세요")
+        elif not _brands:
+            log(f"[등록] 조건표가 비어 있습니다({ALERT_RULES_FILE}) —"
+                " GUI [엑셀로 조건 넣기]로 조건 엑셀을 먼저 넣으세요")
         else:
+            log(f"[등록] 조건표 {len(_rules)}줄 · 브랜드 {len(_brands)}개 등록"
+                f" (커버 {'핵심' if co else '전국'})")
             # 등록 **전에** 씨딩한다 — 이 브랜치 이전 경로로 이미 서버가 꽉 차
             # 있으면, 인정하지 않고 등록하면 전부 실패해 스윕으로 밀린다.
             seed_router_from_server(
                 router, lambda: _server_keyword_list(co), log, seed_state)
             try:
-                for r in router.add_many(LUXURY_BRANDS, core_only=co, log=log):
-                    log(f"[등록] {r.get('keyword')} → {r.get('route')}"
-                        f" ({r.get('reason') or ''})")
+                # 가격은 넘기지 않는다 — 당근 서버가 먼저 자르면 조건표가 볼
+                # 매물 자체가 없어진다. 거르는 일은 조건표가 한다.
+                for ks, days in brand_register_groups(_brands, _rules):
+                    for r in router.add_many(ks, None, None, None, core_only=co,
+                                             log=log, days=days,
+                                             replace_cond=True):
+                        log(f"[등록] {r.get('keyword')} → {r.get('route')}"
+                            f" ({r.get('reason') or ''})")
             except Exception as e:
                 log(f"[등록] 실패: {str(e)[:80]}")
         if once:

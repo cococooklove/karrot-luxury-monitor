@@ -432,11 +432,15 @@ if _win is not None:
     ck("선택 삭제는 감시 조건 안에",
        _win.alertDelBtn in _win.condBox.findChildren(_QtW.QPushButton))
     ck("내부 용어를 화면에서 뺐다",
-       "전계정등록" not in _win.alertBulkAllBtn.text()
-       and "매칭 조회" not in _win.alertPollBtn.text()
+       "매칭 조회" not in _win.alertPollBtn.text()
        and "슬롯" not in _win.alertResetCapBtn.text(),
-       f"{_win.alertBulkAllBtn.text()} / {_win.alertPollBtn.text()}"
-       f" / {_win.alertResetCapBtn.text()}")
+       f"{_win.alertPollBtn.text()} / {_win.alertResetCapBtn.text()}")
+    # 등록 경로는 조건표 하나다. 브랜드만 등록해 놓고 조건표가 없으면
+    # 모델·가격대와 무관하게 브랜드 전 매물이 알림으로 쏟아진다.
+    ck("일괄등록 버튼 제거", not hasattr(_win, "alertBulkAllBtn")
+       and not hasattr(_win, "on_alert_bulk_all"))
+    ck("등록은 엑셀 버튼 하나", callable(getattr(_win, "on_alert_rules_excel", None))
+       and _win.alertRulesBtn.text() == "엑셀로 조건 넣기")
 
     # ── 첫 실행에서 서버에 이미 있는 키워드를 앱 슬롯으로 인정한다 ──
     # routes 파일이 없으면 라우터는 used=0 으로 본다. 그대로 두면 이미 꽉 찬

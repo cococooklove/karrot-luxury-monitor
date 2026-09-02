@@ -106,8 +106,10 @@ print("\n=== 6. 엑셀 경로만 그 권한을 쓴다 ===")
 src = open("main.py", encoding="utf-8").read()
 ck("엑셀 경로가 replace_cond=True", "replace_cond=True" in src)
 # 실제 호출부만 센다 — 독스트링에도 같은 낱말이 나온다.
+# 두 곳 다 조건표 경로다: GUI [엑셀로 조건 넣기]와 헤드리스 --register.
+# 다른 경로(승격·재시도)가 이 권한을 쓰면 엑셀 조건이 통째로 지워진다.
 calls = src.count("replace_cond=True)")
-ck("호출부는 엑셀 경로 한 곳뿐", calls == 1, f"{calls}곳")
+ck("호출부는 조건표 경로뿐", calls == 2, f"{calls}곳")
 
 print("\n=== 7. 조건 없는 키워드는 그대로 조건 없음 ===")
 r7 = router()
