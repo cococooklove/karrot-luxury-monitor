@@ -1455,15 +1455,33 @@ QCheckBox::indicator:hover { border-color: #9A7B2E; }
 QGroupBox { background: #FBFAF7; border: 1px solid #DDD6C9; border-radius: 16px; margin-top: 18px; padding: 22px 18px 16px 18px; font-size: 16px; font-weight: 800; color: #8A6D1F; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; top: 2px; padding: 0 6px; letter-spacing: 1px; }
 
+/* 접이식 섹션 — 카드가 아니라 목록의 한 줄이다. 접었을 때 빈 상자가 남으면
+   화면에 유령 카드가 생긴다(실제로 그렇게 보였다). 얇은 구분선 하나만 둔다. */
+QGroupBox#sectionBox { background: transparent; border: none; border-top: 1px solid #E8E3D9;
+  border-radius: 0; margin-top: 6px; padding: 14px 2px 0 2px;
+  font-size: 15px; font-weight: 700; color: #6B6357; letter-spacing: 0; }
+QGroupBox#sectionBox::title { subcontrol-origin: margin; left: 0px; top: 4px; padding: 0 2px; letter-spacing: 0; }
+QGroupBox#sectionBox:checked { color: #1F1B16; }
+QGroupBox#sectionBox:hover { color: #9A7B2E; }
+QGroupBox#sectionBox::indicator { width: 0px; height: 0px; margin: 0; border: none; }
+
+/* 목록 필터 — 고르는 값이지 누르는 명령이 아니다. 버튼처럼 도드라지면
+   [감시 시작] 과 같은 무게로 보인다. 선택된 하나만 진하게. */
+QPushButton#filterChip { background: #F2F0EC; color: #6B6357; border: none;
+  border-radius: 14px; padding: 7px 16px; font-size: 13px; font-weight: 700; }
+QPushButton#filterChip:hover { background: #E8E4DC; color: #3A342B; }
+QPushButton#filterChip:checked { background: #2A251E; color: #FFFFFF; }
+
 QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #FFFFFF; border: 1px solid #DDD6C9; border-radius: 13px; padding: 4px; font-size: 14px; color: #1F1B16; }
 QTreeWidget::item, QListWidget::item { padding: 6px 4px; border-radius: 8px; }
 QTreeWidget::item:selected, QListWidget::item:selected { background: #F0E6CC; color: #1F1B16; }
 QTreeWidget::item:hover, QListWidget::item:hover { background: #F7F5F1; }
 
-QTableWidget { gridline-color: #E8E3D9; }
-QTableWidget::item { padding: 9px 6px; color: #1F1B16; }
-QTableWidget::item:selected { background: #F0E6CC; color: #1F1B16; }
-QHeaderView::section { background: #F7F5F1; color: #5C5449; padding: 11px 8px; border: none; border-bottom: 1.5px solid #9A7B2E; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
+QTableWidget { gridline-color: transparent; }
+QTableWidget::item { padding: 11px 6px; color: #1F1B16; border-bottom: 1px solid #F1EEE8; }
+QTableWidget::item:selected { background: #F5EFDD; color: #1F1B16; }
+QTableWidget { selection-background-color: #F5EFDD; }
+QHeaderView::section { background: #FFFFFF; color: #8B857A; padding: 12px 8px; border: none; border-bottom: 1px solid #EAE6DE; font-weight: 700; font-size: 12px; letter-spacing: 0.3px; }
 QTableCornerButton::section { background: #F7F5F1; border: none; }
 
 QProgressBar { background: #EDE9E0; border: 1px solid #DDD6C9; border-radius: 7px; min-height: 24px; max-height: 24px; color: #1F1B16; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; text-align: center; }
@@ -1828,9 +1846,11 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QGraphicsDropShadowEffect
         from PyQt6.QtGui import QColor
         for gb in self.findChildren(QtWidgets.QGroupBox):
+            if gb.objectName() == "sectionBox":
+                continue          # 섹션은 카드가 아니다 — 그림자가 붙으면 유령 상자가 된다
             eff = QGraphicsDropShadowEffect(gb)
-            eff.setBlurRadius(34); eff.setOffset(0, 8)
-            eff.setColor(QColor(0, 0, 0, 150))
+            eff.setBlurRadius(28); eff.setOffset(0, 6)
+            eff.setColor(QColor(0, 0, 0, 38))
             gb.setGraphicsEffect(eff)
 
     def _scroll(self, inner):
@@ -2214,6 +2234,14 @@ class MainWindow(QMainWindow):
         for c in box.findChildren(QtWidgets.QWidget):
             if not c.objectName().startswith("qt_"):
                 c.setVisible(on)
+        # 체크박스 대신 화살표로 접힘을 알린다 — 설정을 켜고 끄는 것이 아니라
+        # 펼치고 접는 것이므로 체크 표시는 뜻이 어긋난다.
+        if box.objectName() == "sectionBox":
+            base = getattr(box, "_baseTitle", None)
+            if base is None:
+                base = box.title().lstrip("▸▾ ").strip()
+                box._baseTitle = base
+            box.setTitle(("▾  " if on else "▸  ") + base)
         # 자식을 숨겨도 레이아웃 여백은 남는다 — 접은 그룹이 빈 상자로 화면을
         # 먹는다. 접히면 제목 줄 높이까지 줄인다.
         lay = box.layout()
@@ -2226,14 +2254,16 @@ class MainWindow(QMainWindow):
                     box._openMargins = (m.left(), m.top(), m.right(), m.bottom())
                 lay.setContentsMargins(0, 0, 0, 0)
         box.setMaximumHeight(16777215 if on
-                             else box.fontMetrics().height() + 22)
+                             else box.fontMetrics().height() + 24)
 
     def _collapsible(self, title, inner, checked=False):
         """접이식 그룹 한 덩어리. 자주 안 보는 것을 화면에서 치우되 지우지는
         않는다 — 안의 위젯은 그대로 살아 있어 갱신 코드가 안 바뀐다."""
         box = QtWidgets.QGroupBox(title)
+        box.setObjectName("sectionBox")
         box.setCheckable(True)
         box.setChecked(bool(checked))
+        box.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         lay = QtWidgets.QVBoxLayout(box)
         if isinstance(inner, QtWidgets.QLayout):
             lay.addLayout(inner)
@@ -2276,6 +2306,8 @@ class MainWindow(QMainWindow):
                     self.dashCadence, self.dashGuide):
             dl.addWidget(wdg)
         # 같은 값이 위 상태칩에도 있다. 칩이 요약, 여기가 상세 — 기본은 접는다.
+        dash.setObjectName("sectionBox")
+        dash.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         dash.setCheckable(True)
         dash.setChecked(False)
         dash.toggled.connect(lambda on, b=dash: self._sync_box_visible(b, on))
@@ -2368,6 +2400,7 @@ class MainWindow(QMainWindow):
             _hh.setSectionResizeMode(
                 _c, QtWidgets.QHeaderView.ResizeMode.Stretch if _c == ALERT_COL_KEYWORD
                 else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.alertTable.setShowGrid(False)
         self.alertTable.setMinimumHeight(260)
         # id 는 서버 내부 식별자다 — 사람이 읽을 값이 아니다. 열은 남긴다
         # (인덱스 상수와 셀 생성 함수가 쓴다). 화면에서만 감춘다.
@@ -2424,6 +2457,8 @@ class MainWindow(QMainWindow):
         # ── 고급 (접힘) ──
         # 평소엔 토글 하나면 된다. 진단·튜닝이 필요할 때만 편다.
         self.advancedBox = QtWidgets.QGroupBox("고급")
+        self.advancedBox.setObjectName("sectionBox")
+        self.advancedBox.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.advancedBox.setCheckable(True)
         self.advancedBox.setChecked(False)
         av = QtWidgets.QVBoxLayout(self.advancedBox)
@@ -2458,6 +2493,8 @@ class MainWindow(QMainWindow):
                 (("all", "전체"), ("new", "🆕 신규"),
                  ("down", "↓ 인하"), ("ended", "✓ 종료"))):
             b = QtWidgets.QPushButton(label); b.setCheckable(True)
+            b.setObjectName("filterChip")
+            b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             b.setChecked(key == "all")
             b.setProperty("filterKey", key)
             self.listingFilter.addButton(b, i)
@@ -2479,6 +2516,9 @@ class MainWindow(QMainWindow):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.listingTable.horizontalHeader().setSectionResizeMode(
             2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.listingTable.setShowGrid(False)
+        self.listingTable.setAlternatingRowColors(False)
+        self.listingTable.verticalHeader().setDefaultSectionSize(40)
         self.listingTable.setMinimumHeight(440)
         self.listingTable.setToolTip(
             "앱 알림과 검색 스윕이 같은 표로 들어옵니다. 두 번 누르면 매물이 열립니다.")
@@ -2636,9 +2676,12 @@ class MainWindow(QMainWindow):
         if chip is None:
             return
         bg, fg, br = self._CHIP_COLORS.get(level, self._CHIP_COLORS["ok"])
+        # 테두리 없는 pill — 읽는 값이지 누르는 명령이 아니다. 색만으로 상태를
+        # 말하고, 경계선은 상태가 나쁠 때(warn/bad)만 눈에 걸리게 둔다.
+        _bd = "none" if level == "ok" else f"1px solid {br}"
         chip.setStyleSheet(
-            "QPushButton#statChip{padding:4px 10px; border-radius:11px; font-size:12px;"
-            f"background:{bg}; color:{fg}; border:1px solid {br};}}"
+            "QPushButton#statChip{padding:6px 12px; border-radius:13px; font-size:12px;"
+            f"font-weight:700; background:{bg}; color:{fg}; border:{_bd};}}"
             f"QPushButton#statChip:hover{{border:1px solid #8A6D1F;}}")
 
     def _set_chip(self, key, text, level="ok"):
