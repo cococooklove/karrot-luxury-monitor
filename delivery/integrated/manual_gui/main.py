@@ -138,6 +138,22 @@ def load_alert_rules(path=ALERT_RULES_FILE):
     return RuleTable.load(path)
 
 
+def brand_register_groups(brand_list, rules):
+    """브랜드를 끌올일수별로 묶는다 → [(브랜드들, days)].
+
+    라우터는 한 호출에 필터 하나만 받는다. 조건표는 줄마다 끌올일수가 다를
+    수 있으므로 같은 값끼리 묶어 한 번에 넣는다. 브랜드 하나에 값이 여럿이면
+    가장 느슨한(큰) 값을 쓴다 — 좁게 잡으면 조건에 맞는 매물을 놓친다."""
+    from daangn_ext.alert_rules import brand_days
+    days = brand_days(rules)
+    groups: dict = {}
+    for b in brand_list or []:
+        b = str(b or "").strip()
+        if b and b not in groups.setdefault(days.get(b), []):
+            groups[days.get(b)].append(b)
+    return [(ks, d) for d, ks in groups.items() if ks]
+
+
 class AlertRulesCache:
     """룰 파일이 바뀌면 다시 읽는다 — 엑셀을 새로 넣어도 재시작이 필요 없다."""
 
@@ -2262,7 +2278,7 @@ class MainWindow(QMainWindow):
         self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
         # 등록은 브랜드 단위로 넓게, 모델별 조건 수백 줄은 이 엑셀이 맡는다.
-        self.alertRulesBtn = QtWidgets.QPushButton("알림 조건 엑셀")
+        self.alertRulesBtn = QtWidgets.QPushButton("엑셀로 조건 넣기")
         r1.addWidget(self.alertAddBtn); r1.addWidget(self.alertBulkAllBtn)
         r1.addWidget(self.alertRulesBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
@@ -3519,42 +3535,6 @@ class MainWindow(QMainWindow):
             return {"routes": res, "list": self._safe_alert_list(log)}
         self._alert_run(job, self._alert_routes_done, label="키워드 일괄 등록 중")
 
-    @staticmethod
-    def _condition_groups(conditions):
-        """엑셀 조건 → [(키워드들, min, max, exclude)]. 필터가 같은 행끼리 묶는다.
-
-        라우터는 한 호출에 필터 하나만 받는다. 행마다 가격·제외가 다르면 그룹이
-        갈라지고, 같으면 한 번에 들어간다."""
-        groups = {}
-        for c in conditions or []:
-            kw = str((c or {}).get("keyword") or "").strip()
-            if not kw:
-                continue
-            key = (c.get("min"), c.get("max"), tuple(c.get("exclude") or []),
-                   tuple(c.get("extra") or []), c.get("days"))
-            groups.setdefault(key, [])
-            if kw not in groups[key]:
-                groups[key].append(kw)
-        return [(kws, k[0], k[1], list(k[2]), list(k[3]), k[4])
-                for k, kws in groups.items()]
-
-    def _route_conditions(self, conditions, core_only=False, log=None):
-        """엑셀 조건도 라우터 한 문으로 들여보낸다 — 등록 경로는 하나뿐이다.
-
-        여기만 replace_cond=True 다. 엑셀은 조건의 **출처**이므로 여기서 넘긴 값이
-        곧 최종값이어야 한다 — 조건을 지운 엑셀을 다시 불러오면 지워져야 한다.
-        나머지 경로(일괄등록·승격·재시도)는 조건을 안 넘기므로 이전 값을 잇는다.
-        그 구분이 없던 동안 '명품20 전계정등록' 한 번이 엑셀 조건을 통째로
-        지웠다."""
-        log = log or self._alog
-        out = []
-        for kws, mn, mx, excl, extra, days in self._condition_groups(conditions):
-            out.extend(self._router.add_many(kws, mn, mx, excl,
-                                             core_only=core_only, log=log,
-                                             extra=extra, days=days,
-                                             replace_cond=True) or [])
-        return out
-
     def _night_factor(self):
         """야간 감속 배수 — 새벽0~7시 ×3, 늦밤22~24·이른7~9시 ×2, 그외 ×1."""
         if not self.alertNightChk.isChecked():
@@ -3826,19 +3806,20 @@ class MainWindow(QMainWindow):
 
         # 액션 바 — 시작 버튼은 없다. 스윕은 감시 토글이 켜고 끈다.
         bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
-        self.autoExcelBtn = QtWidgets.QPushButton("엑셀 조건", box)
-        self.autoExcelBtn.clicked.connect(self.on_auto_excel_clicked)
+        # 엑셀은 '매물 감시' 탭의 [엑셀로 조건 넣기] 하나로 모았다. 여기에도
+        # 엑셀 버튼이 있던 동안, 등록용과 알림용이 따로 있는 줄 알고 클라가
+        # 같은 시트를 양쪽에 넣었다.
         self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", box)
         self.autoNotifyBtn.clicked.connect(self.on_auto_notify_clicked)
         self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", box)
         self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
         self.autoProxyViewBtn = QtWidgets.QPushButton("프록시 목록", box)
         self.autoProxyViewBtn.clicked.connect(self.on_proxy_view_clicked)
-        for b in (self.autoExcelBtn, self.autoNotifyBtn, self.autoAccountsBtn,
+        for b in (self.autoNotifyBtn, self.autoAccountsBtn,
                   self.autoProxyViewBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
-        bar.addWidget(self.autoExcelBtn); bar.addWidget(self.autoNotifyBtn)
+        bar.addWidget(self.autoNotifyBtn)
         bar.addWidget(self.autoAccountsBtn); bar.addWidget(self.autoProxyViewBtn)
         bar.addStretch(1)
         # 프록시 상태·진단 — 상태바에서 옮겨 왔다. 쓰는 탭에만 둔다.
@@ -4236,121 +4217,32 @@ class MainWindow(QMainWindow):
     def _wrap(self, layout):
         c = QtWidgets.QWidget(self); c.setLayout(layout); return c
 
-    EXCEL_COLS = ["대분류", "키워드", "추가키워드", "제외키워드", "최소금액", "최대금액", "끌올일수"]
-    EXCEL_SAMPLE = [
-        ["가방", "샤넬", "정품", "레플 미러", 500000, 3000000, 7],
-        ["시계", "롤렉스", "", "레플", 1000000, "", 30],
-        ["지갑", "루이비통", "", "", "", "", 14],
-    ]
-
-    def on_auto_excel_clicked(self):
-        """엑셀 조건 — 형식 안내 팝업 + 샘플 저장 + 파일 불러오기."""
-        from daangn.sweep_engine import load_conditions_from_excel
-        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("엑셀 조건 불러오기"); dlg.resize(620, 400)
-        v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
-        v.addWidget(QtWidgets.QLabel(
-            "여러 검색 조건을 엑셀로 한 번에 불러옵니다. 아래 형식으로 만드세요.\n"
-            "키워드만 필수, 나머지는 선택. 추가/제외 키워드는 쉼표·공백 구분."))
-        # 형식 표
-        tbl = QtWidgets.QTableWidget(len(self.EXCEL_SAMPLE), len(self.EXCEL_COLS), dlg)
-        tbl.setHorizontalHeaderLabels(self.EXCEL_COLS)
-        tbl.verticalHeader().setVisible(False)
-        tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        for r, row in enumerate(self.EXCEL_SAMPLE):
-            for c, val in enumerate(row):
-                tbl.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
-        tbl.resizeColumnsToContents()
-        v.addWidget(tbl, 1)
-        v.addWidget(QtWidgets.QLabel(
-            "· 최소/최대금액 비우면 제한 없음  · 끌올일수 = 그 일수 이내 끌올된 매물만"))
-
-        bb = QtWidgets.QHBoxLayout()
-        sampleBtn = QtWidgets.QPushButton("샘플 엑셀 저장", dlg)
-        loadBtn = QtWidgets.QPushButton("파일 선택해서 불러오기", dlg); loadBtn.setObjectName("startBtn")
-        closeBtn = QtWidgets.QPushButton("닫기", dlg)
-        bb.addWidget(sampleBtn); bb.addStretch(1); bb.addWidget(closeBtn); bb.addWidget(loadBtn)
-        v.addLayout(bb)
-
-        def do_sample():
-            p, _ = QtWidgets.QFileDialog.getSaveFileName(
-                dlg, "샘플 저장", "자동조건_샘플.xlsx", "Excel (*.xlsx)")
-            if not p:
-                return
-            from openpyxl import Workbook
-            wb = Workbook(); ws = wb.active; ws.title = "조건"
-            ws.append(self.EXCEL_COLS)
-            for row in self.EXCEL_SAMPLE:
-                ws.append(row)
-            wb.save(p)
-            QtWidgets.QMessageBox.information(dlg, "저장됨", f"샘플 저장:\n{p}")
-
-        def do_load():
-            p, _ = QtWidgets.QFileDialog.getOpenFileName(
-                dlg, "엑셀 조건 선택", "", "Excel (*.xlsx *.xlsm)")
-            if not p:
-                return
-            try:
-                conds = load_conditions_from_excel(p)
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(dlg, "오류", f"엑셀 로드 오류:\n{e}")
-                return
-            if not self._router:
-                self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
-            cats = {c.get("category") or "-" for c in conds}
-            self._alog(
-                f"[엑셀] 조건 {len(conds)}개 로드 (대분류 {len(cats)}종) — 라우터로 배정")
-            # 추가키워드는 앱 알림에 전달할 수 없지만, 조건을 라우트에 보존해
-            # 알림 직전에 우리가 한 번 더 거른다(제목·가격 기준). 끌올일수는
-            # 앱 매칭 payload 에 끌올 시각이 없어 이 경로에서 못 거른다.
-            if any(c.get("days") for c in conds):
-                self._alog(
-                    "[엑셀] 끌올일수는 앱 알림 경로에서 적용되지 않습니다"
-                    " — 검색 스윕으로 배정된 키워드에만 걸립니다")
-            if any(c.get("category") for c in conds):
-                self._alog("[엑셀] 대분류는 분류용이라 필터에 쓰이지 않습니다")
-            co = self._core_only()
-
-            def job(log):
-                res = self._route_conditions(conds, core_only=co, log=log)
-                return {"routes": res, "list": self._safe_alert_list(log)}
-            # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
-            # 여기서 반환값을 안 보고 성공 메시지를 띄운 것이 "엑셀을 넣어도
-            # 반영이 안 된다"의 정체였다.
-            if not self._alert_run(job, self._alert_routes_done, queue=True,
-                                   label="엑셀 조건 배정 중"):
-                QtWidgets.QMessageBox.warning(
-                    dlg, "실패", "지금은 배정을 시작할 수 없습니다."
-                    " 로그를 확인하고 다시 시도하세요.")
-                return
-            QtWidgets.QMessageBox.information(
-                dlg, "불러옴", f"조건 {len(conds)}개를 라우터로 배정 중입니다.")
-            dlg.accept()
-
-        sampleBtn.clicked.connect(do_sample)
-        loadBtn.clicked.connect(do_load)
-        closeBtn.clicked.connect(dlg.reject)
-        dlg.exec()
-
-    RULE_COLS = ["키워드", "최소가격", "최대가격", "제외"]
+    RULE_COLS = ["키워드", "최소가격", "최대가격", "제외", "끌올일수"]
     RULE_SAMPLE = [
-        ["루이비통 오버 더 문", 500000, 1500000, ""],
-        ["루이비통 반둘리에 50", 600000, 2000000, "레플 미러"],
-        ["루이비통 몽테뉴 GM", 700000, 1000000, ""],
+        ["루이비통 오버 더 문", 500000, 1500000, "", ""],
+        ["루이비통 반둘리에 50", 600000, 2000000, "레플리카, 부속품", 7],
+        ["샤넬 클래식 미디움", 3000000, 6000000, "", ""],
     ]
 
     def on_alert_rules_excel(self):
-        """알림 조건 엑셀 — 수백 줄짜리 모델별 조건표를 알림 필터로 건다.
+        """엑셀 한 장으로 수집 등록과 알림 조건을 함께 넣는다.
 
-        앱 알림 키워드 등록에는 상한이 있어(수십 개) 모델 수백 개를 키워드로
-        등록할 수 없다. 그래서 '루이비통' 같은 브랜드로 넓게 받아 놓고, 이
-        표에 맞는 매물만 알린다. 한 줄이라도 맞으면 알린다.
+        예전에는 등록용 엑셀과 알림용 엑셀이 버튼도 시트도 따로였다. 둘의
+        차이가 코드에는 분명해도 쓰는 쪽에는 아니어서, 같은 시트를 양쪽에
+        넣거나 수백 줄을 등록용에 넣어 상한에 걸리는 일이 반복됐다.
+
+        이제 한 버튼이다. 키워드 첫 어절을 브랜드로 보고 그것만 등록해
+        넓게 받아 놓고(가격 제한 없이 — 당근 서버가 먼저 자르면 조건표까지
+        오지 않는다), 시트 전체를 알림 필터로 건다. 등록 상한은 브랜드
+        수에만 걸리므로 조건은 수백 줄이어도 된다.
         """
-        from daangn_ext.alert_rules import load_rules_from_excel, RuleTable
+        from daangn_ext.alert_rules import RuleTable, brands, load_rules_from_excel
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("알림 조건 엑셀"); dlg.resize(620, 420)
+        dlg.setWindowTitle("엑셀로 조건 넣기"); dlg.resize(660, 460)
         v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
         v.addWidget(QtWidgets.QLabel(
-            "브랜드로 넓게 등록해 받은 매물 중, 이 표의 조건에 맞는 것만 알립니다.\n"
+            "엑셀 한 장이면 됩니다. 브랜드는 자동으로 등록하고(키워드 첫 단어),"
+            " 시트 전체를 알림 조건으로 겁니다.\n"
             "키워드만 필수. 띄어쓰기는 무시합니다"
             " — '루이비통 오버 더 문'은 '루이비통오버더문'도 잡습니다."))
         cap = QtWidgets.QLabel(dlg)
@@ -4372,7 +4264,7 @@ class MainWindow(QMainWindow):
                 cap.setText(f"적용 중인 조건 {len(rules)}줄"
                             + (f" (앞 {PREVIEW}줄만 표시)" if len(rules) > PREVIEW else ""))
                 rows = [[r.keyword, r.min_price or "", r.max_price or "",
-                         ", ".join(r.exclude)] for r in shown]
+                         ", ".join(r.exclude), r.days or ""] for r in shown]
             else:
                 cap.setText("적용 중인 조건 없음 — 아래는 엑셀 형식 예시입니다")
                 rows = self.RULE_SAMPLE
@@ -4381,13 +4273,13 @@ class MainWindow(QMainWindow):
                 for c, val in enumerate(row):
                     tbl.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
             tbl.resizeColumnsToContents()
+
         v.addWidget(QtWidgets.QLabel(
             "· 최대가격을 넘긴 매물은 알리지 않고 추적하다가, 값이 내려와"
             " 범위에 들어오면 그때 알립니다\n"
             "· '삽니다/구합니다' 글은 자동으로 걸러집니다\n"
-            "· 키워드 등록의 최소/최대가는 비워 두세요"
-            " — 당근 서버가 먼저 걸러버리면 여기까지 오지 않습니다\n"
-            "· 제외는 쉼표로 구분합니다 — 'A급 레플리카, 부속품'은 두 구절입니다"))
+            "· 제외는 쉼표로 구분합니다 — 'A급 레플리카, 부속품'은 두 구절입니다\n"
+            "· 끌올일수는 검색 스윕에만 걸립니다 (앱 알림에는 끌올 시각이 없습니다)"))
         stat = QtWidgets.QLabel(dlg)
 
         def show_stat():
@@ -4410,7 +4302,7 @@ class MainWindow(QMainWindow):
 
         def do_sample():
             p, _ = QtWidgets.QFileDialog.getSaveFileName(
-                dlg, "샘플 저장", "알림조건_샘플.xlsx", "Excel (*.xlsx)")
+                dlg, "샘플 저장", "조건표_샘플.xlsx", "Excel (*.xlsx)")
             if not p:
                 return
             from openpyxl import Workbook
@@ -4431,14 +4323,63 @@ class MainWindow(QMainWindow):
             if QtWidgets.QMessageBox.question(
                     dlg, "조건 비우기",
                     "알림 조건을 모두 지웁니다. 이후 등록 키워드에 걸린 조건으로"
-                    " 돌아갑니다. 진행할까요?") != QtWidgets.QMessageBox.StandardButton.Yes:
+                    " 돌아갑니다. 등록된 키워드는 그대로 둡니다. 진행할까요?"
+                    ) != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
             save_table(RuleTable())
-            self._alog("[알림조건] 조건표를 비웠습니다 — 등록 조건으로 돌아갑니다")
+            self._alog("[조건표] 조건표를 비웠습니다 — 등록 조건으로 돌아갑니다")
+
+        def confirm(rules, bs, errors) -> bool:
+            """적용 전에 무엇이 들어가는지 먼저 보여준다 — 엉뚱한 파일을
+            고른 것을 되돌릴 수 있는 지점은 여기뿐이다."""
+            try:
+                free = int((self._router.capacity() or {}).get("free") or 0)
+                cap_line = f"슬롯 여유: {free}칸 (브랜드 {len(bs)}개 필요)"
+                if len(bs) > free:
+                    cap_line += f" — {len(bs) - free}개는 검색 스윕으로 돌립니다"
+            except Exception:
+                cap_line = "슬롯 여유: 확인 불가"
+            box = QtWidgets.QMessageBox(dlg)
+            box.setWindowTitle("이대로 적용할까요?")
+            box.setText(f"조건 {len(rules)}줄 읽음\n"
+                        f"등록할 브랜드 {len(bs)}개: {' · '.join(bs[:8])}"
+                        + (" …" if len(bs) > 8 else "") + f"\n{cap_line}"
+                        + (f"\n경고 {len(errors)}건" if errors else ""))
+            if errors:
+                box.setDetailedText("\n".join(errors))
+            box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok
+                                   | QtWidgets.QMessageBox.StandardButton.Cancel)
+            box.button(QtWidgets.QMessageBox.StandardButton.Ok).setText("적용")
+            box.button(QtWidgets.QMessageBox.StandardButton.Cancel).setText("취소")
+            return box.exec() == QtWidgets.QMessageBox.StandardButton.Ok
+
+        def register(bs, rules):
+            """브랜드만 등록한다. 가격·제외는 넘기지 않는다 — 당근 서버가
+            먼저 거르면 조건표가 볼 매물 자체가 없어진다."""
+            if not self._router:
+                self._alog("[조건표] 라우터가 없어 브랜드 등록을 건너뜁니다")
+                return
+            groups = brand_register_groups(bs, rules)
+            co = self._core_only()
+
+            def job(log):
+                res = []
+                for ks, d in groups:
+                    res.extend(self._router.add_many(
+                        ks, None, None, None, core_only=co, log=log,
+                        days=d, replace_cond=True) or [])
+                return {"routes": res, "list": self._safe_alert_list(log)}
+            # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
+            if not self._alert_run(job, self._alert_routes_done, queue=True,
+                                   label="브랜드 등록 중"):
+                QtWidgets.QMessageBox.warning(
+                    dlg, "등록 보류",
+                    "조건표는 적용했지만 지금은 브랜드 등록을 시작할 수 없습니다.\n"
+                    "로그를 확인하고 '목록 새로고침' 후 다시 시도하세요.")
 
         def do_load():
             p, _ = QtWidgets.QFileDialog.getOpenFileName(
-                dlg, "알림 조건 엑셀 선택", "", "Excel (*.xlsx *.xlsm)")
+                dlg, "조건 엑셀 선택", "", "Excel (*.xlsx *.xlsm)")
             if not p:
                 return
             try:
@@ -4446,19 +4387,24 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QtWidgets.QMessageBox.warning(dlg, "오류", f"엑셀 로드 오류:\n{e}")
                 return
-            for msg in errors[:5]:
-                self._alog(f"[알림조건] {msg}")
             if not rules:
                 QtWidgets.QMessageBox.warning(
-                    dlg, "실패", "읽은 조건이 없습니다.\n" + ("\n".join(errors[:3])))
+                    dlg, "실패", "읽은 조건이 없습니다.\n" + "\n".join(errors[:3]))
                 return
+            bs = brands(rules)
+            if not confirm(rules, bs, errors):
+                return
+            for msg in errors[:5]:
+                self._alog(f"[조건표] {msg}")
             save_table(RuleTable(rules))
-            self._alog(f"[알림조건] {len(rules)}줄 적용 — 이 조건에 맞는 매물만 알립니다")
+            self._alog(f"[조건표] {len(rules)}줄 적용 · 브랜드 {len(bs)}개 등록"
+                       f" ({', '.join(bs[:8])}{' …' if len(bs) > 8 else ''})")
+            register(bs, rules)
             QtWidgets.QMessageBox.information(
                 dlg, "적용됨",
                 f"조건 {len(rules)}줄을 적용했습니다.\n"
-                "키워드 등록은 브랜드 단위로 유지하세요 — 수집은 넓게,"
-                " 알림은 이 표로 거릅니다.")
+                f"브랜드 {len(bs)}개를 등록 중입니다 — 수집은 넓게,"
+                " 알림은 이 조건표로 거릅니다.")
 
         sampleBtn.clicked.connect(do_sample)
         clearBtn.clicked.connect(do_clear)

@@ -35,7 +35,13 @@ class AlertRule:
     min_price: int | None = None
     max_price: int | None = None
     exclude: tuple[str, ...] = ()
+    days: int | None = None           # 끌올일수 — 검색 스윕 경로에서만 쓴다
     row: int = 0                      # 엑셀 행번호(로그·디버깅용)
+
+    def brand(self) -> str:
+        """등록에 쓸 브랜드 = 키워드 첫 어절. 한 어절이면 그 자체."""
+        parts = str(self.keyword or "").split()
+        return parts[0] if parts else ""
 
     def label(self) -> str:
         lo = f"{self.min_price:,}" if self.min_price else ""
@@ -45,7 +51,7 @@ class AlertRule:
     def to_dict(self) -> dict:
         return {"keyword": self.keyword, "min": self.min_price,
                 "max": self.max_price, "exclude": list(self.exclude),
-                "row": self.row}
+                "days": self.days, "row": self.row}
 
     @classmethod
     def from_dict(cls, d: dict) -> "AlertRule":
@@ -53,6 +59,7 @@ class AlertRule:
                    min_price=_as_int(d.get("min")),
                    max_price=_as_int(d.get("max")),
                    exclude=tuple(str(x) for x in (d.get("exclude") or []) if x),
+                   days=_as_int(d.get("days")),
                    row=int(d.get("row") or 0))
 
 
@@ -154,6 +161,10 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
 
     i_kw, i_min = col("키워드", "keyword"), col("최소")
     i_max, i_exc = col("최대"), col("제외")
+    # 옛 '엑셀 조건' 시트도 그대로 읽는다 — 헤더가 다를 뿐 같은 뜻이다.
+    # 제외 컬럼은 "제외키워드"도 잡히고, 추가키워드는 키워드에 붙여 한 줄로
+    # 만든다(어절 AND 라 "루이비통 오버 더 문 정품"과 뜻이 같다).
+    i_add, i_days = col("추가"), col("끌올")
     if i_kw is None:
         return [], ["엑셀 첫 행에 '키워드' 열이 필요합니다"]
 
@@ -167,6 +178,9 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
         kw = str(cell(i_kw) or "").strip()
         if not kw:
             continue
+        add = str(cell(i_add) or "").replace(",", " ").split()
+        if add:
+            kw = " ".join([kw] + add)
         lo, hi = _as_int(cell(i_min)), _as_int(cell(i_max))
         if lo is not None and hi is not None and lo > hi:
             errors.append(f"{n}행 '{kw}': 최소가격이 최대가격보다 큽니다 — 건너뜀")
@@ -179,7 +193,33 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
             continue
         seen.add(key)
         rules.append(AlertRule(keyword=kw, min_price=lo, max_price=hi,
-                               exclude=exc, row=n))
+                               exclude=exc, days=_as_int(cell(i_days)), row=n))
     if not rules and not errors:
         errors.append("엑셀에서 읽은 키워드가 없습니다")
     return rules, errors
+
+
+def brands(rules) -> list[str]:
+    """등록할 브랜드 목록 — 키워드 첫 어절, 처음 나온 순서로 중복 제거.
+
+    모델 수백 줄을 키워드로 올릴 수는 없다(앱 알림 등록에 상한이 있다).
+    브랜드로 넓게 받아 놓고 거르는 것이 이 구조의 전부다."""
+    out, seen = [], set()
+    for r in rules or []:
+        b = r.brand()
+        k = normalize_text(b)
+        if b and k not in seen:
+            seen.add(k)
+            out.append(b)
+    return out
+
+
+def brand_days(rules) -> dict[str, int]:
+    """브랜드별 끌올일수. 줄마다 다르면 가장 느슨한(큰) 값을 쓴다 —
+    좁게 잡으면 조건에 맞는 매물을 놓친다."""
+    out: dict[str, int] = {}
+    for r in rules or []:
+        if r.days:
+            b = r.brand()
+            out[b] = max(out.get(b, 0), int(r.days))
+    return out

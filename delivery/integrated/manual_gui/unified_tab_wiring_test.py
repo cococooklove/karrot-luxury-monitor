@@ -217,7 +217,7 @@ if _win is not None:
     for _attr in ("autoAreaTree", "autoExtra", "autoExclude", "autoMin",
                   "autoMax", "autoDays", "autoRestMin", "autoRestMax",
                   "autoGapMin", "autoGapMax", "autoLanes", "autoTokenRefresh",
-                  "autoProxyViewBtn", "autoExcelBtn", "autoNotifyBtn",
+                  "autoProxyViewBtn", "autoNotifyBtn",
                   "autoAccountsBtn"):
         ck(f"스윕 설정 이사: {_attr}", hasattr(_win, _attr))
     for _attr in ("autoKeyword", "autoStartBtn", "autoStatus", "autoProgress",
@@ -227,72 +227,69 @@ if _win is not None:
     ck("단일계정 일괄등록 제거", not hasattr(_win, "alertBulkBtn")
        and not hasattr(_win, "on_alert_bulk"))
     ck("엑셀 조건 캐시 제거", not hasattr(_win, "auto_conditions"))
+    # 엑셀 버튼은 '매물 감시' 탭 하나로 모았다 — 등록용/알림용이 따로 있는 줄
+    # 알고 같은 시트를 양쪽에 넣는 일이 반복됐다.
+    ck("고급 패널 엑셀 버튼 제거", not hasattr(_win, "autoExcelBtn")
+       and not hasattr(_win, "on_auto_excel_clicked"))
+    ck("조건표 엑셀 버튼은 매물 감시 탭에", hasattr(_win, "alertRulesBtn")
+       and callable(getattr(_win, "on_alert_rules_excel", None)))
 
-    # ── 엑셀 조건 → 라우터 (워크북 안 연다) ──
+    # ── 조건표 엑셀 → 브랜드 등록 (워크북 안 연다) ──
     class _FakeRouter:
         def __init__(self):
             self.calls = []
 
         def add_many(self, keywords, min_price=None, max_price=None,
                      exclude=None, core_only=False, log=None,
-                     extra=None, days=None):
+                     extra=None, days=None, replace_cond=False):
             self.calls.append((list(keywords), min_price, max_price,
                                list(exclude or []), core_only,
-                               list(extra or []), days))
-            return [{"keyword": k, "route": "app", "reason": "앱 알림 등록",
-                     "cond": {"min": min_price, "max": max_price,
-                              "exclude": list(exclude or []),
-                              "extra": list(extra or []), "days": days}}
+                               list(extra or []), days, replace_cond))
+            return [{"keyword": k, "route": "app", "reason": "앱 알림 등록"}
                     for k in keywords]
 
-    _conds = [
-        {"category": "가방", "keyword": "샤넬", "extra": ["정품"],
-         "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
-        {"category": "가방", "keyword": "구찌", "extra": [],
-         "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
-        {"category": "가방", "keyword": "프라다", "extra": [],
-         "exclude": ["레플"], "min": 500000, "max": 3000000, "days": 7},
-        {"category": "시계", "keyword": "롤렉스", "extra": [],
-         "exclude": [], "min": 1000000, "max": None, "days": 30},
-        {"category": "", "keyword": "", "extra": [], "exclude": [],
-         "min": None, "max": None, "days": None},          # 빈 키워드 = 버림
-    ]
-    _groups = _win._condition_groups(_conds)
-    # 샤넬만 추가키워드가 다르다. 라우터는 한 호출에 필터 하나만 받으므로
-    # 여기서 묶어 버리면 구찌·프라다에도 '정품' 이 걸린다 → 갈라져야 맞다.
-    ck("추가키워드가 다르면 그룹이 갈린다", len(_groups) == 3, str(_groups))
-    ck("빈 키워드 버림",
-       all(kw for g in _groups for kw in g[0]), str(_groups))
-    _g0 = next(g for g in _groups if "구찌" in g[0])
-    ck("필터가 같은 행은 한 그룹", sorted(_g0[0]) == ["구찌", "프라다"], str(_g0))
-    ck("그룹이 행의 가격·제외를 그대로 든다",
-       (_g0[1], _g0[2], _g0[3]) == (500000, 3000000, ["레플"]), str(_g0))
-    _gs = next(g for g in _groups if "샤넬" in g[0])
-    ck("그룹이 행의 추가키워드·끌올을 그대로 든다",
-       (_gs[4], _gs[5]) == (["정품"], 7), str(_gs))
+    from daangn_ext.alert_rules import brands, parse_rule_rows
+    _rows = [("키워드", "최소가격", "최대가격", "제외", "끌올일수"),
+             ("샤넬 클래식 미디움", 500000, 3000000, "레플", 7),
+             ("샤넬 보이백", 1000000, 4000000, "", 7),
+             ("구찌 마몬트", 500000, 3000000, "레플", 30),
+             ("롤렉스", 1000000, None, "", None),
+             ("", None, None, "", None)]                   # 빈 키워드 = 버림
+    _rules, _errs = parse_rule_rows(_rows)
+    _bs = brands(_rules)
+    ck("브랜드는 키워드 첫 어절, 중복 제거",
+       _bs == ["샤넬", "구찌", "롤렉스"], str(_bs))
+    ck("빈 키워드 버림", len(_rules) == 4, str([r.keyword for r in _rules]))
 
+    _groups = m.brand_register_groups(_bs, _rules)
+    ck("끌올일수가 다르면 그룹이 갈린다", len(_groups) == 3, str(_groups))
+    ck("같은 끌올일수는 한 그룹",
+       sorted(k for ks, d in _groups if d == 7 for k in ks) == ["샤넬"],
+       str(_groups))
+    ck("끌올일수 없는 브랜드는 days=None 그룹",
+       any(d is None and ks == ["롤렉스"] for ks, d in _groups), str(_groups))
+
+    # register() 가 도는 그대로 — 가격·제외는 넘기지 않는다.
     _fake = _FakeRouter()
-    _real_router = _win._router
-    _win._router = _fake
-    _logged = []
-    _res = _win._route_conditions(_conds, core_only=True, log=_logged.append)
-    _win._router = _real_router
-    ck("엑셀 조건이 라우터 add_many 로 간다", len(_fake.calls) == 3,
+    _res = []
+    for _ks, _d in _groups:
+        _res.extend(_fake.add_many(_ks, None, None, None, core_only=True,
+                                   log=lambda m: None, days=_d,
+                                   replace_cond=True))
+    ck("브랜드만 라우터로 간다",
+       sorted(k for c in _fake.calls for k in c[0]) == ["구찌", "롤렉스", "샤넬"],
        str(_fake.calls))
+    ck("가격·제외·추가는 안 넘긴다 — 당근 서버가 먼저 자르면 조건표가 볼 매물이 없다",
+       all(c[1] is None and c[2] is None and c[3] == [] and c[5] == []
+           for c in _fake.calls), str(_fake.calls))
     ck("core_only 전달", all(c[4] is True for c in _fake.calls))
-    ck("모든 키워드 배정",
-       sorted(k for c in _fake.calls for k in c[0])
-       == ["구찌", "롤렉스", "샤넬", "프라다"], str(_fake.calls))
-    ck("추가키워드·끌올이 라우터까지 간다",
-       next(c for c in _fake.calls if "샤넬" in c[0])[5:] == (["정품"], 7),
-       str(_fake.calls))
-    ck("라우터 결과를 돌려준다", len(_res) == 4, str(_res))
-    ck("빈 조건이면 그룹 없음", _win._condition_groups([]) == [])
-    _empty = _FakeRouter()
-    _win._router = _empty
-    _win._route_conditions([], core_only=False, log=_logged.append)
-    _win._router = _real_router
-    ck("빈 조건이면 라우터를 아예 안 부른다", _empty.calls == [], str(_empty.calls))
+    ck("끌올일수는 그대로 간다",
+       sorted((c[0][0], c[6]) for c in _fake.calls)
+       == [("구찌", 30), ("롤렉스", None), ("샤넬", 7)], str(_fake.calls))
+    ck("엑셀 경로만 replace_cond=True", all(c[7] is True for c in _fake.calls))
+    ck("라우터 결과를 돌려준다", len(_res) == 3, str(_res))
+    ck("브랜드가 없으면 라우터를 아예 안 부른다",
+       m.brand_register_groups([], []) == [])
 
     # ── 대기열 변화 → 검색 스윕 재시작 (Finding 1) ──
     class _FakeQueue:
@@ -374,7 +371,8 @@ if _win is not None:
     _sv_router = _win._router
     _win._resync_search_sweep = lambda: _seen.append("resync")
     # 폴링은 이제 _alert_run 워커로 나간다(씨딩·승격이 그 안에 들어갔다).
-    _win._alert_run = lambda fn, on_done=None: _seen.append("poll")
+    # label·queue 같은 인자가 늘어도 스텁이 먼저 죽지 않게 **kw 로 받는다.
+    _win._alert_run = lambda fn, on_done=None, **kw: _seen.append("poll")
     _win._router = None
     _win._auto_poll_tick()
     for _n in ("_resync_search_sweep", "_alert_run"):

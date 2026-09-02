@@ -112,8 +112,11 @@ ck("엑셀 로더 재수출 유지(full_test/gui_func_test)",
    am.load_conditions_from_excel is se.load_conditions_from_excel)
 
 main_src = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
-ck("main.py 엑셀 import 는 엔진 모듈로",
-   "from daangn.sweep_engine import load_conditions_from_excel" in main_src)
+# 엑셀은 '엑셀로 조건 넣기' 한 곳으로 모았다(alert_rules). main.py 는 더 이상
+# sweep_engine 의 로더를 부르지 않는다 — 어댑터 재수출은 다른 호출자를 위해 남는다.
+ck("main.py 는 엑셀 로더를 alert_rules 에서 가져온다",
+   "from daangn.sweep_engine import load_conditions_from_excel" not in main_src
+   and "load_rules_from_excel" in main_src)
 ck("main.py 는 AutoMonitor 를 어댑터에서 가져옴",
    "from daangn.auto_monitor import AutoMonitor" in main_src)
 

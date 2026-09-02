@@ -104,7 +104,7 @@ ck("디스크에 반영된다", router().condition_for("샤넬") == c5)
 
 print("\n=== 6. 엑셀 경로만 그 권한을 쓴다 ===")
 src = open("main.py", encoding="utf-8").read()
-ck("_route_conditions 가 replace_cond=True", "replace_cond=True" in src)
+ck("엑셀 경로가 replace_cond=True", "replace_cond=True" in src)
 # 실제 호출부만 센다 — 독스트링에도 같은 낱말이 나온다.
 calls = src.count("replace_cond=True)")
 ck("호출부는 엑셀 경로 한 곳뿐", calls == 1, f"{calls}곳")

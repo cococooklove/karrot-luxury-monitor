@@ -61,7 +61,7 @@ print("=== 버튼 → 핸들러 연결 ===")
 for attr in ("alertAddBtn", "alertRefreshBtn",
              "alertDelBtn", "alertDelAllBtn", "alertPollBtn", "alertPollAllBtn",
              "alertBulkAllBtn", "alertCoverageBtn", "alertFleetBtn",
-             "alertTgTestBtn", "watchToggleBtn", "autoExcelBtn", "autoNotifyBtn",
+             "alertTgTestBtn", "watchToggleBtn", "alertRulesBtn", "autoNotifyBtn",
              "autoAccountsBtn", "autoProxyViewBtn"):
     b = getattr(w, attr, None)
     ck(f"{attr} 연결됨", b is not None and b.receivers(b.clicked) > 0)
@@ -88,12 +88,12 @@ for d in _opened:
     except Exception:
         pass
 
-print("\n=== 엑셀 조건 로드: 취소해도 안 죽는다 ===")
+print("\n=== 조건표 엑셀 로드: 취소해도 안 죽는다 ===")
 try:
-    w.on_auto_excel_clicked()          # getOpenFileName 이 "" → 취소 경로
-    ck("엑셀 조건 취소 처리", True)
+    w.on_alert_rules_excel()           # getOpenFileName 이 "" → 취소 경로
+    ck("조건표 엑셀 취소 처리", True)
 except Exception as e:
-    ck("엑셀 조건 취소 처리", False, f"{type(e).__name__}: {str(e)[:60]}")
+    ck("조건표 엑셀 취소 처리", False, f"{type(e).__name__}: {str(e)[:60]}")
 
 print("\n=== 검색폼 → CrawlTask ===")
 w.ui.keywordEdit.setText("샤넬")

@@ -39,8 +39,10 @@ ck("자동 모니터 탭 위젯 제거",
                                    "autoStartBtn", "autoLog")))
 # 스윕 설정은 고급 패널로 이사했다.
 ck("스윕 설정은 고급 패널에",
-   all(hasattr(w, x) for x in ("autoExcelBtn", "autoAreaTree", "autoRestMin")))
-ck("엑셀 조건 핸들러 배선", callable(getattr(w, "on_auto_excel_clicked", None)))
+   all(hasattr(w, x) for x in ("autoNotifyBtn", "autoAreaTree", "autoRestMin")))
+# 엑셀은 '매물 감시' 탭 [엑셀로 조건 넣기] 하나로 모았다.
+ck("조건표 엑셀 핸들러 배선", callable(getattr(w, "on_alert_rules_excel", None)))
+ck("고급 패널에 엑셀 버튼 없음", not hasattr(w, "autoExcelBtn"))
 ck("프록시 수집 배선", callable(getattr(w, "_collect_proxies", None)))
 ck("스윕 cfg 조립 배선",
    callable(getattr(w, "_auto_cfg_base", None))

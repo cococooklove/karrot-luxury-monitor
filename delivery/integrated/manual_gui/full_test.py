@@ -191,6 +191,27 @@ ck("저장·복원", len(RuleTable.load(_p)) == len(rt)
    and RuleTable.load(_p).verdict("루이비통 오버더문", 900000)[0] == HIT)
 ck("없는 파일은 빈 테이블", len(RuleTable.load(tempfile.mktemp())) == 0)
 
+# 엑셀 한 장으로 등록과 알림 조건을 같이 넣는다 — 옛 '엑셀 조건' 시트도 읽힌다.
+from daangn_ext.alert_rules import brand_days, brands
+
+_old_sheet = [("대분류", "키워드", "추가키워드", "제외키워드",
+               "최소금액", "최대금액", "끌올일수"),
+              ("가방", "루이비통 오버 더 문", "정품", "레플, 미러", 500000, 1500000, 7),
+              ("가방", "샤넬 클래식", "", "", 1000000, "", 14),
+              ("시계", "로렉스", "", "", None, None, None)]
+_or, _oe = parse_rule_rows(_old_sheet)
+ck("옛 엑셀 조건 시트도 읽는다", len(_or) == 3 and not _oe, f"{len(_or)} / {_oe}")
+ck("추가키워드는 키워드에 합쳐진다",
+   _or[0].keyword == "루이비통 오버 더 문 정품" and _or[0].exclude == ("레플", "미러"),
+   f"{_or[0].keyword} / {_or[0].exclude}")
+ck("합친 추가키워드가 실제로 걸린다",
+   RuleTable(_or).verdict("루이비통 오버더문 정품 급처", 900000)[0] == HIT
+   and RuleTable(_or).verdict("루이비통 오버더문 급처", 900000)[0] == CUT)
+ck("브랜드는 키워드 첫 어절, 처음 순서로 중복 제거",
+   brands(_or) == ["루이비통", "샤넬", "로렉스"], str(brands(_or)))
+ck("브랜드별 끌올일수는 가장 느슨한 값",
+   brand_days(_or) == {"루이비통": 7, "샤넬": 14}, str(brand_days(_or)))
+
 print("\n=== C. 계정·프록시 저장소 ===")
 from daangn_ext.account_store import AccountStore
 
