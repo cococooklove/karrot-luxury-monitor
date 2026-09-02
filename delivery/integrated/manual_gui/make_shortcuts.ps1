@@ -3,13 +3,18 @@
 #   powershell -ExecutionPolicy Bypass -File make_shortcuts.ps1
 #
 # 만드는 것:
-#   "당근 명품 모니터"        → 창 있는 GUI 3탭 전부 (pythonw, 콘솔 안 뜸)
 #   "당근 수동 검색"          → 수동 검색만 (--manual). 수확·폴링 안 함
 #   "당근 매물 감시"          → 매물 감시 + 에뮬레이터 (--watch). 수확·폴링은 여기서만
 #   "당근 모니터 (서버·무인)" → 헤드리스, 콘솔에 로그가 계속 찍힘
 #
 # 수동과 감시를 동시에 띄워도 된다 — 수확기는 감시 쪽만 돌리고, accounts.json
 # 동시 쓰기는 프로세스 간 파일락이 막는다.
+#
+# 3탭 합본(인자 없는 main.py) 아이콘은 **만들지 않는다.** 운영은 분리가 원칙인데
+# 합본 창은 수확·폴링·라우터를 같이 소유해, 따로 띄운 매물 감시 창과 같은
+# keyword_routes.json 을 놓고 다툰다 — 실서버 2026-09-02 에 엑셀 조건이 통째로
+# 사라진 경로가 이것이다. 옛 아이콘이 남아 있으면 remove_legacy_gui_shortcut 이
+# 치운다.
 #
 # 두 바로가기 모두 작업 디렉토리를 이 폴더로 고정한다. main.py 가 OUT.json 을
 # cwd 상대경로로 열기 때문에, 작업 디렉토리가 다르면 지역 트리 로딩이 실패한다.
@@ -90,13 +95,31 @@ function New-Shortcut($name, $fallback, $exe, $argline, $desc) {
     }
 }
 
+function Remove-LegacyGuiShortcut {
+    # 3탭 합본 아이콘을 치운다.
+    #
+    # 이 아이콘은 인자 없이 main.py 를 불러 mode=all 로 뜬다. 그 창이 수확·폴링·
+    # 라우터를 소유해 버리면, 따로 띄운 매물 감시 창과 같은 keyword_routes.json
+    # 을 놓고 다퉈 엑셀 조건이 사라진다. 한글·영문 두 이름 모두 지운다(영문
+    # 로캘에서는 ASCII 폴백 이름으로 깔린다).
+    foreach ($n in @("당근 명품 모니터", "Karrot Monitor (GUI)")) {
+        foreach ($d in @([Environment]::GetFolderPath("Desktop"),
+                         "$env:PUBLIC\Desktop")) {
+            $p = Join-Path $d "$n.lnk"
+            if (Test-Path $p) {
+                try { Remove-Item $p -Force; Log "옛 합본 아이콘 제거: $p" }
+                catch { Log "옛 합본 아이콘을 못 지웠습니다: $p" }
+            }
+        }
+    }
+}
+
 if (-not $NoGui) {
     # 클라 요구(2026-09-01): 수동 검색과 '매물 감시+에뮬레이터'를 별도 프로그램으로.
     # 한 코드베이스에 실행 모드만 다르다(main.py --manual / --watch). 상태는
     # accounts.json 으로 공유되고, 동시 쓰기는 프로세스 간 파일락이 막는다.
-    # 종전 3탭짜리 아이콘도 남긴다 — 기존 사용자가 쓰던 것이 사라지면 안 된다.
-    New-Shortcut "당근 명품 모니터" "Karrot Monitor (GUI)" $pyw "main.py" `
-        "매물 감시 GUI — 키워드 등록, 매물 표, 가격 추적"
+    # 종전 3탭 합본 아이콘은 **지운다**(2026-09-02) — 위 주석 참고.
+    Remove-LegacyGuiShortcut
     New-Shortcut "당근 수동 검색" "Karrot Manual Search" $pyw "main.py --manual" `
         "수동 검색 전용 — 감시·수확은 돌지 않는다"
     New-Shortcut "당근 매물 감시" "Karrot Watch" $pyw "main.py --watch" `
