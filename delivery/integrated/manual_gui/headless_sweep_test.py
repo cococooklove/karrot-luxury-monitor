@@ -616,13 +616,12 @@ print("=== Q. 관측 상한 탈출구가 두 런타임에서 닿는다 ===")
 ck("헤드리스에 --reset-cap 이 있다", "--reset-cap" in _hsrc)
 ck("--reset-cap 이 reset_observed_cap 을 부른다",
    "reset_observed_cap" in inner)
-ck("GUI 에 초기화 핸들러", callable(getattr(m.MainWindow, "on_reset_cap_clicked", None)))
-ck("GUI 핸들러가 reset_observed_cap 을 부른다",
-   "reset_observed_cap" in m.MainWindow.on_reset_cap_clicked.__code__.co_names)
+ck("GUI 는 전체 삭제가 reset_observed_cap 을 부른다",
+   "reset_observed_cap" in m.MainWindow.on_alert_delete_all.__code__.co_names)
 from daangn_ext import keyword_router as _kr
 _capsrc = _inspect.getsource(_kr.KeywordRouter._observe_cap_full)
 ck("하향 로그가 실제 조작법을 알려준다",
-   "슬롯 상한 초기화" in _capsrc and "--reset-cap" in _capsrc, _capsrc[-160:])
+   "전체 삭제" in _capsrc and "--reset-cap" in _capsrc, _capsrc[-160:])
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

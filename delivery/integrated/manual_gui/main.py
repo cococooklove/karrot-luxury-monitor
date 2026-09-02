@@ -1837,7 +1837,6 @@ class MainWindow(QMainWindow):
         hl.addWidget(brand); hl.addWidget(sub); hl.addStretch(1)
         cl.addWidget(header); cl.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
-        self._refresh_proxy_labels()
         self.resize(1200, 840)                      # 하단 위젯 안 잘리게 넉넉히
         self.setStyleSheet(APP_QSS)                  # 전역 스타일(앱 단위로도 건다)
         self._apply_card_shadows()
@@ -2301,8 +2300,8 @@ class MainWindow(QMainWindow):
     # 고급 패널 항목으로 스크롤한다). 대응 항목이 없는 칩은 여기 넣지 않는다 —
     # 없는 목적지를 지어내면 사용자가 엉뚱한 곳으로 간다.
     CHIP_TARGETS = {
-        "token": "alertFleetBtn",       # 토큰 유효/만료 → 계정별 만료 현황
-        "accounts": "alertFleetBtn",    # 계정 수 → 같은 팜 현황 다이얼로그
+        "token": "autoAccountsBtn",     # 토큰 유효/만료 → 계정+프록시(안에 계정 현황)
+        "accounts": "autoAccountsBtn",  # 계정 수 → 같은 곳
         "coverage": "alertCoverMode",   # 커버리지 → 전국/핵심 커버 모드
         "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
         "rules": "rulesTable",          # 조건 수 → 조건표 자체
@@ -2438,7 +2437,7 @@ class MainWindow(QMainWindow):
         self.dashBar.setTextVisible(True)
         dl.setSpacing(8)
         self.dashCadence = QtWidgets.QLabel("폴링 주기: -")
-        self.dashGuide = QtWidgets.QLabel("증설 안내: [커버 동네 집계]를 눌러 현황을 계산하세요")
+        self.dashGuide = QtWidgets.QLabel("증설 안내: 감시를 시작하면 커버 현황을 계산합니다")
         self.dashGuide.setWordWrap(True)
         for wdg in (self.dashHealth, self.dashAccounts, self.dashCoverage, self.dashBar,
                     self.dashCadence, self.dashGuide):
@@ -2482,29 +2481,14 @@ class MainWindow(QMainWindow):
         # 목적지 없는 칩은 누르지 않는 편이 낫다 — 라벨로 둔다.
         top.addWidget(self._watch_label, 1)
 
-        # 등록 폼
-        form = QtWidgets.QGroupBox("키워드 등록"); fl = QtWidgets.QVBoxLayout(form)
-        r0 = QtWidgets.QHBoxLayout()
-        self.alertKeyword = QtWidgets.QLineEdit(); self.alertKeyword.setPlaceholderText("키워드 (예: 샤넬)")
-        self.alertMin = QtWidgets.QLineEdit(); self.alertMin.setPlaceholderText("최소가(선택)"); self.alertMin.setFixedWidth(110)
-        self.alertMax = QtWidgets.QLineEdit(); self.alertMax.setPlaceholderText("최대가(선택)"); self.alertMax.setFixedWidth(110)
-        self.alertExclude = QtWidgets.QLineEdit(); self.alertExclude.setPlaceholderText("제외 키워드(쉼표)")
-        r0.addWidget(self.alertKeyword, 2); r0.addWidget(self.alertMin); r0.addWidget(self.alertMax); r0.addWidget(self.alertExclude, 2)
-        fl.addLayout(r0)
-        r1 = QtWidgets.QHBoxLayout()
-        self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
-        self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
-        # 등록 경로는 엑셀 하나다. 예전에는 '명품20 전계정등록' 버튼이 따로 있어
-        # 브랜드만 등록해 놓고 조건표를 안 넣는 상태가 만들어졌다 — 그러면
-        # 모델·가격대와 무관하게 브랜드 전 매물이 알림으로 쏟아진다.
+        # 등록 경로는 엑셀 하나다. 예전에는 '명품20 전계정등록' 버튼과 수동
+        # 키워드 폼이 따로 있어 브랜드만 등록해 놓고 조건표를 안 넣는 상태가
+        # 만들어졌다 — 그러면 모델·가격대와 무관하게 브랜드 전 매물이 알림으로
+        # 쏟아진다. 조건표와 어긋나는 뒷문은 두지 않는다.
         self.alertRulesBtn = QtWidgets.QPushButton("엑셀로 조건 넣기")
         self.alertRulesBtn.setObjectName("startBtn")
         self.alertRulesBtn.setToolTip(
             "엑셀 한 장으로 브랜드 등록과 알림 조건을 함께 넣습니다")
-        r1.addWidget(self.alertAddBtn)
-        r1.addWidget(self.alertRulesBtn)
-        r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
-        fl.addLayout(r1)
 
         # ── 감시 조건: 클라가 넣은 엑셀이 그대로 보여야 한다 ──
         # 예전에는 이 자리에 '등록 표'(당근에 올라간 브랜드)만 있었다. 조건
@@ -2543,7 +2527,7 @@ class MainWindow(QMainWindow):
         self.alertBusyRow.setVisible(False)
 
         # 커버 동네 정보
-        self.alertSubLabel = QtWidgets.QLabel("동네 정보: (새로고침을 누르세요)")
+        self.alertSubLabel = QtWidgets.QLabel("동네 정보: (감시를 시작하면 채워집니다)")
 
         # 등록 목록
         self.alertTable = QtWidgets.QTableWidget(0, len(ALERT_COLS), w)
@@ -2564,21 +2548,15 @@ class MainWindow(QMainWindow):
         # (인덱스 상수와 셀 생성 함수가 쓴다). 화면에서만 감춘다.
         self.alertTable.setColumnHidden(ALERT_COL_ID, True)
 
-        r2 = QtWidgets.QHBoxLayout()
-        self.alertDelBtn = QtWidgets.QPushButton("선택 삭제")
-        # 전체 삭제는 고급에 둔다. 표 바로 아래 있던 동안 실서버에서 등록 21건이
-        # 그렇게 날아갔다(2026-09-02).
+        # 삭제 경로는 '전체 삭제' 하나다. 낱개 삭제는 조건표와 등록을 어긋나게
+        # 만들고, 표 바로 아래 있던 동안 실서버에서 등록 21건이 날아갔다
+        # (2026-09-02). 고급에 둔다.
         self.alertDelAllBtn = QtWidgets.QPushButton("전체 삭제")
-        r2.addWidget(self.alertDelBtn); r2.addStretch(1)
 
-        # ── 고급 패널에 들어갈 위젯(진단·튜닝) ──
-        self.alertPollBtn = QtWidgets.QPushButton("지금 한번 확인")
-        self.alertPollBtn.setToolTip("현재 계정의 알림함만 즉시 확인합니다")
-        self.alertPollAllBtn = QtWidgets.QPushButton("전체 계정 확인"); self.alertPollAllBtn.setObjectName("startBtn")
-        self.alertPollAllBtn.setToolTip("모든 계정의 알림함을 확인합니다(전국)")
-        self.alertCoverageBtn = QtWidgets.QPushButton("커버 범위 계산")
-        self.alertFleetBtn = QtWidgets.QPushButton("계정 현황")
-        self.alertFleetBtn.setToolTip("계정별 동네·토큰만료·핵심여부·폴링실패·밴격리 — 팜 운영 한 눈에")
+        # ── 고급 패널에 들어갈 위젯(튜닝) ──
+        # 폴링·커버 계산은 감시 시작이 스스로 한다. 계정 현황·프록시·진단은
+        # 계정+프록시 창 안으로 옮겼다 — 여기 버튼 여덟 개가 나란히 있던 동안
+        # 클라는 어느 것을 눌러야 하는지 몰랐다.
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
         self.alertCoverMode = QtWidgets.QComboBox()
@@ -2587,29 +2565,12 @@ class MainWindow(QMainWindow):
         self.alertCoverMode.setToolTip(
             "전국=모든 유효계정 사용 / 핵심지역=명품 밀집동네(강남·분당·해운대 등) 계정만 "
             "→ 적은 계정으로 거래량 대부분 커버. 등록·폴링·집계 전부 이 모드 따름.")
-        self.alertAutoStartChk = QtWidgets.QCheckBox("실행 시 자동 폴링")
-        self.alertBootChk = QtWidgets.QCheckBox("PC 부팅 시 자동실행")
-        self.alertBootChk.setToolTip(
-            "Windows 시작 시 이 프로그램 자동실행 → '실행 시 자동 폴링'과 함께면 재부팅해도 무인 감시 지속. (Windows 전용)")
-        self.alertCrashChk = QtWidgets.QCheckBox("크래시 자동복구")
-        self.alertCrashChk.setToolTip(
-            "앱이 예기치 못하게 죽으면 감시자가 자동 재시작. '부팅 자동실행'과 함께 켜면 부팅부터 감시자 모드로 실행돼 완전 무인. (Windows 전용)")
-        self.alertNightChk = QtWidgets.QCheckBox("야간 감속")
-        self.alertNightChk.setToolTip(
-            "밴회피: 자동폴링 주기를 시간대별 자동조정 — 새벽 0~7시 ×3, 늦밤/이른아침 ×2, 주간 정상. "
-            "24시간 무인운영 시 야간 과다요청 억제.")
-        self.alertTgTestBtn = QtWidgets.QPushButton("텔레그램 테스트")
-        self.alertTgTestBtn.setToolTip("설정된 텔레그램으로 테스트 메시지 발송 → 알림 파이프 확인")
-        # 관측 상한 탈출구. 서버 등록이 한 번 실패하면 라우터는 유효 상한을
-        # 그 시점 used 로 내리고 스스로 올리지 않는다 — 일시적 오류였다면
-        # 이 버튼(서버는 --reset-cap)이 유일한 복구 경로다.
-        self.alertResetCapBtn = QtWidgets.QPushButton("등록 한도 초기화")
-        self.alertResetCapBtn.setToolTip(
-            "앱 알림 슬롯 상한의 '관측치'를 지운다.\n"
-            "서버가 등록을 거부하면 라우터는 유효 상한을 그때의 등록 수로 내리고\n"
-            "스스로 올리지 않는다 — 일시적 서버 오류로 내려갔다면 여기서 되돌린다.\n"
-            "서버(헤드리스)에서는 --reset-cap 플래그가 같은 일을 한다.")
-        self.alertResetCapBtn.clicked.connect(self.on_reset_cap_clicked)
+        # 무인 운영 스위치(실행 시 자동 폴링·크래시 자동복구·야간 감속)는
+        # 체크박스가 아니라 기본값이다 — 서버 상주로 도는 앱에서 끌 이유가
+        # 없고, 꺼 두면 감시가 조용히 멈춘다. 옛 alert_settings.json 값은 존중한다.
+        # 부팅 자동실행은 설치본(install.ps1)이 LDPlayer 순차 기동 뒤에 앱을
+        # 띄우는 경로로 등록한다 — 앱이 따로 등록하면 로그온 때 둘이 동시에
+        # 인스턴스를 띄워 함대가 hang 한다.
         # ── 고급 (접힘) ──
         # 평소엔 토글 하나면 된다. 진단·튜닝이 필요할 때만 편다.
         self.advancedBox = QtWidgets.QGroupBox("고급")
@@ -2621,29 +2582,17 @@ class MainWindow(QMainWindow):
         self.advancedBox.toggled.connect(self._sync_advanced_visible)
 
         a1 = QtWidgets.QHBoxLayout()
-        a1.addWidget(self.alertPollBtn); a1.addWidget(self.alertPollAllBtn)
-        a1.addWidget(self.alertCoverageBtn); a1.addWidget(self.alertFleetBtn)
-        a1.addWidget(self.alertTgTestBtn); a1.addWidget(self.alertResetCapBtn)
-        a1.addWidget(self.alertDelAllBtn)
-        a1.addStretch(1)
+        a1.addWidget(QtWidgets.QLabel("주기")); a1.addWidget(self.alertPollInterval)
+        a1.addSpacing(12); a1.addWidget(QtWidgets.QLabel("커버"))
+        a1.addWidget(self.alertCoverMode)
+        a1.addStretch(1); a1.addWidget(self.alertDelAllBtn)
         av.addLayout(a1)
-
-        a2 = QtWidgets.QHBoxLayout()
-        a2.addWidget(QtWidgets.QLabel("주기")); a2.addWidget(self.alertPollInterval)
-        a2.addSpacing(12); a2.addWidget(QtWidgets.QLabel("커버"))
-        a2.addWidget(self.alertCoverMode)
-        a2.addSpacing(12); a2.addWidget(self.alertAutoStartChk)
-        a2.addWidget(self.alertBootChk); a2.addWidget(self.alertCrashChk)
-        a2.addWidget(self.alertNightChk); a2.addStretch(1)
-        av.addLayout(a2)
 
         # 등록 상태 — 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
         # 조건과 같은 자리에 두면 둘을 같은 것으로 읽는다.
         av.addWidget(QtWidgets.QLabel("── 당근에 등록된 키워드 ──"))
-        av.addWidget(form)
         av.addWidget(self.alertSubLabel)
         av.addWidget(self.alertTable, 1)
-        av.addLayout(r2)
 
         av.addWidget(self._build_sweep_settings())
         # 체크 해제는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨겨야 하고,
@@ -2703,16 +2652,8 @@ class MainWindow(QMainWindow):
         v.addWidget(self.advancedBox)
         v.addWidget(self.logBox)
 
-        self.alertAddBtn.clicked.connect(self.on_alert_add)
-        self.alertRefreshBtn.clicked.connect(self.on_alert_refresh)
-        self.alertDelBtn.clicked.connect(self.on_alert_delete)
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
-        self.alertPollBtn.clicked.connect(self.on_alert_poll)
         self.alertRulesBtn.clicked.connect(self.on_alert_rules_excel)
-        self.alertPollAllBtn.clicked.connect(self.on_alert_poll_all)
-        self.alertCoverageBtn.clicked.connect(self.on_alert_coverage)
-        self.alertFleetBtn.clicked.connect(self.on_alert_fleet)
-        self.alertTgTestBtn.clicked.connect(self.on_alert_tg_test)
         self._alert_worker = None
         self._alert_rules = AlertRulesCache()
         self._match_links = {}
@@ -2790,13 +2731,6 @@ class MainWindow(QMainWindow):
         # 최대 30분(야간)을 기다려야 채워졌다. 사용자에겐 매물이 사라진
         # 것으로 보인다. 생성자가 끝난 뒤 그리도록 미룬다.
         QtCore.QTimer.singleShot(0, self._refresh_listing_table)
-        # 실행 시 자동 폴링(무인): 설정 복원 + 저장 배선 + 지연 시작(토큰 수확 대기)
-        try:
-            self.alertAutoStartChk.setChecked(bool(self._load_alert_settings().get("autostart")))
-        except Exception:
-            pass
-        self.alertAutoStartChk.toggled.connect(
-            lambda on: self._save_alert_settings({"autostart": bool(on)}))
         # 커버 모드 복원 + 저장
         try:
             if self._load_alert_settings().get("core_only"):
@@ -2805,25 +2739,8 @@ class MainWindow(QMainWindow):
             pass
         self.alertCoverMode.currentIndexChanged.connect(
             lambda _i: self._save_alert_settings({"core_only": bool(self._core_only())}))
-        try:
-            self.alertNightChk.setChecked(bool(self._load_alert_settings().get("night")))
-        except Exception:
-            pass
-        self.alertNightChk.toggled.connect(
-            lambda on: self._save_alert_settings({"night": bool(on)}))
-        # PC 부팅 자동실행 — 실제 레지스트리 등록상태로 초기화
-        try:
-            self.alertBootChk.setChecked(self._boot_autostart_enabled())
-        except Exception:
-            pass
-        self.alertBootChk.toggled.connect(self._set_boot_autostart)
-        # 크래시 자동복구 — 설정 복원 + 저장 + (부팅 등록돼 있으면 커맨드 갱신)
-        try:
-            self.alertCrashChk.setChecked(bool(self._load_alert_settings().get("crash_recover")))
-        except Exception:
-            pass
-        self.alertCrashChk.toggled.connect(self._on_crash_toggle)
-        if self.alertAutoStartChk.isChecked():
+        # 실행 시 자동 폴링(무인) — 지연 시작(토큰 수확 대기)
+        if self._alert_setting("autostart"):
             if getattr(self, "_mode_cfg", {}).get("background", True):
                 QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
@@ -2912,6 +2829,15 @@ class MainWindow(QMainWindow):
         except Exception:
             return {}
 
+    # 무인 운영 스위치 기본값. 예전엔 체크박스였고 기본이 꺼짐이라, 설치 뒤
+    # 누가 켜 주기 전까지 감시는 앱을 켜도 시작하지 않았다.
+    _ALERT_DEFAULTS = {"autostart": True, "night": True, "crash_recover": True}
+
+    def _alert_setting(self, key):
+        """저장값이 있으면 그것, 없으면 무인 운영 기본값."""
+        v = self._load_alert_settings().get(key)
+        return self._ALERT_DEFAULTS.get(key, False) if v is None else bool(v)
+
     def _save_alert_settings(self, patch):
         import json as _json, os as _os
         try:
@@ -2940,7 +2866,7 @@ class MainWindow(QMainWindow):
         떴다. 합본은 이제 모드 자체가 없지만, 커맨드에는 모드를 명시해 둔다 —
         모르는 모드는 매물 감시로 보낸다."""
         import sys as _sys
-        wd = " --watchdog" if self._load_alert_settings().get("crash_recover") else ""
+        wd = " --watchdog" if self._alert_setting("crash_recover") else ""
         mode = self._MODE_FLAG.get(getattr(self, "mode", "watch"), " --watch")
         if getattr(_sys, "frozen", False):
             return f'"{_sys.executable}"{wd}{mode}'
@@ -2949,13 +2875,6 @@ class MainWindow(QMainWindow):
         pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
         launcher = pyw if os.path.exists(pyw) else exe
         return f'"{launcher}" "{script}"{wd}{mode}'
-
-    def _on_crash_toggle(self, on):
-        self._save_alert_settings({"crash_recover": bool(on)})
-        # 부팅 자동실행이 이미 켜져 있으면 커맨드(--watchdog 포함)를 즉시 갱신
-        if self.alertBootChk.isChecked():
-            self._set_boot_autostart(True)
-        self._alog(f"[크래시 자동복구] {'켜짐 — 부팅 시 감시자 모드' if on else '꺼짐'}")
 
     def _installer_boot_entry(self) -> bool:
         """install.ps1 이 심은 부팅 진입점이 있는지."""
@@ -3217,26 +3136,6 @@ class MainWindow(QMainWindow):
         cancelBtn.clicked.connect(dlg.reject)
         dlg.exec()
 
-    def on_alert_tg_test(self):
-        """텔레그램 테스트 발송 — 무인 신뢰 전에 알림 파이프 확인."""
-        import time as _t
-        tok = (getattr(self, "_notify", {}) or {}).get("tg_token")
-        chat = (getattr(self, "_notify", {}) or {}).get("tg_chat")
-        if not (tok and chat):
-            self._alog("[텔레그램] 미설정 — 상단 '알림 설정'서 봇토큰/chat_id 입력")
-            self.sb.showMessage("텔레그램 미설정", 4000)
-            return
-        try:
-            from daangn.notify import TelegramSender
-            tg = TelegramSender(tok, chat, log=self._alog)
-            tg.enqueue(f"✅ 당근 명품 모니터 테스트 · {_t.strftime('%m/%d %H:%M:%S')}\n"
-                       f"이 메시지가 보이면 알림 정상 작동.")
-            tg.flush()
-            self._alog("[텔레그램] 테스트 전송 완료 — 폰 확인")
-            self.sb.showMessage("텔레그램 테스트 전송됨", 4000)
-        except Exception as e:
-            self._alog(f"[텔레그램] 테스트 실패: {str(e)[:60]}")
-
     def _init_dashboard(self):
         """탭 열릴 때 계정수 즉시 표시(토큰 불필요, accounts.json만). 커버리지는 버튼."""
         import json as _json
@@ -3256,7 +3155,7 @@ class MainWindow(QMainWindow):
             + ("  (수확 필요 — 유효토큰 0)" if n_valid == 0 else ""))
         self.dashCadence.setText(f"폴링 주기: {self.alertPollInterval.value()}초 (자동폴링 시)")
         self.dashGuide.setText(
-            "커버리지·전국% 는 [커버 동네 집계]를 눌러 계산하세요. "
+            "커버리지·전국% 는 감시 시작 때 계산합니다. "
             "1계정≈39지역 · 전국(~3500동)엔 서로 다른 동네 ~90~250계정 필요.")
 
     def _alert_api(self):
@@ -3362,21 +3261,6 @@ class MainWindow(QMainWindow):
         self._alog(
             f"[키워드] {res.get('keyword')} → {name} ({res.get('reason')})")
 
-    def on_alert_add(self):
-        kw = self.alertKeyword.text().strip()
-        if not kw:
-            self.alert("키워드를 입력하세요"); return
-        if not self._router:
-            self.alert("라우터가 없습니다 — 로그를 확인하세요"); return
-        mn, mx = self._pi(self.alertMin.text()), self._pi(self.alertMax.text())
-        excl = [x for x in self.alertExclude.text().replace(" ", "").split(",") if x]
-        co = self._core_only()
-        # 라우터가 앱 슬롯/스윕 대기열 중 하나로 배정한다. 사용자는 고르지 않는다.
-        def job(log):
-            res = self._router.add(kw, mn, mx, excl, core_only=co, log=log)
-            return {"route": res, "list": self._safe_alert_list(log)}
-        self._alert_run(job, self._alert_route_done, label="키워드 등록 중")
-
     def _safe_alert_list(self, log):
         """현재 계정의 등록 목록. 토큰이 없으면 None — 등록 자체는 이미 끝났다."""
         try:
@@ -3399,41 +3283,6 @@ class MainWindow(QMainWindow):
         for r in payload.get("routes") or []:
             self._log_route(r)
         self._alert_populate(payload.get("list"))
-
-    def on_alert_refresh(self):
-        def job(log):
-            api = self._alert_api()
-            data = api.list(); log(f"등록 {len(data.get('user_keywords') or [])}건")
-            return data
-        self._alert_run(job, self._alert_populate, label="등록 목록 새로고침 중")
-
-    def on_alert_delete(self):
-        row = self.alertTable.currentRow()
-        if row < 0:
-            self.alert("삭제할 행을 선택하세요"); return
-        item = self.alertTable.item(row, ALERT_COL_ID)
-        kw_item = self.alertTable.item(row, ALERT_COL_KEYWORD)
-        if not item:
-            return
-        uid = item.text()
-        kw = kw_item.text() if kw_item else ""
-        # 라우터에서도 뺀다 — 안 그러면 슬롯만 먹은 채로 남는다.
-        if self._router and kw:
-            try:
-                self._router.remove(kw)
-            except Exception as e:
-                # 삼키면 슬롯이 영영 샌다 — 이 호출이 막으려던 바로 그 실패다.
-                self._alog(
-                    f"[라우터] {kw} 배정 해제 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
-        if not uid:                                   # 스윕 대기열 행 — 앱 id 가 없다
-            self._alog(f"[키워드] {kw} 검색 스윕 대기열에서 제거")
-            self.on_alert_refresh()
-            return
-        def job(log):
-            api = self._alert_api()
-            ok = api.delete(uid); log(f"삭제 {'✓' if ok else '실패'} id={uid}")
-            return api.list()
-        self._alert_run(job, self._alert_populate, label="키워드 삭제 중")
 
     def on_alert_delete_all(self):
         # 삭제 경로는 하나여야 한다. 조건표와 등록을 따로 지우게 두면 조건만
@@ -3462,10 +3311,16 @@ class MainWindow(QMainWindow):
             self.alert("이전 작업 진행 중 — 잠시 후")
             return
         # 라우터 배정도 함께 비운다 — 남겨두면 슬롯이 찬 채로 전부 스윕행이 된다.
+        # 관측 상한도 되돌린다. '처음 상태'에 낮아진 상한이 남아 있으면 다시 넣은
+        # 엑셀이 슬롯에 못 들어가고 전부 스윕행이 된다 — GUI 에서 상한을
+        # 되돌리는 길은 이것 하나다(서버는 --reset-cap).
         if self._router:
             try:
                 for r in list(self._router.routes()):
                     self._router.remove(r["keyword"])
+                if self._router.reset_observed_cap():
+                    self._alog("[라우터] 앱 슬롯 상한 관측치 초기화 —"
+                               " 다음 등록부터 설정 상한을 다시 씁니다")
             except Exception as e:
                 self._alog(
                     f"[라우터] 배정 비우기 실패 — 앱 슬롯이 남습니다: {str(e)[:80]}")
@@ -3578,14 +3433,6 @@ class MainWindow(QMainWindow):
             self.alertSubLabel.setText(f"커버 동네: {txt}")
 
     # ── 신규 매칭 폴링 ──
-    def on_alert_poll(self):
-        def job(log):
-            api = self._alert_api()
-            matches = api.new_matches()
-            log(f"매칭 조회: {len(matches)}건")
-            return matches
-        self._alert_run(job, self._match_populate, label="알림함 확인 중")
-
     def _set_sleep_block(self, block):
         """자동폴링 중 PC 절전 차단(Windows). 절전 걸리면 감시 멈추는 함정 방지.
         block=True 상시 각성 유지, False 해제. Mac/Linux no-op."""
@@ -3622,7 +3469,7 @@ class MainWindow(QMainWindow):
             night = f" · 야간감속 ×{nf}" if nf > 1 else ""
             self._alog(
                 f"[감시] 시작 · 폴링 {self.alertPollInterval.value()}초{night} · 절전차단")
-            self.on_alert_poll_all()      # 첫 회차는 기다리지 않는다
+            self._watch_kickoff()          # 첫 회차는 기다리지 않는다
 
     def _match_populate(self, matches):
         import time as _t
@@ -3817,7 +3664,7 @@ class MainWindow(QMainWindow):
 
     def _night_factor(self):
         """야간 감속 배수 — 새벽0~7시 ×3, 늦밤22~24·이른7~9시 ×2, 그외 ×1."""
-        if not self.alertNightChk.isChecked():
+        if not self._alert_setting("night"):
             return 1
         import time as _t
         h = _t.localtime().tm_hour
@@ -3870,6 +3717,38 @@ class MainWindow(QMainWindow):
             return self._alert_fleet().poll_all(log=log, core_only=co)
 
         self._alert_run(job, self._match_populate, label="자동 폴링 중")
+
+    def _watch_kickoff(self):
+        """감시 시작 직후 한 번: 전 계정 폴링 → 커버 동네 집계 → 등록 목록.
+
+        셋 다 같은 계정 토큰을 쓰는 네트워크 작업이라 워커 하나에 이어 붙인다.
+        _alert_run 의 대기열은 한 자리라 셋을 따로 넣으면 마지막 것만 남는다."""
+        co = self._core_only()
+
+        def job(log):
+            out = {"matches": None, "cov": None, "list": None}
+            # 셋 중 하나가 죽어도 나머지는 한다 — 첫 폴링이 실패했다고 커버
+            # 현황과 등록 목록까지 비워 두면 화면이 '아무것도 없음'으로 읽힌다.
+            try:
+                out["matches"] = self._alert_fleet().poll_all(log=log, core_only=co)
+            except Exception as e:
+                log(f"[폴링] 첫 확인 실패: {str(e)[:80]}")
+            try:
+                cov = self._multi().coverage(log=log, core_only=co)
+                log(f"커버 동네 {len(cov)}개 · 합산 {sum(int(c[2] or 0) for c in cov)}지역")
+                out["cov"] = cov
+            except Exception as e:
+                log(f"[커버] 집계 실패: {str(e)[:80]}")
+            out["list"] = self._safe_alert_list(log)
+            return out
+
+        def done(out):
+            out = out or {}
+            self._match_populate(out.get("matches"))
+            self._update_dashboard(out.get("cov"))
+            self._alert_populate(out.get("list"))
+
+        self._alert_run(job, done, queue=True, label="첫 확인 중")
 
     def on_alert_poll_all(self):
         co = self._core_only()
@@ -4067,11 +3946,8 @@ class MainWindow(QMainWindow):
             "동시 수집 갈래(레인) 수. 0=자동(프록시 수 ÷ 3).\n"
             "레인은 프록시를 나눠 갖는다 — 같은 IP 로 동시요청하면 전부 빈응답이 된다.\n"
             "프록시가 부족하면 지정값보다 낮게 자동 조정된다.")
-        self.autoTokenRefresh = QtWidgets.QCheckBox("토큰 갱신", box)
-        self.autoTokenRefresh.setChecked(True)   # 기본 ON — LDPlayer 자동수확(제로컨피그)
-        self.autoTokenRefresh.setToolTip(
-            "체크 시 LDPlayer 정품앱이 갱신한 access 토큰을 자동 수확(WAF 우회). "
-            "LDPlayer 실행+로그인 상태면 별도 설정 불필요.")
+        # 토큰 갱신 체크박스는 없다 — LDPlayer 앱이 갱신한 토큰을 수확하는 것이
+        # 유일한 경로라(PC 직접 갱신은 WAF 가 막는다) 끄는 순간 토큰 0 이 된다.
         self._notify = self._load_notify()
 
         # 가격·추가·제외·끌올은 조건표가 정한다. 화면에 남겨 두면 적어도
@@ -4087,8 +3963,6 @@ class MainWindow(QMainWindow):
         self._sweepLegacy.setVisible(False)
         gv.addWidget(self._sweepLegacy)
 
-        s1 = QtWidgets.QHBoxLayout(); s1.setSpacing(8)
-        s1.addWidget(self.autoTokenRefresh); s1.addStretch(1)
         s2 = QtWidgets.QHBoxLayout(); s2.setSpacing(8)
         s2.addWidget(QtWidgets.QLabel("휴식")); s2.addWidget(self.autoRestMin)
         s2.addWidget(QtWidgets.QLabel("~")); s2.addWidget(self.autoRestMax); s2.addWidget(QtWidgets.QLabel("초"))
@@ -4098,7 +3972,7 @@ class MainWindow(QMainWindow):
         s2.addSpacing(16)
         s2.addWidget(QtWidgets.QLabel("레인")); s2.addWidget(self.autoLanes)
         s2.addStretch(1)
-        gv.addLayout(s1); gv.addLayout(s2)
+        gv.addLayout(s2)
 
         # 액션 바 — 시작 버튼은 없다. 스윕은 감시 토글이 켜고 끈다.
         bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
@@ -4107,21 +3981,18 @@ class MainWindow(QMainWindow):
         # 같은 시트를 양쪽에 넣었다.
         self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", box)
         self.autoNotifyBtn.clicked.connect(self.on_auto_notify_clicked)
+        # 계정 현황·프록시 목록·프록시 진단은 계정+프록시 창 안에 있다 —
+        # 전부 같은 accounts.json 을 보는 화면이라 한 입구로 모았다.
         self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", box)
         self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
-        self.autoProxyViewBtn = QtWidgets.QPushButton("프록시 목록", box)
-        self.autoProxyViewBtn.clicked.connect(self.on_proxy_view_clicked)
-        for b in (self.autoNotifyBtn, self.autoAccountsBtn,
-                  self.autoProxyViewBtn):
+        for b in (self.autoNotifyBtn, self.autoAccountsBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
         bar.addWidget(self.autoNotifyBtn)
-        bar.addWidget(self.autoAccountsBtn); bar.addWidget(self.autoProxyViewBtn)
+        bar.addWidget(self.autoAccountsBtn)
         bar.addStretch(1)
-        # 프록시 상태·진단 — 상태바에서 옮겨 왔다. 쓰는 탭에만 둔다.
-        self.healthBtn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
-                                     QtWidgets.QSizePolicy.Policy.Fixed)
-        bar.addWidget(self.healthLabel); bar.addWidget(self.healthBtn)
+        # 프록시 상태 — 상태바에서 옮겨 왔다. 쓰는 탭에만 둔다.
+        bar.addWidget(self.healthLabel)
         gv.addLayout(bar)
 
         # 복원이 먼저, 배선이 나중이다 — 순서가 바뀌면 복원값이 저장을 유발해
@@ -4226,23 +4097,6 @@ class MainWindow(QMainWindow):
 
     def _save_sweep_settings(self):
         self._save_alert_settings(self._sweep_settings_patch())
-
-    def on_reset_cap_clicked(self):
-        """앱 슬롯 상한 관측치 초기화 — 헤드리스의 --reset-cap 과 같은 동작.
-
-        관측 상한은 하강만 한다(스스로 회복하지 않는다). 등록 엔드포인트의
-        일시적 오류 하나로 내려앉으면 여기 말고는 routes 파일을 손으로 고치는
-        길뿐이었다."""
-        if not self._router:
-            self.alert("라우터가 없습니다 — 로그를 확인하세요")
-            return False
-        if self._router.reset_observed_cap():
-            self._alog("[라우터] 앱 슬롯 상한 관측치 초기화 —"
-                                 " 다음 등록부터 설정 상한을 다시 씁니다")
-            return True
-        self._alog("[라우터] 상한 관측치가 이미 비어 있습니다 — 되돌릴 것이 없습니다")
-        return False
-
 
     # ── 알림 설정 저장/불러오기 ──
     NOTIFY_FILE = "./notify.json"
@@ -4367,12 +4221,6 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
 
-    def _refresh_proxy_labels(self):
-        n = len(self._collect_proxies())
-        for attr in ("autoProxyViewBtn",):
-            if hasattr(self, attr):
-                getattr(self, attr).setText(f"프록시 목록 ({n})")
-
     @staticmethod
     def _mask_proxy(p: str) -> str:
         """비밀번호 마스킹 표시."""
@@ -4433,7 +4281,6 @@ class MainWindow(QMainWindow):
             else:
                 info.setText(
                     "프록시 없음 — 아래 '추가' 버튼 또는 '계정+프록시 추가/관리' 사용")
-            self._refresh_proxy_labels()
 
         def on_add():
             text, ok = QtWidgets.QInputDialog.getText(
@@ -4752,10 +4599,10 @@ class MainWindow(QMainWindow):
             # 하나뿐이다. 여기서 harvest_all 을 부르면 휴식주기(30~90초)마다 함대를
             # 통째로 깨워 _HarvestThread 와 동시에 adb 를 두드리고 accounts.json 을
             # 같이 쓴다 — LDPlayer 순차기동 규칙도 그때 깨진다.
-            "token_provider": self._read_token_quiet if self.autoTokenRefresh.isChecked() else None,
+            "token_provider": self._read_token_quiet,
             # 계정 안정화(밴회피): 사이클마다 계정 라운드로빈 + 계정별 고정프록시(없으면 KR네이티브)
             # + daily_cap/warmup. 수확 갱신 켜졌을 때 함께 활성(다계정 전제).
-            "stabilize": self.autoTokenRefresh.isChecked(),
+            "stabilize": True,
             "accounts_fp": "./accounts.json",
             "daily_cap": 300,
             "warmup_days": 3,
@@ -4973,11 +4820,6 @@ class MainWindow(QMainWindow):
         자동 인프라 표시가 따라다녔다. 쓰는 곳에만 둔다."""
         self.healthLabel = QtWidgets.QLabel("")
         self.healthLabel.setStyleSheet("color:#5C5449; font-size:13px;")
-        self.healthBtn = QtWidgets.QPushButton("진단")
-        self.healthBtn.setFixedHeight(28)
-        self.healthBtn.setToolTip(
-            "프록시를 IP 당 1회씩 찔러 '지금 막힌 건지, 막혔으면 어디가 문제인지' 판정")
-        self.healthBtn.clicked.connect(self.on_health_check_clicked)
         self._health_thread = None
         self._health_timer = QtCore.QTimer(self)
         self._health_timer.timeout.connect(self._refresh_health_indicator)
@@ -5004,8 +4846,6 @@ class MainWindow(QMainWindow):
         pool = self._collect_proxies()
         if not pool and not self.ask("등록된 프록시가 없습니다. 직결 IP 만 진단할까요?"):
             return
-        self.healthBtn.setEnabled(False)
-        self.healthBtn.setText("진단 중…")
         self._health_thread = HealthCheckThread(self, pool)
         self._health_thread.progress.connect(
             lambda d, t: self.sb.showMessage(f"진단 중… {d}/{t}"))
@@ -5013,8 +4853,6 @@ class MainWindow(QMainWindow):
         self._health_thread.start()
 
     def _show_health_report(self, res: dict):
-        self.healthBtn.setEnabled(True)
-        self.healthBtn.setText("진단")
         self._health_thread = None
         if res.get("error"):
             self.alert(f"진단 실패: {res['error']}")
@@ -5466,26 +5304,40 @@ class MainWindow(QMainWindow):
 
         form = QtWidgets.QFormLayout()
         labelEdit = QtWidgets.QLineEdit(dlg); labelEdit.setPlaceholderText("별칭/전화 (선택)")
-        refreshEdit = QtWidgets.QLineEdit(dlg); refreshEdit.setPlaceholderText("refresh 토큰 (JWT)")
         proxyEdit = QtWidgets.QLineEdit(dlg); proxyEdit.setPlaceholderText("http://user:pass@host:port")
         form.addRow("별칭", labelEdit)
-        form.addRow("refresh 토큰", refreshEdit)
         form.addRow("프록시", proxyEdit)
         v.addLayout(form)
 
         v.addWidget(QtWidgets.QLabel(
             "계정을 고르면 그 계정의 프록시를 고쳐 저장할 수 있습니다. 비우고 저장하면 직결.\n"
-            "· 계정을 늘리는 건 아래 'refresh 토큰 추가'가 아니라 LDPlayer 에 .ldbk 를 복원하는 것입니다\n"
+            "· 계정을 늘리는 건 [에뮬레이터] 탭에서 LDPlayer 에 .ldbk 를 복원하는 것입니다\n"
             "  (PC 직접 갱신은 당근 WAF 가 막아 토큰은 에뮬레이터 앱에서만 나옵니다).",
             parent=dlg))
+
+        # 같은 파일을 보는 화면들의 입구 — 계정 팜 현황·프록시 목록·프록시 진단.
+        # 매물 감시 탭에 나란히 있던 것을 여기로 모았다.
+        sub = QtWidgets.QHBoxLayout()
+        fleetBtn = QtWidgets.QPushButton("계정 현황", dlg)
+        fleetBtn.setToolTip("계정별 동네·토큰만료·핵심여부·폴링실패·밴격리 — 팜 운영 한 눈에")
+        fleetBtn.clicked.connect(self.on_alert_fleet)
+        proxyViewBtn = QtWidgets.QPushButton(
+            f"프록시 목록 ({len(self._collect_proxies())})", dlg)
+        proxyViewBtn.clicked.connect(self.on_proxy_view_clicked)
+        diagBtn = QtWidgets.QPushButton("프록시 진단", dlg)
+        diagBtn.setToolTip(
+            "프록시를 IP 당 1회씩 찔러 '지금 막힌 건지, 막혔으면 어디가 문제인지' 판정")
+        diagBtn.clicked.connect(self.on_health_check_clicked)
+        sub.addWidget(fleetBtn); sub.addWidget(proxyViewBtn); sub.addWidget(diagBtn)
+        sub.addStretch(1)
+        v.addLayout(sub)
 
         btns = QtWidgets.QHBoxLayout()
         saveProxyBtn = QtWidgets.QPushButton("선택 계정에 프록시 저장", dlg)
         saveProxyBtn.setObjectName("startBtn")
-        addBtn = QtWidgets.QPushButton("refresh 토큰 추가(레거시)", dlg)
         delBtn = QtWidgets.QPushButton("선택 삭제", dlg)
         closeBtn = QtWidgets.QPushButton("닫기", dlg)
-        btns.addWidget(saveProxyBtn); btns.addWidget(addBtn); btns.addWidget(delBtn)
+        btns.addWidget(saveProxyBtn); btns.addWidget(delBtn)
         btns.addStretch(1); btns.addWidget(closeBtn)
         v.addLayout(btns)
 
@@ -5519,15 +5371,6 @@ class MainWindow(QMainWindow):
                     " 확인하세요(로그에 사유가 남습니다).")
         saveProxyBtn.clicked.connect(do_save_proxy)
 
-        def do_add():
-            rf = refreshEdit.text().strip()
-            if not rf:
-                QtWidgets.QMessageBox.warning(dlg, "확인", "refresh 토큰을 입력하세요.")
-                return
-            store.add_pair(refresh=rf, proxy=proxyEdit.text().strip() or None,
-                           label=labelEdit.text().strip())
-            labelEdit.clear(); refreshEdit.clear(); proxyEdit.clear()
-            reload_list()
         def do_del():
             i = listw.currentRow()
             if not (0 <= i < len(store.rows)):
@@ -5552,7 +5395,6 @@ class MainWindow(QMainWindow):
                     dlg, "실패",
                     "지우지 못했습니다. accounts.json 을 다른 프로그램이 쓰고 있는지"
                     " 확인하세요.")
-        addBtn.clicked.connect(do_add)
         delBtn.clicked.connect(do_del)
         closeBtn.clicked.connect(dlg.accept)
         dlg.exec()

@@ -205,9 +205,9 @@ if _win is not None:
     ck("이미 펴져 있어도 데려간다", _win.on_chip_clicked("poll"))
     ck("다음폴링 칩 → 폴링 주기", _win.focusWidget() is _win.alertPollInterval,
        str(_win.focusWidget()))
-    ck("토큰·계정 칩 → 계정 현황",
+    ck("토큰·계정 칩 → 계정+프록시",
        _win.on_chip_clicked("token") and _win.on_chip_clicked("accounts")
-       and _win.focusWidget() is _win.alertFleetBtn, str(_win.focusWidget()))
+       and _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
     # 대응 항목 없는 칩은 아무 데도 데려가지 않는다(엉뚱한 목적지보다 낫다).
     ck("추적중은 목적지가 없다", "watch" not in _win.CHIP_TARGETS)
     ck("모르는 칩은 무시", _win.on_chip_clicked("watch") is False)
@@ -229,10 +229,15 @@ if _win is not None:
        and callable(getattr(_win, "_sweep_cfg", None)))
     for _attr in ("autoAreaTree", "autoExtra", "autoExclude", "autoMin",
                   "autoMax", "autoDays", "autoRestMin", "autoRestMax",
-                  "autoGapMin", "autoGapMax", "autoLanes", "autoTokenRefresh",
-                  "autoProxyViewBtn", "autoNotifyBtn",
+                  "autoGapMin", "autoGapMax", "autoLanes", "autoNotifyBtn",
                   "autoAccountsBtn"):
         ck(f"스윕 설정 이사: {_attr}", hasattr(_win, _attr))
+    # 토큰 갱신은 스위치가 아니다 — 유일한 갱신 경로라 항상 켜져 있다.
+    ck("토큰 갱신 체크박스 제거", not hasattr(_win, "autoTokenRefresh"))
+    ck("스윕 cfg 는 토큰 공급자를 늘 단다",
+       _win._auto_cfg_base().get("token_provider") is not None
+       and _win._auto_cfg_base().get("stabilize") is True)
+    ck("프록시 목록 버튼은 계정+프록시 창 안으로", not hasattr(_win, "autoProxyViewBtn"))
     for _attr in ("autoKeyword", "autoStartBtn", "autoStatus", "autoProgress",
                   "autoTable", "autoLog"):
         ck(f"안 옮긴 위젯 제거: {_attr}", not hasattr(_win, _attr))
@@ -444,9 +449,13 @@ if _win is not None:
        _win.alertDelAllBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
     # 등록 표·삭제는 '시스템이 당근에 올린 결과'다. 클라가 넣은 조건과 같은
     # 자리에 두면 둘을 같은 것으로 읽는다.
-    ck("등록 표와 삭제는 고급 안에",
-       _win.alertTable in _win.advancedBox.findChildren(_QtW.QWidget)
-       and _win.alertDelBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
+    ck("등록 표는 고급 안에",
+       _win.alertTable in _win.advancedBox.findChildren(_QtW.QWidget))
+    # 삭제 경로는 전체 삭제 하나다. 낱개 삭제와 수동 등록 폼은 조건표와
+    # 어긋나는 뒷문이라 없앴다.
+    ck("낱개 삭제·수동 등록 폼 제거",
+       not hasattr(_win, "alertDelBtn") and not hasattr(_win, "alertAddBtn")
+       and not hasattr(_win, "alertKeyword"))
     ck("감시 조건 안에는 조건표가 있다",
        _win.rulesTable in _win.condBox.findChildren(_QtW.QWidget)
        and _win.rulesSummary in _win.condBox.findChildren(_QtW.QLabel))
@@ -455,10 +464,18 @@ if _win is not None:
     ck("조건이 없으면 그 사실을 말한다",
        "없음" in _win.condBox.title() or "0개" in _win.condBox.title(),
        _win.condBox.title())
-    ck("내부 용어를 화면에서 뺐다",
-       "매칭 조회" not in _win.alertPollBtn.text()
-       and "슬롯" not in _win.alertResetCapBtn.text(),
-       f"{_win.alertPollBtn.text()} / {_win.alertResetCapBtn.text()}")
+    # 폴링·커버 계산은 감시 시작이 하고, 계정 현황·진단·텔레그램 테스트는
+    # 각자의 창 안에 있다. 고급 패널에 남는 버튼은 전체 삭제 하나다.
+    ck("고급 패널 버튼은 전체 삭제 하나",
+       _win.alertDelAllBtn in _win.advancedBox.findChildren(_QtW.QPushButton)
+       and not any(hasattr(_win, a) for a in (
+           "alertPollBtn", "alertPollAllBtn", "alertCoverageBtn", "alertFleetBtn",
+           "alertTgTestBtn", "alertResetCapBtn")))
+    ck("무인 스위치는 체크박스가 아니라 기본값",
+       not any(hasattr(_win, a) for a in (
+           "alertAutoStartChk", "alertBootChk", "alertCrashChk", "alertNightChk"))
+       and _win._alert_setting("autostart") and _win._alert_setting("night")
+       and _win._alert_setting("crash_recover"))
     # 등록 경로는 조건표 하나다. 브랜드만 등록해 놓고 조건표가 없으면
     # 모델·가격대와 무관하게 브랜드 전 매물이 알림으로 쏟아진다.
     ck("일괄등록 버튼 제거", not hasattr(_win, "alertBulkAllBtn")
@@ -833,18 +850,20 @@ if _win is not None:
     _win._sweep_revives = 0
     _win.alertLog.clear()
 
-    print("=== 관측 상한 초기화 — GUI 에서 닿는다 ===")
-    ck("초기화 버튼 존재", hasattr(_win, "alertResetCapBtn"))
-    ck("초기화 버튼은 고급 패널 안",
-       _win.alertResetCapBtn in _win.advancedBox.findChildren(_QW.QWidget))
-    ck("툴팁이 서버 플래그도 알려준다",
-       "--reset-cap" in _win.alertResetCapBtn.toolTip(),
-       _win.alertResetCapBtn.toolTip())
+    print("=== 관측 상한 초기화 — GUI 에선 전체 삭제가 함께 되돌린다 ===")
+    ck("별도 초기화 버튼은 없다", not hasattr(_win, "alertResetCapBtn")
+       and not hasattr(_win, "on_reset_cap_clicked"))
 
     class _CapRouter:
         def __init__(self, has):
             self.has = has
             self.calls = 0
+
+        def routes(self):
+            return []
+
+        def remove(self, kw):
+            pass
 
         def reset_observed_cap(self, log=None):
             self.calls += 1
@@ -853,24 +872,20 @@ if _win is not None:
             self.has = False
             return True
 
-    _sv4 = _win._router
+    _sv4 = (_win._router, m.ask_yes_no)
     _win._router = _CapRouter(True)
     _win.alertLog.clear()
-    ck("버튼이 관측치를 되돌린다", _win.on_reset_cap_clicked() is True)
+    m.ask_yes_no = lambda *a, **k: True          # 확인창은 '예'
+    _sv4_run = _win._alert_run
+    _win._alert_run = lambda *a, **k: True       # 서버 삭제는 네트워크 — 건너뛴다
+    try:
+        _win.on_alert_delete_all()
+    finally:
+        _win._alert_run = _sv4_run
+    ck("전체 삭제가 관측치를 되돌린다", _win._router.calls == 1, str(_win._router.calls))
     ck("되돌림 로그", "초기화" in _win.alertLog.toPlainText(),
-       _win.alertLog.toPlainText().strip()[:80])
-    _win.alertLog.clear()
-    ck("되돌릴 게 없으면 False", _win.on_reset_cap_clicked() is False)
-    ck("되돌릴 게 없다는 로그", "이미 비어" in _win.alertLog.toPlainText(),
-       _win.alertLog.toPlainText().strip()[:80])
-    ck("라우터를 실제로 불렀다", _win._router.calls == 2, str(_win._router.calls))
-    # 고급 패널이 접혀 있으면 자식이 '비활성'이라 click() 이 먹지 않는다.
-    _win.advancedBox.setChecked(True)
-    _win.alertResetCapBtn.click()
-    ck("클릭 시그널이 핸들러에 연결돼 있다", _win._router.calls == 3,
-       str(_win._router.calls))
-    _win.advancedBox.setChecked(False)
-    _win._router = _sv4
+       _win.alertLog.toPlainText().strip()[:120])
+    _win._router, m.ask_yes_no = _sv4
     _win.alertLog.clear()
 
 passed = sum(1 for _, ok in R if ok)

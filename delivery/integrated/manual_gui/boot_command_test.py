@@ -55,6 +55,8 @@ class _Fake:
         return {"crash_recover": self._crash}
 
     _MODE_FLAG = m.MainWindow._MODE_FLAG
+    _ALERT_DEFAULTS = m.MainWindow._ALERT_DEFAULTS
+    _alert_setting = m.MainWindow._alert_setting
     _boot_command = m.MainWindow._boot_command
 
 

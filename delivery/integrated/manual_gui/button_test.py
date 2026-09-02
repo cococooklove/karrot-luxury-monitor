@@ -58,13 +58,18 @@ w.alert = lambda *a, **k: None          # 알림 무음
 
 print("=== 버튼 → 핸들러 연결 ===")
 # receivers() 가 0 이면 눌러도 아무 일이 없다 — 런타임에만 드러나는 고장이다.
-for attr in ("alertAddBtn", "alertRefreshBtn",
-             "alertDelBtn", "alertDelAllBtn", "alertPollBtn", "alertPollAllBtn",
-             "alertCoverageBtn", "alertFleetBtn",
-             "alertTgTestBtn", "watchToggleBtn", "alertRulesBtn", "autoNotifyBtn",
-             "autoAccountsBtn", "autoProxyViewBtn"):
+for attr in ("alertDelAllBtn", "watchToggleBtn", "alertRulesBtn", "autoNotifyBtn",
+             "autoAccountsBtn"):
     b = getattr(w, attr, None)
     ck(f"{attr} 연결됨", b is not None and b.receivers(b.clicked) > 0)
+# 매물 감시 탭에 나란히 있던 폴링·진단·수동 등록 버튼 무리는 없다 — 감시 시작이
+# 폴링·커버 계산을 스스로 하고, 등록은 엑셀 하나, 계정 쪽은 계정+프록시 창 안이다.
+for attr in ("alertAddBtn", "alertRefreshBtn", "alertDelBtn", "alertPollBtn",
+             "alertPollAllBtn", "alertCoverageBtn", "alertFleetBtn", "alertTgTestBtn",
+             "alertResetCapBtn", "autoProxyViewBtn", "healthBtn", "autoTokenRefresh",
+             "alertAutoStartChk", "alertBootChk", "alertCrashChk", "alertNightChk",
+             "alertKeyword"):
+    ck(f"{attr} 없음", not hasattr(w, attr))
 # 수동 검색 위젯은 그 모드에서만 산다 — 매물 감시 창에서는 만들자마자 버려진다.
 _wm = main.MainWindow(mode="manual")
 ck("검색 버튼 연결됨",
