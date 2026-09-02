@@ -4314,11 +4314,12 @@ class MainWindow(QMainWindow):
     def _wrap(self, layout):
         c = QtWidgets.QWidget(self); c.setLayout(layout); return c
 
-    RULE_COLS = ["키워드", "최소가격", "최대가격", "제외", "끌올일수"]
+    RULE_COLS = ["브랜드", "제품명", "최소가격", "최대가격", "제외"]
     RULE_SAMPLE = [
-        ["루이비통 오버 더 문", 500000, 1500000, "", ""],
-        ["루이비통 반둘리에 50", 600000, 2000000, "레플리카, 부속품", 7],
-        ["샤넬 클래식 미디움", 3000000, 6000000, "", ""],
+        ["루이비통", "오버 더 문", 500000, 1500000, ""],
+        ["루이비통", "반둘리에 50", 600000, 2000000, "레플리카, 부속품"],
+        ["루이비통", "", 3000000, "", ""],
+        ["보테가베네타", "카세트백", 1000000, 2500000, ""],
     ]
 
     def on_alert_rules_excel(self):
@@ -4338,10 +4339,10 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("엑셀로 조건 넣기"); dlg.resize(660, 460)
         v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
         v.addWidget(QtWidgets.QLabel(
-            "엑셀 한 장이면 됩니다. 브랜드는 자동으로 등록하고(키워드 첫 단어),"
-            " 시트 전체를 알림 조건으로 겁니다.\n"
-            "키워드만 필수. 띄어쓰기는 무시합니다"
-            " — '루이비통 오버 더 문'은 '루이비통오버더문'도 잡습니다."))
+            "엑셀 한 장이면 됩니다. 브랜드로 넓게 수집하고, 시트 전체를 알림"
+            " 조건으로 겁니다.\n"
+            "브랜드만 필수. 띄어쓰기는 무시합니다"
+            " — '오버 더 문'은 '오버더문'도 잡습니다."))
         cap = QtWidgets.QLabel(dlg)
         v.addWidget(cap)
         tbl = QtWidgets.QTableWidget(0, len(self.RULE_COLS), dlg)
@@ -4360,8 +4361,13 @@ class MainWindow(QMainWindow):
                 shown = rules[:PREVIEW]
                 cap.setText(f"적용 중인 조건 {len(rules)}줄"
                             + (f" (앞 {PREVIEW}줄만 표시)" if len(rules) > PREVIEW else ""))
-                rows = [[r.keyword, r.min_price or "", r.max_price or "",
-                         ", ".join(r.exclude), r.days or ""] for r in shown]
+                # 제품명이 비면 빈칸이 맞다 — '그 브랜드 전체'라는 뜻이다.
+                # 브랜드 열이 없던 옛 시트만 키워드를 대신 보여 준다.
+                rows = [[r.brand_name(),
+                         r.product or ("" if r.keyword.strip() == r.brand_name()
+                                       else r.keyword),
+                         r.min_price or "", r.max_price or "",
+                         ", ".join(r.exclude)] for r in shown]
             else:
                 cap.setText("적용 중인 조건 없음 — 아래는 엑셀 형식 예시입니다")
                 rows = self.RULE_SAMPLE
@@ -4372,20 +4378,15 @@ class MainWindow(QMainWindow):
             tbl.resizeColumnsToContents()
 
         v.addWidget(QtWidgets.QLabel(
+            "· 제품명을 비우면 그 브랜드 전체가 그 가격대로 걸립니다\n"
             "· 최대가격을 넘긴 매물은 알리지 않고 추적하다가, 값이 내려와"
             " 범위에 들어오면 그때 알립니다\n"
             "· '삽니다/구합니다' 글은 자동으로 걸러집니다\n"
             "· 제외는 쉼표로 구분합니다 — 'A급 레플리카, 부속품'은 두 구절입니다\n"
-            "· 끌올일수는 검색 스윕에만 걸립니다 (앱 알림에는 끌올 시각이 없습니다)"))
-        stat = QtWidgets.QLabel(dlg)
-
+            "· 모르는 열은 무시하니 메모 열을 자유롭게 더 두어도 됩니다"))
         def show_stat():
-            n = len(self._alert_rules.get())
-            stat.setText(f"현재 적용 중인 조건: {n}줄"
-                         if n else "현재 적용 중인 조건 없음 — 전부 알립니다")
             fill_table()
         show_stat()
-        v.addWidget(stat)
 
         bb = QtWidgets.QHBoxLayout()
         sampleBtn = QtWidgets.QPushButton("샘플 엑셀 저장", dlg)

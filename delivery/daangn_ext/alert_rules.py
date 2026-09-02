@@ -31,15 +31,23 @@ PASS = "pass"     # 룰 테이블이 비었음 — 필터하지 않는다
 
 @dataclass(frozen=True)
 class AlertRule:
-    keyword: str
+    keyword: str                      # 매칭에 쓰는 말 전체(브랜드 + 제품명)
+    brand: str = ""                   # 엑셀 '브랜드' 열. 등록은 이 값으로 한다
+    product: str = ""                 # 엑셀 '제품명' 열. 화면 표시용
     min_price: int | None = None
     max_price: int | None = None
     exclude: tuple[str, ...] = ()
     days: int | None = None           # 끌올일수 — 검색 스윕 경로에서만 쓴다
     row: int = 0                      # 엑셀 행번호(로그·디버깅용)
 
-    def brand(self) -> str:
-        """등록에 쓸 브랜드 = 키워드 첫 어절. 한 어절이면 그 자체."""
+    def brand_name(self) -> str:
+        """등록에 쓸 브랜드.
+
+        엑셀에 브랜드 열이 있으면 그 값이 진실이다. 없을 때만 키워드 첫
+        어절로 짐작한다 — 그 짐작은 '보테가 베네타 카세트백'을 '보테가'로,
+        '생 로랑 루루백'을 '생'으로 만든다. 두 어절 브랜드가 실제로 있다."""
+        if str(self.brand or "").strip():
+            return str(self.brand).strip()
         parts = str(self.keyword or "").split()
         return parts[0] if parts else ""
 
@@ -49,13 +57,16 @@ class AlertRule:
         return f"{self.keyword} ({lo}~{hi})" if (lo or hi) else self.keyword
 
     def to_dict(self) -> dict:
-        return {"keyword": self.keyword, "min": self.min_price,
+        return {"keyword": self.keyword, "brand": self.brand,
+                "product": self.product, "min": self.min_price,
                 "max": self.max_price, "exclude": list(self.exclude),
                 "days": self.days, "row": self.row}
 
     @classmethod
     def from_dict(cls, d: dict) -> "AlertRule":
         return cls(keyword=str(d.get("keyword") or ""),
+                   brand=str(d.get("brand") or ""),
+                   product=str(d.get("product") or ""),
                    min_price=_as_int(d.get("min")),
                    max_price=_as_int(d.get("max")),
                    exclude=tuple(str(x) for x in (d.get("exclude") or []) if x),
@@ -181,11 +192,12 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
     head_at = None
     for n, row in enumerate(rows[:10]):
         cells = [normalize_text(c) for c in row]
-        if any(c and ("키워드" in c or "keyword" in c) for c in cells):
+        if any(c and ("키워드" in c or "keyword" in c or "브랜드" in c)
+               for c in cells):
             head_at = n
             break
     if head_at is None:
-        return [], ["엑셀 머리글에 '키워드' 열이 없습니다"
+        return [], ["엑셀 머리글에 '브랜드' 열이 없습니다"
                     " — [샘플 엑셀 저장]으로 형식을 받아 쓰세요"]
     head_row = head_at
     head = [normalize_text(c) for c in rows[head_at]]
@@ -197,14 +209,16 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
                 return i
         return None
 
+    i_brand, i_prod = col("브랜드"), col("제품", "모델", "상품")
     i_kw, i_min = col("키워드", "keyword"), col("최소")
     i_max, i_exc = col("최대"), col("제외")
-    # 옛 '엑셀 조건' 시트도 그대로 읽는다 — 헤더가 다를 뿐 같은 뜻이다.
-    # 제외 컬럼은 "제외키워드"도 잡히고, 추가키워드는 키워드에 붙여 한 줄로
-    # 만든다(어절 AND 라 "루이비통 오버 더 문 정품"과 뜻이 같다).
+    # 옛 시트도 그대로 읽는다 — 헤더가 다를 뿐 같은 뜻이다. 제외 컬럼은
+    # "제외키워드"도 잡히고, 추가키워드는 키워드에 붙여 한 줄로 만든다
+    # (어절 AND 라 "루이비통 오버 더 문 정품"과 뜻이 같다). 끌올일수는 이제
+    # 안내하지 않지만, 적어 둔 옛 파일을 버리지는 않는다.
     i_add, i_days = col("추가"), col("끌올")
-    if i_kw is None:
-        return [], ["엑셀 첫 행에 '키워드' 열이 필요합니다"]
+    if i_brand is None and i_kw is None:
+        return [], ["엑셀 첫 행에 '브랜드' 열이 필요합니다"]
 
     rules: list[AlertRule] = []
     errors: list[str] = []
@@ -214,7 +228,13 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
         def cell(i):
             return row[i] if (i is not None and i < len(row)) else None
 
+        brand = str(cell(i_brand) or "").strip()
+        prod = str(cell(i_prod) or "").strip()
+        # '키워드' 한 열짜리 옛 시트와, '브랜드+제품명' 두 열짜리 새 시트를
+        # 같은 규칙으로 읽는다. 매칭은 둘을 이어 붙인 말 전체로 한다.
         kw = str(cell(i_kw) or "").strip()
+        if not kw:
+            kw = " ".join(x for x in (brand, prod) if x)
         if not kw:
             continue
         add = str(cell(i_add) or "").replace(",", " ").split()
@@ -231,8 +251,9 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
         if key in seen:
             continue
         seen.add(key)
-        rules.append(AlertRule(keyword=kw, min_price=lo, max_price=hi,
-                               exclude=exc, days=_as_int(cell(i_days)), row=n))
+        rules.append(AlertRule(keyword=kw, brand=brand, product=prod,
+                               min_price=lo, max_price=hi, exclude=exc,
+                               days=_as_int(cell(i_days)), row=n))
     if not rules and not errors:
         errors.append("엑셀에서 읽은 키워드가 없습니다")
     return rules, errors
@@ -245,7 +266,7 @@ def brands(rules) -> list[str]:
     브랜드로 넓게 받아 놓고 거르는 것이 이 구조의 전부다."""
     out, seen = [], set()
     for r in rules or []:
-        b = r.brand()
+        b = r.brand_name()
         k = normalize_text(b)
         if b and k not in seen:
             seen.add(k)
@@ -259,6 +280,6 @@ def brand_days(rules) -> dict[str, int]:
     out: dict[str, int] = {}
     for r in rules or []:
         if r.days:
-            b = r.brand()
+            b = r.brand_name()
             out[b] = max(out.get(b, 0), int(r.days))
     return out
