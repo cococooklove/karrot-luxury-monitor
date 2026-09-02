@@ -2531,18 +2531,28 @@ class MainWindow(QMainWindow):
     # 앱과 ldboot 이 동시에 인스턴스를 launch 해 게스트 커널이 hang 한다.
     _BOOT_NAME_INSTALLER = "LDPlayerBoot"
 
+    _MODE_FLAG = {"manual": " --manual", "watch": " --watch"}
+
     def _boot_command(self):
         """부팅 시 실행할 커맨드 — frozen exe면 exe, 개발이면 pythonw + main.py.
-        크래시 자동복구 켜져 있으면 --watchdog(감시자 모드)로 실행."""
+        크래시 자동복구 켜져 있으면 --watchdog(감시자 모드)로 실행.
+
+        **지금 이 창의 모드를 반드시 실어 보낸다.** 예전에는 --watchdog 만 붙여서,
+        매물감시(--watch) 창에서 부팅 자동실행을 켜면 다음 부팅부터 3탭 합본(all)
+        이 떴다. 운영은 수동검색과 매물감시를 분리해서 쓰는데 합본이 뜨면 그
+        창이 수확·폴링·라우터를 같이 소유해, 따로 띄운 매물감시 창과 같은
+        keyword_routes.json 을 놓고 다툰다 — 실서버 2026-09-02 에 엑셀 조건이
+        사라진 경로가 이것이다."""
         import sys as _sys
         wd = " --watchdog" if self._load_alert_settings().get("crash_recover") else ""
+        mode = self._MODE_FLAG.get(getattr(self, "mode", "all"), "")
         if getattr(_sys, "frozen", False):
-            return f'"{_sys.executable}"{wd}'
+            return f'"{_sys.executable}"{wd}{mode}'
         script = os.path.abspath(__file__)
         exe = _sys.executable
         pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
         launcher = pyw if os.path.exists(pyw) else exe
-        return f'"{launcher}" "{script}"{wd}'
+        return f'"{launcher}" "{script}"{wd}{mode}'
 
     def _on_crash_toggle(self, on):
         self._save_alert_settings({"crash_recover": bool(on)})
