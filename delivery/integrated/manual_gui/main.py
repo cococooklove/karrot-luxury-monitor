@@ -354,6 +354,15 @@ def alert_row_cells(keyword, route, price, exclude, uid):
     return vals, tips
 
 
+# 어느 경로로 들어온 매물인지. 저장소에는 기록돼 있었는데 화면에 없어서
+# 클라는 스윕을 켜도 무엇이 늘었는지 알 수 없었다.
+SOURCE_NAMES = {"app": "앱 알림", "sweep": "지역 훑기"}
+
+LISTING_COLS = ["상태", "수집", "키워드", "제목", "지역", "현재가", "Δ최초가",
+                "마지막변동", "최초감지"]
+LISTING_COL_TITLE = LISTING_COLS.index("제목")
+
+
 def listing_display_rows(rows, now, state_filter="all"):
     """watch 행 목록 → 매물 표에 그릴 형태. 최초 감지 내림차순.
 
@@ -375,6 +384,7 @@ def listing_display_rows(rows, now, state_filter="all"):
             "state": state,
             "icon": STATE_ICONS.get(state, state),
             "keyword": r.get("keyword") or "",
+            "source": SOURCE_NAMES.get(r.get("source") or "app", "앱 알림"),
             "title": (r.get("title") or "")[:60],
             "region": r.get("region") or "",
             "price": r.get("price") or 0,
@@ -789,7 +799,8 @@ def headless_proxies(settings_path="./settings.txt",
 
 
 def headless_sweep_cfg(settings, entries, notify, proxies=None,
-                       proxy_provider=None, token_provider=None, log=None):
+                       proxy_provider=None, token_provider=None, log=None,
+                       already_notified=None):
     """헤드리스 검색 스윕 cfg — GUI _auto_cfg_base + _sweep_cfg 와 같은 키를 만든다.
 
     이 한 겹만 따로 두는 이유: GUI 의 값 출처는 고급 패널 **위젯**이라 위젯이
@@ -842,6 +853,9 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
         exclude=[x for x in (s.get("sweep_exclude") or []) if x],
         min_price=s.get("sweep_min"), max_price=s.get("sweep_max"),
         days=_num("sweep_days", 7) or None)
+    if already_notified is not None:
+        # 앱 알림이 이미 알린 매물은 스윕이 다시 안 알린다(저장소가 둘이다).
+        cfg["already_notified"] = already_notified
     return cfg
 
 
@@ -1204,10 +1218,13 @@ class _NotifyThread(QtCore.QThread):
                 from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=emit)
                 for m in self.items:
-                    line = (f"🎯 [{m.get('_rule') or m.get('keyword') or ''}]"
-                            f" {(m.get('title') or '')[:50]}\n"
-                            f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
-                            f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
+                    from daangn.notify import match_line
+                    line = match_line(
+                        m.get("_rule") or m.get("keyword") or "",
+                        m.get("title"), m.get("price"), m.get("region"),
+                        source="앱 알림",
+                        account=f"계정 {m.get('_account')}" if m.get("_account") else "",
+                        url=m.get("url"))
                     tg.enqueue(line)
                 tg.flush()
                 emit(f"[텔레그램] {len(self.items)}건 전송")
@@ -1707,18 +1724,20 @@ class MainWindow(QMainWindow):
     # 상태는 파일로 공유된다. 수동 검색은 앱API 토큰이 있어야 하는데 그 토큰을
     # 만드는 건 감시 프로그램의 수확기다 — 둘 다 accounts.json 을 본다. 동시에
     # 쓰는 건 이미 프로세스 간 파일락이 막고 있다(ld_autoharvest._file_lock).
+    # 3탭 합본(옛 'all') 모드는 **없다.** 합본 창은 수확·폴링·라우터를 같이
+    # 소유해, 따로 띄운 매물 감시 창과 같은 keyword_routes.json 을 놓고 다툰다 —
+    # 실서버 2026-09-02 에 엑셀 조건이 통째로 사라진 경로가 이것이다. 모드
+    # 인자가 없거나 모르는 값이면 매물 감시로 뜬다(백그라운드 소유자는 하나).
     MODES = {
-        "all":    {"tabs": ("manual", "alert", "emul"), "background": True,
-                   "title": ""},
         "manual": {"tabs": ("manual",), "background": False,
                    "title": "수동 검색"},
         "watch":  {"tabs": ("alert", "emul"), "background": True,
                    "title": "매물 감시"},
     }
 
-    def __init__(self, mode="all"):
+    def __init__(self, mode="watch"):
         super().__init__()
-        self.mode = mode if mode in self.MODES else "all"
+        self.mode = mode if mode in self.MODES else "watch"
         self._mode_cfg = self.MODES[self.mode]
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
@@ -2650,17 +2669,16 @@ class MainWindow(QMainWindow):
             lambda _b: self._refresh_listing_table())
         listing_v.addLayout(fbar)
 
-        self.listingTable = QtWidgets.QTableWidget(0, 8, w)
+        self.listingTable = QtWidgets.QTableWidget(0, len(LISTING_COLS), w)
         self.listingTable.setHorizontalHeaderLabels(
-            ["상태", "키워드", "제목", "지역", "현재가", "Δ최초가",
-             "마지막변동", "최초감지"])
+            LISTING_COLS)
         self.listingTable.verticalHeader().setVisible(False)
         self.listingTable.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.listingTable.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.listingTable.horizontalHeader().setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            LISTING_COL_TITLE, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.listingTable.setShowGrid(False)
         self.listingTable.setAlternatingRowColors(False)
         self.listingTable.verticalHeader().setDefaultSectionSize(40)
@@ -2918,14 +2936,12 @@ class MainWindow(QMainWindow):
         크래시 자동복구 켜져 있으면 --watchdog(감시자 모드)로 실행.
 
         **지금 이 창의 모드를 반드시 실어 보낸다.** 예전에는 --watchdog 만 붙여서,
-        매물감시(--watch) 창에서 부팅 자동실행을 켜면 다음 부팅부터 3탭 합본(all)
-        이 떴다. 운영은 수동검색과 매물감시를 분리해서 쓰는데 합본이 뜨면 그
-        창이 수확·폴링·라우터를 같이 소유해, 따로 띄운 매물감시 창과 같은
-        keyword_routes.json 을 놓고 다툰다 — 실서버 2026-09-02 에 엑셀 조건이
-        사라진 경로가 이것이다."""
+        매물감시(--watch) 창에서 부팅 자동실행을 켜면 다음 부팅부터 3탭 합본이
+        떴다. 합본은 이제 모드 자체가 없지만, 커맨드에는 모드를 명시해 둔다 —
+        모르는 모드는 매물 감시로 보낸다."""
         import sys as _sys
         wd = " --watchdog" if self._load_alert_settings().get("crash_recover") else ""
-        mode = self._MODE_FLAG.get(getattr(self, "mode", "all"), "")
+        mode = self._MODE_FLAG.get(getattr(self, "mode", "watch"), " --watch")
         if getattr(_sys, "frozen", False):
             return f'"{_sys.executable}"{wd}{mode}'
         script = os.path.abspath(__file__)
@@ -3719,7 +3735,7 @@ class MainWindow(QMainWindow):
         for r in rows:
             i = self.listingTable.rowCount()
             self.listingTable.insertRow(i)
-            vals = [r["icon"], r["keyword"], r["title"], r["region"],
+            vals = [r["icon"], r["source"], r["keyword"], r["title"], r["region"],
                     f"{r['price']:,}" if r["price"] else "-",
                     r["delta_text"], r["last_change_text"], r["first_seen_text"]]
             for c, val in enumerate(vals):
@@ -4727,6 +4743,9 @@ class MainWindow(QMainWindow):
             "proxy_provider": self._collect_proxies,
             # 초기 토큰도 워커스레드의 token_provider 가 파일에서 읽는다(메인스레드
             # 접근 없음). 파일을 신선하게 유지하는 건 _HarvestThread 다.
+            # 같은 매물을 앱 알림이 이미 알렸으면 스윕은 다시 안 알린다.
+            # 저장소가 둘이라(watch.db / auto_seen.db) 이걸 안 이으면 두 번 간다.
+            "already_notified": self._already_notified,
             "access_token": None,
             # 사이클마다 최신 access 재조회 — accounts.json 을 **읽기만** 한다.
             # GUI 의 수확 소유자는 _HarvestThread(20분 주기, __init__ 에서 기동)
@@ -4779,6 +4798,16 @@ class MainWindow(QMainWindow):
         cfg = dict(self._auto_cfg_base())
         cfg["conditions"] = conditions
         return cfg
+
+    def _already_notified(self, article_id) -> bool:
+        """앱 알림 경로가 이미 본 매물인가. 워치리스트가 그 사실의 주인이다."""
+        store = getattr(self, "_watch_store", None)
+        if store is None:
+            return False
+        try:
+            return bool(store.get(str(article_id)))
+        except Exception:
+            return False
 
     def _dispose_auto_monitor(self):
         """다 쓴 AutoMonitor 를 놓아준다 — 시그널을 끊고 Qt 에 반납한다.
@@ -6055,10 +6084,11 @@ def _child_cmd():
     """자식(실제 앱) 실행 커맨드 — frozen exe면 exe --child, 개발이면 python main.py --child.
 
     실행 모드(--manual / --watch)는 **그대로 물려준다**. 안 물려주면 워치독이
-    한 번 재시작하는 순간 수동 전용으로 띄운 프로그램이 3탭짜리로 되살아나고,
-    수확기까지 같이 도는 프로그램이 두 개가 된다(함대를 동시에 깨운다)."""
+    한 번 재시작하는 순간 수동 전용으로 띄운 프로그램이 다른 모드로 되살아나고,
+    수확기까지 같이 도는 프로그램이 두 개가 된다(함대를 동시에 깨운다).
+    모드가 없으면 매물 감시다 — 합본은 없다."""
     import sys as _sys
-    mode = [a for a in _sys.argv if a in ("--manual", "--watch")][:1]
+    mode = [a for a in _sys.argv if a in ("--manual", "--watch")][:1] or ["--watch"]
     if getattr(_sys, "frozen", False):
         return [_sys.executable, "--child"] + mode
     return [_sys.executable, os.path.abspath(__file__), "--child"] + mode
@@ -6140,9 +6170,10 @@ def _run_app():
         # 모습으로 나온다 — 본창과 톤이 달라 클라가 '창이 깨졌다'고 읽었다.
         app.setStyleSheet(APP_QSS)
         # 클라가 두 프로그램으로 쓴다: --manual(수동 검색) / --watch(매물 감시+에뮬).
-        # 인자가 없으면 종전대로 3탭 전부 — 기존 바로가기·작업이 그대로 돈다.
+        # 인자가 없으면 매물 감시다. 3탭 합본은 없다 — 옛 바로가기·작업이 인자
+        # 없이 불러도 합본이 뜨지 않는다.
         import sys as _sysarg
-        _mode = "all"
+        _mode = "watch"
         if "--manual" in _sysarg.argv:
             _mode = "manual"
         elif "--watch" in _sysarg.argv:
@@ -6152,7 +6183,7 @@ def _run_app():
         # 사라진다(실서버 2026-09-02: --watch 아이콘 + 자동시작 --child).
         #
         # 잠그는 기준은 모드가 아니라 background 다. 모드로 잠그면 'watch' 와
-        # 'all' 이 다른 이름이 돼 둘 다 통과한다 — 실제로 겹친 조합이 그것이다.
+        # 옛 합본이 다른 이름이 돼 둘 다 통과했다 — 실제로 겹친 조합이 그것이다.
         # 수동검색(background=False)은 별도 이름이라 매물감시와 **함께 뜬다**.
         _sikey = None
         try:
@@ -6258,10 +6289,12 @@ def _run_headless():
                 from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=log)
                 for m in items:
-                    tg.enqueue(f"🎯 [{m.get('_rule') or m.get('keyword') or ''}]"
-                               f" {(m.get('title') or '')[:50]}\n"
-                               f"💰 {m.get('price') or '-'} · 📍 {m.get('region') or '-'}"
-                               f" · 계정 {m.get('_account') or '-'}\n{m.get('url') or ''}")
+                    tg.enqueue(match_line(
+                        m.get("_rule") or m.get("keyword") or "",
+                        m.get("title"), m.get("price"), m.get("region"),
+                        source="앱 알림",
+                        account=f"계정 {m.get('_account')}" if m.get("_account") else "",
+                        url=m.get("url")))
                 tg.flush(); log(f"[텔레그램] {len(items)}건 전송")
             except Exception as e:
                 log(f"[텔레그램] 실패: {str(e)[:60]}")
@@ -6386,7 +6419,10 @@ def _run_headless():
                 token_provider=(read_token_quiet if do_harvest else None),
                 # 지역 미지정이면 기본 지역으로 좁힌다는 사실을 서버 로그에
                 # 남긴다 — 안 남기면 커버리지가 6537동에서 조용히 줄어든다.
-                log=log)
+                log=log,
+                # 앱 알림이 이미 알린 매물은 스윕이 다시 안 알린다.
+                already_notified=lambda aid: bool(
+                    watch_store.get(str(aid))) if watch_store else False)
 
         sweep_runner = HeadlessSweepRunner(sweep_queue, _sweep_cfg_builder,
                                            log, _sweep_found)

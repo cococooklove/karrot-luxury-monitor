@@ -35,9 +35,7 @@ for node in ast.walk(tree):
                 modes = ast.literal_eval(st.value)
 print("=== 1. 모드 정의 ===")
 ck("MODES 가 있다", modes is not None)
-ck("세 모드", set(modes or {}) == {"all", "manual", "watch"}, str(set(modes or {})))
-ck("기본(all)은 종전대로 3탭",
-   tuple(modes["all"]["tabs"]) == ("manual", "alert", "emul"))
+ck("두 모드 — 합본(all)은 없다", set(modes or {}) == {"manual", "watch"}, str(set(modes or {})))
 ck("manual 은 수동 검색만", tuple(modes["manual"]["tabs"]) == ("manual",))
 ck("watch 는 감시+에뮬", tuple(modes["watch"]["tabs"]) == ("alert", "emul"))
 
@@ -45,7 +43,6 @@ print("\n=== 2. 수확기는 감시 쪽만 돌린다 ===")
 # 둘 다 돌리면 같은 인스턴스에 force-stop 이 겹친다. 수동은 토큰을 소비만 한다.
 ck("manual 은 백그라운드 없음", modes["manual"]["background"] is False)
 ck("watch 는 백그라운드 있음", modes["watch"]["background"] is True)
-ck("all 도 백그라운드 있음", modes["all"]["background"] is True)
 ck("수확 스레드가 모드로 갈린다", 'if not self._mode_cfg["background"]:' in src)
 ck("자동 폴링도 모드로 갈린다",
    '_mode_cfg", {}).get("background", True)' in src)
@@ -61,7 +58,7 @@ ck("노출만 모드로 고른다", src.count("if \"manual\" in show:") == 1
 print("\n=== 4. 진입점 ===")
 ck("--manual 을 읽는다", '"--manual" in _sysarg.argv' in src)
 ck("--watch 를 읽는다", '"--watch" in _sysarg.argv' in src)
-ck("인자 없으면 all", '_mode = "all"' in src)
+ck("인자 없으면 watch (합본 없음)", '_mode = "watch"' in src and '_mode = "all"' not in src)
 ck("MainWindow 에 모드를 넘긴다", "MainWindow(_mode)" in src)
 
 print("\n=== 5. 워치독이 모드를 물려준다 ===")
@@ -85,8 +82,8 @@ try:
 
     sys.argv = ["main.py", "--watchdog"]
     cmd = child_cmd()
-    ck("모드가 없으면 아무것도 안 붙는다",
-       "--manual" not in cmd and "--watch" not in cmd, " ".join(cmd[-1:]))
+    ck("모드가 없으면 --watch 가 붙는다 (합본으로 되살아나지 않는다)",
+       "--watch" in cmd and "--manual" not in cmd, " ".join(cmd[-1:]))
 
     sys.argv = ["main.py", "--watchdog", "--manual", "--watch"]
     cmd = child_cmd()

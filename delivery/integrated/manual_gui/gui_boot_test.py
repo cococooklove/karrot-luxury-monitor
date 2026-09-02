@@ -61,7 +61,6 @@ m.guest_proxy_sync = lambda *a, **k: {}
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 EXPECT = {
-    "all": ["수동 검색", "매물 감시", "에뮬레이터"],
     "watch": ["매물 감시", "에뮬레이터"],
     "manual": ["수동 검색"],
 }

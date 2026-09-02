@@ -72,9 +72,9 @@ print("\n=== 3. 크래시 자동복구와 함께 쓸 수 있다 ===")
 cmd = _Fake("watch", crash=True)._boot_command()
 ck("--watchdog 와 --watch 가 함께", "--watchdog" in cmd and "--watch" in cmd, cmd)
 
-print("\n=== 4. 합본(all)은 모드 인자 없이 종전대로 ===")
+print("\n=== 4. 모르는 모드(옛 합본)도 --watch 로 보낸다 — 합본은 없다 ===")
 cmd = _Fake("all")._boot_command()
-ck("모드 인자가 없다", "--watch" not in cmd and "--manual" not in cmd, cmd)
+ck("--watch 가 있다", "--watch" in cmd and "--manual" not in cmd, cmd)
 
 bad = [n for n, ok in R if not ok]
 print(f"\n{len(R) - len(bad)}/{len(R)} PASS")

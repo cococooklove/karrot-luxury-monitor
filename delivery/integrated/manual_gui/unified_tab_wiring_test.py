@@ -153,8 +153,9 @@ except Exception as _e:
 ck("MainWindow 생성", _win is not None, _win_err)
 if _win is not None:
     titles = [_win.tabs.tabText(i) for i in range(_win.tabs.count())]
-    ck("탭 3개", _win.tabs.count() == 3, str(titles))
-    ck("탭 이름", titles == ["수동 검색", "매물 감시", "에뮬레이터"], str(titles))
+    # 인자 없이 뜨면 매물 감시다(3탭 합본 모드는 없앴다).
+    ck("기본은 매물 감시 2탭", _win.tabs.count() == 2, str(titles))
+    ck("탭 이름", titles == ["매물 감시", "에뮬레이터"], str(titles))
     ck("감시 토글 존재", hasattr(_win, "watchToggleBtn"))
     ck("고급 패널 존재", hasattr(_win, "advancedBox"))
     ck("고급 패널 접힘",

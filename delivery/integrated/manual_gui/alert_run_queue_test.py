@@ -168,6 +168,9 @@ class _FakeDel(_Fake):
     def __init__(self):
         super().__init__()
         self._router = _FakeRouter()
+        # 전체 삭제는 조건표까지 함께 지운다 — 그 개수를 확인창에 적는다.
+        self._alert_rules = type("_R", (), {"get": staticmethod(lambda: [])})()
+        self._refresh_rules_view = lambda: None
 
     def _alert_api(self):
         raise AssertionError("바쁠 때는 API 까지 가면 안 된다")

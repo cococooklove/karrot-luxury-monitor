@@ -5,7 +5,10 @@
 # 만드는 것:
 #   "당근 수동 검색"          → 수동 검색만 (--manual). 수확·폴링 안 함
 #   "당근 매물 감시"          → 매물 감시 + 에뮬레이터 (--watch). 수확·폴링은 여기서만
-#   "당근 모니터 (서버·무인)" → 헤드리스, 콘솔에 로그가 계속 찍힘
+#
+# 헤드리스("당근 모니터 (서버·무인)") 아이콘은 만들지 않는다. 헤드리스는 서버
+# 콘솔에서만 부른다(SERVER_SETUP.md) — 클라 바탕화면에 보이면 매물 감시 창과
+# 같은 상태 파일을 놓고 겹쳐 돈다. 옛 아이콘이 남아 있으면 지운다.
 #
 # 수동과 감시를 동시에 띄워도 된다 — 수확기는 감시 쪽만 돌리고, accounts.json
 # 동시 쓰기는 프로세스 간 파일락이 막는다.
@@ -19,9 +22,7 @@
 # 두 바로가기 모두 작업 디렉토리를 이 폴더로 고정한다. main.py 가 OUT.json 을
 # cwd 상대경로로 열기 때문에, 작업 디렉토리가 다르면 지역 트리 로딩이 실패한다.
 param(
-    [string]$AppDir = $PSScriptRoot,
-    [switch]$NoHeadless,   # GUI 아이콘만 만든다
-    [switch]$NoGui         # 헤드리스 아이콘만 만든다 (서버용)
+    [string]$AppDir = $PSScriptRoot
 )
 $ErrorActionPreference = "Stop"
 function Log($m) { Write-Host ("[shortcut] " + $m) -ForegroundColor Cyan }
@@ -96,13 +97,15 @@ function New-Shortcut($name, $fallback, $exe, $argline, $desc) {
 }
 
 function Remove-LegacyGuiShortcut {
-    # 3탭 합본 아이콘을 치운다.
+    # 3탭 합본 아이콘과 헤드리스 아이콘을 치운다.
     #
-    # 이 아이콘은 인자 없이 main.py 를 불러 mode=all 로 뜬다. 그 창이 수확·폴링·
+    # 합본 아이콘은 인자 없이 main.py 를 불러 3탭으로 떴다. 그 창이 수확·폴링·
     # 라우터를 소유해 버리면, 따로 띄운 매물 감시 창과 같은 keyword_routes.json
-    # 을 놓고 다퉈 엑셀 조건이 사라진다. 한글·영문 두 이름 모두 지운다(영문
-    # 로캘에서는 ASCII 폴백 이름으로 깔린다).
-    foreach ($n in @("당근 명품 모니터", "Karrot Monitor (GUI)")) {
+    # 을 놓고 다퉈 엑셀 조건이 사라진다. 헤드리스 아이콘도 같은 이유로 클라
+    # 바탕화면에 두지 않는다. 한글·영문 두 이름 모두 지운다(영문 로캘에서는
+    # ASCII 폴백 이름으로 깔린다).
+    foreach ($n in @("당근 명품 모니터", "Karrot Monitor (GUI)",
+                     "당근 모니터 (서버·무인)", "Karrot Monitor (headless)")) {
         foreach ($d in @([Environment]::GetFolderPath("Desktop"),
                          "$env:PUBLIC\Desktop")) {
             $p = Join-Path $d "$n.lnk"
@@ -114,21 +117,15 @@ function Remove-LegacyGuiShortcut {
     }
 }
 
-if (-not $NoGui) {
-    # 클라 요구(2026-09-01): 수동 검색과 '매물 감시+에뮬레이터'를 별도 프로그램으로.
-    # 한 코드베이스에 실행 모드만 다르다(main.py --manual / --watch). 상태는
-    # accounts.json 으로 공유되고, 동시 쓰기는 프로세스 간 파일락이 막는다.
-    # 종전 3탭 합본 아이콘은 **지운다**(2026-09-02) — 위 주석 참고.
-    Remove-LegacyGuiShortcut
-    New-Shortcut "당근 수동 검색" "Karrot Manual Search" $pyw "main.py --manual" `
-        "수동 검색 전용 — 감시·수확은 돌지 않는다"
-    New-Shortcut "당근 매물 감시" "Karrot Watch" $pyw "main.py --watch" `
-        "매물 감시 + 에뮬레이터 — 토큰 수확과 폴링은 이쪽만 한다"
-}
-if (-not $NoHeadless) {
-    New-Shortcut "당근 모니터 (서버·무인)" "Karrot Monitor (headless)" $py "main.py --headless" `
-        "무인 감시 — 창 없이 폴링·가격추적·검색스윕, 콘솔에 로그"
-}
+# 클라 요구(2026-09-01): 수동 검색과 '매물 감시+에뮬레이터'를 별도 프로그램으로.
+# 한 코드베이스에 실행 모드만 다르다(main.py --manual / --watch). 상태는
+# accounts.json 으로 공유되고, 동시 쓰기는 프로세스 간 파일락이 막는다.
+# 종전 3탭 합본·헤드리스 아이콘은 **지운다**(2026-09-02) — 위 주석 참고.
+Remove-LegacyGuiShortcut
+New-Shortcut "당근 수동 검색" "Karrot Manual Search" $pyw "main.py --manual" `
+    "수동 검색 전용 — 감시·수확은 돌지 않는다"
+New-Shortcut "당근 매물 감시" "Karrot Watch" $pyw "main.py --watch" `
+    "매물 감시 + 에뮬레이터 — 토큰 수확과 폴링은 이쪽만 한다"
 
 Log "완료. 바탕화면에서 더블클릭하세요."
 Log ("작업 폴더: " + $AppDir)

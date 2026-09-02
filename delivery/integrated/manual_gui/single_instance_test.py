@@ -34,7 +34,6 @@ def ck(name, cond, extra=""):
 from daangn_ext import single_instance as si
 
 MODES = {
-    "all":    {"tabs": ("manual", "alert", "emul"), "background": True},
     "manual": {"tabs": ("manual",), "background": False},
     "watch":  {"tabs": ("alert", "emul"), "background": True},
 }
@@ -45,7 +44,7 @@ def key(mode):
 
 
 print("=== 1. 잠그는 기준이 background 다 ===")
-ck("watch 와 all 이 같은 이름", key("watch") == key("all"),
+ck("모르는 모드(옛 합본)도 watch 와 같은 이름", key("watch") == key("all"),
    f'{key("watch")} vs {key("all")}')
 ck("manual 은 다른 이름", key("manual") != key("watch"),
    f'{key("manual")} vs {key("watch")}')
@@ -57,7 +56,7 @@ ck("매물감시가 뜬다", si.acquire(key("watch"), tmp) is True)
 ck("수동검색도 같이 뜬다", si.acquire(key("manual"), tmp) is True)
 
 print("\n=== 3. 백그라운드 창이 둘째는 거절된다 (이번 버그) ===")
-ck("자동시작(all)이 거절된다", si.acquire(key("all"), tmp) is False)
+ck("자동시작(모드 없음=배경)이 거절된다", si.acquire(key("all"), tmp) is False)
 ck("매물감시 두 번째도 거절", si.acquire(key("watch"), tmp) is False)
 
 print("\n=== 4. 수동검색 두 번째도 거절 ===")

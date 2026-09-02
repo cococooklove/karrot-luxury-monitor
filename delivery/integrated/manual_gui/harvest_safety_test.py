@@ -304,7 +304,7 @@ class _Tick:
     def _core_only(self):
         return False
 
-    def _alert_run(self, fn, on_done=None):
+    def _alert_run(self, fn, on_done=None, **kw):   # label·queue 가 늘어도 산다
         self.jobs.append((fn, on_done))
 
     def _quiet_keyword_list(self, core_only=False):
@@ -321,6 +321,12 @@ class _Tick:
 
     def _match_populate(self, data):
         pass
+
+    # 스윕 미러링은 조건표가 있을 때만 켠다 — 그 개수를 잡 안에서 읽는다.
+    _alert_rules = type("_R", (), {"get": staticmethod(lambda: [])})()
+
+    def _load_alert_settings(self):
+        return {}
 
 
 _harv2 = []

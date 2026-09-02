@@ -65,7 +65,10 @@ for attr in ("alertAddBtn", "alertRefreshBtn",
              "autoAccountsBtn", "autoProxyViewBtn"):
     b = getattr(w, attr, None)
     ck(f"{attr} 연결됨", b is not None and b.receivers(b.clicked) > 0)
-ck("검색 버튼 연결됨", w.ui.startBtn.receivers(w.ui.startBtn.clicked) > 0)
+# 수동 검색 위젯은 그 모드에서만 산다 — 매물 감시 창에서는 만들자마자 버려진다.
+_wm = main.MainWindow(mode="manual")
+ck("검색 버튼 연결됨",
+   _wm.ui.startBtn.receivers(_wm.ui.startBtn.clicked) > 0)
 for key in main.MainWindow.CHIP_TARGETS:
     c = w._chips[key]
     ck(f"상태칩 {key} 연결됨", c.receivers(c.clicked) > 0)
@@ -96,14 +99,15 @@ except Exception as e:
     ck("조건표 엑셀 취소 처리", False, f"{type(e).__name__}: {str(e)[:60]}")
 
 print("\n=== 검색폼 → CrawlTask ===")
-w.ui.keywordEdit.setText("샤넬")
-w.extraEdit.setText("정품")
-w.excludeEdit.setText("레플 미러")
-w.ui.minimumEdit.setText("500000")
-w.ui.maximumEdit.setText("3000000")
-extra = [x for x in re.split(r"[,\s]+", w.extraEdit.text().strip()) if x]
-exclude = [x for x in re.split(r"[,\s]+", w.excludeEdit.text().strip()) if x]
-task = CrawlTask(("강남구", "강남구-381"), w.ui.keywordEdit.text(), True,
+# 검색폼도 수동 검색 모드의 위젯이다.
+_wm.ui.keywordEdit.setText("샤넬")
+_wm.extraEdit.setText("정품")
+_wm.excludeEdit.setText("레플 미러")
+_wm.ui.minimumEdit.setText("500000")
+_wm.ui.maximumEdit.setText("3000000")
+extra = [x for x in re.split(r"[,\s]+", _wm.extraEdit.text().strip()) if x]
+exclude = [x for x in re.split(r"[,\s]+", _wm.excludeEdit.text().strip()) if x]
+task = CrawlTask(("강남구", "강남구-381"), _wm.ui.keywordEdit.text(), True,
                  500000, 3000000, extra_keywords=extra, exclude_keywords=exclude)
 ck("추가·제외 키워드 분해",
    task.extra_keywords == ["정품"] and task.exclude_keywords == ["레플", "미러"],
@@ -111,7 +115,7 @@ ck("추가·제외 키워드 분해",
 ck("가격 범위 전달", task.minimum == 500000 and task.maximum == 3000000)
 
 print("\n=== 지역 트리에서 동을 고를 수 있다 ===")
-picked = next((c for c in w.all_last_child
+picked = next((c for c in _wm.all_last_child
                if c.data(0, main.QtCore.Qt.ItemDataRole.UserRole)), None)
 ck("지역 트리 채워짐", picked is not None,
    picked.data(0, main.QtCore.Qt.ItemDataRole.UserRole) if picked else "비어 있음")

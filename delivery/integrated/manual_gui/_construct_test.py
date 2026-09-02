@@ -31,8 +31,13 @@ app = QApplication.instance() or QApplication([])
 w = main.MainWindow()
 
 titles = [w.tabs.tabText(i) for i in range(w.tabs.count())]
-ck("탭 3개", w.tabs.count() == 3, str(titles))
-ck("탭 이름", titles == ["수동 검색", "매물 감시", "에뮬레이터"], str(titles))
+# 3탭 합본 모드는 없앴다 — 합본 창은 수확·폴링·라우터를 같이 소유해 따로 띄운
+# 매물 감시 창과 같은 keyword_routes.json 을 놓고 다툰다. 인자가 없으면 매물 감시다.
+ck("기본은 매물 감시 2탭", w.tabs.count() == 2, str(titles))
+ck("탭 이름", titles == ["매물 감시", "에뮬레이터"], str(titles))
+_wm = main.MainWindow(mode="manual")
+_mt = [_wm.tabs.tabText(i) for i in range(_wm.tabs.count())]
+ck("수동 검색은 제 모드로만 뜬다", _mt == ["수동 검색"], str(_mt))
 # 자동 모니터 탭은 없앴다 — 엔진은 남기고 UI 만 지웠으므로 그 탭 위젯은 없어야 한다.
 ck("자동 모니터 탭 위젯 제거",
    not any(hasattr(w, x) for x in ("autoCondLabel", "auto_conditions",
