@@ -1254,8 +1254,8 @@ class _InstanceCard(QtWidgets.QFrame):
         self.index = index
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
-            "QFrame { background:#181310; border:1px solid #2A241C; border-radius:10px; }"
-            "QFrame:hover { border:1px solid #F0D48C; }")
+            "QFrame { background:#FBFAF7; border:1px solid #DDD6C9; border-radius:10px; }"
+            "QFrame:hover { border:1px solid #8A6D1F; }")
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(5)
 
@@ -1264,15 +1264,15 @@ class _InstanceCard(QtWidgets.QFrame):
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb.setWordWrap(True)
         self.thumb.setStyleSheet(
-            "background:#0B0908; border:none; border-radius:6px;"
-            "color:#6E6555; font-size:12px;")
+            "background:#F2F1EE; border:none; border-radius:6px;"
+            "color:#78705F; font-size:12px;")
         self.thumb.setText("화면 불러오는 중…")
 
         self.title = QtWidgets.QLabel(name, self)
-        self.title.setStyleSheet("border:none; color:#EDE3CE; font-weight:700; font-size:13px;")
+        self.title.setStyleSheet("border:none; color:#1F1B16; font-weight:700; font-size:13px;")
         self.title.setToolTip(f"{name} (index {index})")
         self.state = QtWidgets.QLabel("", self)
-        self.state.setStyleSheet("border:none; color:#8C8271; font-size:11px;")
+        self.state.setStyleSheet("border:none; color:#78705F; font-size:11px;")
 
         lay.addWidget(self.thumb); lay.addWidget(self.title); lay.addWidget(self.state)
 
@@ -1288,11 +1288,11 @@ class _InstanceCard(QtWidgets.QFrame):
     def set_state(self, text, attached):
         self.state.setText(text)
         self.state.setStyleSheet(
-            "border:none; font-size:11px; color:%s;" % ("#F0D48C" if attached else "#8C8271"))
+            "border:none; font-size:11px; color:%s;" % ("#8A6D1F" if attached else "#78705F"))
         self.setStyleSheet(
-            "QFrame { background:#181310; border-radius:10px; border:1px solid %s; }"
-            "QFrame:hover { border:1px solid #F0D48C; }"
-            % ("#F0D48C" if attached else "#2A241C"))
+            "QFrame { background:#FBFAF7; border-radius:10px; border:1px solid %s; }"
+            "QFrame:hover { border:1px solid #8A6D1F; }"
+            % ("#8A6D1F" if attached else "#DDD6C9"))
 
     def mouseReleaseEvent(self, ev):
         super().mouseReleaseEvent(ev)
@@ -1314,76 +1314,90 @@ from PIL import Image as PILImage
 from openpyxl import load_workbook
 
 
-# ── 명품 프리미엄 테마 (다크 + 골드) ──
-# base #0E0C0A · surface #1A1613 · input #221C16 · border #2E2720
-# gold #C6A968 (bright #D4B978 / deep #A88C52) · ivory #EDE6D8 · muted #A99D89
+# ── 명품 프리미엄 테마 (라이트 + 골드) ──
+# base #FFFFFF · surface #F7F5F1 · card #FBFAF7 · border #DDD6C9
+# gold #9A7B2E (deep #8A6D1F / fill #C9A751) · ink #1F1B16 · muted #6B6355
+# 2026-09-02 다크에서 전환. 클라가 RDP 로 서버 화면을 보는데 색 압축을 거치면
+# 어두운 배경의 대비가 무너져 팝업 글자가 안 보였다. 색만 바꾸고 배치는 그대로다.
 APP_QSS = """
-* { font-family: 'Pretendard', '.AppleSystemUIFont', 'Apple SD Gothic Neo', 'Malgun Gothic', Helvetica; font-size: 14px; font-weight: 500; color: #E3DACA; }
-QMainWindow, QWidget { background: #100D0A; }
-QToolTip { background:#221C16; color:#F2ECE0; border:1px solid #5A4E37; padding:7px 10px; border-radius:8px; font-size:14px; }
+/* 라이트 팔레트 (2026-09-02). 클라가 RDP 로 서버 화면을 보는데, 어두운 배경은
+   RDP 색 압축을 거치며 대비가 무너져 팝업 글자가 안 보였다. 흰 바탕에 진한
+   글자로 바꾸고, 브랜드 금색은 흰 배경에서도 읽히도록 어둡게 내렸다(#8A6D1F).
 
-#brandBar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #17130E, stop:1 #100D0A); border-bottom: 1px solid #3A3225; }
+   본문 대비 14:1, 보조 텍스트 7:1 이상 — 저사양 원격 화면에서도 읽히는 값이다.
+   팝업(QMessageBox/QInputDialog/QFileDialog)은 **명시적으로** 지정한다. 예전에는
+   지정이 없어, 부모 없이 뜬 경고창이 스타일을 못 받고 제각각으로 보였다. */
+* { font-family: 'Pretendard', '.AppleSystemUIFont', 'Apple SD Gothic Neo', 'Malgun Gothic', Helvetica; font-size: 14px; font-weight: 500; color: #1F1B16; }
+QMainWindow, QWidget { background: #FFFFFF; }
+QToolTip { background:#2A251E; color:#F7F5F1; border:1px solid #2A251E; padding:7px 10px; border-radius:8px; font-size:14px; }
+
+#brandBar { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBFAF7, stop:1 #F2EFE9); border-bottom: 1px solid #DDD6C9; }
 
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar { qproperty-drawBase: 0; left: 18px; }
-QTabBar::tab { background: transparent; color: #B3A88F; padding: 11px 20px; margin-right: 4px; margin-top: 8px; border: none; border-bottom: 2px solid transparent; font-size: 16px; font-weight: 700; }
-QTabBar::tab:selected { color: #D4B978; border-bottom: 2px solid #C6A968; }
-QTabBar::tab:hover:!selected { color: #DCD2BC; }
+QTabBar::tab { background: transparent; color: #6B6355; padding: 11px 20px; margin-right: 4px; margin-top: 8px; border: none; border-bottom: 2px solid transparent; font-size: 16px; font-weight: 700; }
+QTabBar::tab:selected { color: #8A6D1F; border-bottom: 2px solid #9A7B2E; }
+QTabBar::tab:hover:!selected { color: #1F1B16; }
 
-QLabel { color: #CFC5B0; background: transparent; }
+QLabel { color: #3A342B; background: transparent; }
 
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #221C16; border: 1.5px solid #3A3225; border-radius: 11px; padding: 8px 13px; color: #F2ECE0; font-size: 15px; min-height: 24px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; }
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { background: #2A231B; border: 1.5px solid #C6A968; }
-QLineEdit::placeholder { color: #948B77; }
-QComboBox QAbstractItemView { background: #221C16; color: #F2ECE0; border: 1px solid #5A4E37; border-radius: 10px; font-size: 15px; selection-background-color: #4A3F2E; selection-color: #F5EFE2; outline: none; padding: 4px; }
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #FFFFFF; border: 1.5px solid #C9C1B2; border-radius: 11px; padding: 8px 13px; color: #1F1B16; font-size: 15px; min-height: 24px; selection-background-color: #E7D3A6; selection-color: #1F1B16; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { background: #FFFDF8; border: 1.5px solid #9A7B2E; }
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled { background: #F2F1EE; color: #8B8474; }
+QLineEdit::placeholder { color: #8B8474; }
+QComboBox QAbstractItemView { background: #FFFFFF; color: #1F1B16; border: 1px solid #C9C1B2; border-radius: 10px; font-size: 15px; selection-background-color: #F0E6CC; selection-color: #1F1B16; outline: none; padding: 4px; }
 QComboBox::drop-down { border: none; width: 22px; }
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 16px; border: none; background: transparent; }
 
-QPushButton { background: #221C16; color: #E8DFCC; border: 1px solid #473E2B; border-radius: 11px; padding: 9px 15px; font-weight: 700; font-size: 14px; min-height: 22px; }
-QPushButton:hover { background: #2C2519; border-color: #C6A968; color: #FAF5EA; }
-QPushButton:pressed { background: #1C1710; }
-QPushButton:disabled { color: #7E7563; border-color: #2A231B; background: #17130E; }
-QPushButton#startBtn { border: none; color: #14100A; padding: 10px 24px; font-size: 15px; font-weight: 800;
-  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #D9BE82, stop:1 #C0A05F); }
-QPushButton#startBtn:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E6CB8E, stop:1 #CBAB68); }
-QPushButton#startBtn:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #C0A05F, stop:1 #A88C52); }
+QPushButton { background: #F7F5F1; color: #2A251E; border: 1px solid #C9C1B2; border-radius: 11px; padding: 9px 15px; font-weight: 700; font-size: 14px; min-height: 22px; }
+QPushButton:hover { background: #FFFFFF; border-color: #9A7B2E; color: #1F1B16; }
+QPushButton:pressed { background: #EDE9E0; }
+QPushButton:disabled { color: #A69E8D; border-color: #E4DFD5; background: #F7F5F1; }
+QPushButton#startBtn { border: none; color: #241C08; padding: 10px 24px; font-size: 15px; font-weight: 800;
+  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E3C57F, stop:1 #C9A751); }
+QPushButton#startBtn:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EDD292, stop:1 #D6B45E); }
+QPushButton#startBtn:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #C9A751, stop:1 #B08F3E); }
 
-QCheckBox { color: #CFC5B0; spacing: 8px; font-size: 15px; min-height: 24px; background: transparent; }
-QCheckBox::indicator { width: 19px; height: 19px; border: 1.5px solid #4A3F2E; border-radius: 6px; background: #221C16; }
-QCheckBox::indicator:checked { background: #C6A968; border-color: #C6A968; image: none; }
-QCheckBox::indicator:hover { border-color: #C6A968; }
+QCheckBox { color: #3A342B; spacing: 8px; font-size: 15px; min-height: 24px; background: transparent; }
+QCheckBox::indicator { width: 19px; height: 19px; border: 1.5px solid #B5AC9A; border-radius: 6px; background: #FFFFFF; }
+QCheckBox::indicator:checked { background: #9A7B2E; border-color: #9A7B2E; image: none; }
+QCheckBox::indicator:hover { border-color: #9A7B2E; }
 
-QGroupBox { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1D1812, stop:1 #17130E); border: 1px solid #2E2720; border-radius: 16px; margin-top: 18px; padding: 22px 18px 16px 18px; font-size: 16px; font-weight: 800; color: #F0D48C; }
+QGroupBox { background: #FBFAF7; border: 1px solid #DDD6C9; border-radius: 16px; margin-top: 18px; padding: 22px 18px 16px 18px; font-size: 16px; font-weight: 800; color: #8A6D1F; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; top: 2px; padding: 0 6px; letter-spacing: 1px; }
 
-QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #14100C; border: 1px solid #2A231B; border-radius: 13px; padding: 4px; font-size: 14px; color: #E3DACA; }
+QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #FFFFFF; border: 1px solid #DDD6C9; border-radius: 13px; padding: 4px; font-size: 14px; color: #1F1B16; }
 QTreeWidget::item, QListWidget::item { padding: 6px 4px; border-radius: 8px; }
-QTreeWidget::item:selected, QListWidget::item:selected { background: #33291A; color: #F0D48C; }
-QTreeWidget::item:hover, QListWidget::item:hover { background: #1C1710; }
+QTreeWidget::item:selected, QListWidget::item:selected { background: #F0E6CC; color: #1F1B16; }
+QTreeWidget::item:hover, QListWidget::item:hover { background: #F7F5F1; }
 
-QTableWidget { gridline-color: #241E17; }
-QTableWidget::item { padding: 9px 6px; color: #E6DDCB; }
-QTableWidget::item:selected { background: #33291A; color: #FAF5EA; }
-QHeaderView::section { background: #14100C; color: #D3C295; padding: 11px 8px; border: none; border-bottom: 1.5px solid #C6A968; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
-QTableCornerButton::section { background: #14100C; border: none; }
+QTableWidget { gridline-color: #E8E3D9; }
+QTableWidget::item { padding: 9px 6px; color: #1F1B16; }
+QTableWidget::item:selected { background: #F0E6CC; color: #1F1B16; }
+QHeaderView::section { background: #F7F5F1; color: #5C5449; padding: 11px 8px; border: none; border-bottom: 1.5px solid #9A7B2E; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
+QTableCornerButton::section { background: #F7F5F1; border: none; }
 
-QProgressBar { background: #241E17; border: 1px solid #2E2720; border-radius: 7px; min-height: 24px; max-height: 24px; color: #F5EFE2; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; text-align: center; }
-QProgressBar::chunk { border-radius: 6px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #A88C52, stop:1 #E6CB8E); }
+QProgressBar { background: #EDE9E0; border: 1px solid #DDD6C9; border-radius: 7px; min-height: 24px; max-height: 24px; color: #1F1B16; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; text-align: center; }
+QProgressBar::chunk { border-radius: 6px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #C9A751, stop:1 #E3C57F); }
 
 QScrollArea { border: none; background: transparent; }
 QSplitter::handle { background: transparent; }
-QStatusBar { background: #0C0A08; color: #BCB19B; border-top: 1px solid #241E17; font-size: 13px; }
+QStatusBar { background: #F7F5F1; color: #5C5449; border-top: 1px solid #DDD6C9; font-size: 13px; }
 QStatusBar::item { border: none; }
 
-QDialog { background: #14100C; }
+/* 팝업 — 부모 없이 뜨는 것까지 확실히 잡는다. */
+QDialog, QMessageBox, QInputDialog, QFileDialog, QColorDialog, QFontDialog { background: #FFFFFF; }
+QMessageBox QLabel, QInputDialog QLabel { color: #1F1B16; font-size: 14px; }
+QMessageBox QPushButton, QInputDialog QPushButton, QFileDialog QPushButton { min-width: 88px; padding: 8px 16px; }
+QFileDialog QListView, QFileDialog QTreeView { background: #FFFFFF; color: #1F1B16; }
 
 QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; }
-QScrollBar::handle:vertical { background: #3A3225; border-radius: 5px; min-height: 40px; }
-QScrollBar::handle:vertical:hover { background: #5A4E37; }
+QScrollBar::handle:vertical { background: #C9C1B2; border-radius: 5px; min-height: 40px; }
+QScrollBar::handle:vertical:hover { background: #A69E8D; }
 QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px 4px; }
-QScrollBar::handle:horizontal { background: #3A3225; border-radius: 5px; min-width: 40px; }
-QScrollBar::handle:horizontal:hover { background: #5A4E37; }
+QScrollBar::handle:horizontal { background: #C9C1B2; border-radius: 5px; min-width: 40px; }
+QScrollBar::handle:horizontal:hover { background: #A69E8D; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """
@@ -1626,15 +1640,15 @@ class MainWindow(QMainWindow):
         header = QtWidgets.QWidget(); header.setObjectName("brandBar")
         hl = QtWidgets.QHBoxLayout(header); hl.setContentsMargins(26, 15, 26, 13); hl.setSpacing(14)
         brand = QtWidgets.QLabel("❖  L U X E")
-        brand.setStyleSheet("color:#F0D48C; font-size:22px; font-weight:800; letter-spacing:5px;")
+        brand.setStyleSheet("color:#8A6D1F; font-size:22px; font-weight:800; letter-spacing:5px;")
         sub = QtWidgets.QLabel("명품 실시간 모니터")
-        sub.setStyleSheet("color:#B3A88F; font-size:13px; letter-spacing:3px; padding-top:6px;")
+        sub.setStyleSheet("color:#6B6355; font-size:13px; letter-spacing:3px; padding-top:6px;")
         hl.addWidget(brand); hl.addWidget(sub); hl.addStretch(1)
         cl.addWidget(header); cl.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self._refresh_proxy_labels()
         self.resize(1200, 840)                      # 하단 위젯 안 잘리게 넉넉히
-        self.setStyleSheet(APP_QSS)                  # 전역 스타일
+        self.setStyleSheet(APP_QSS)                  # 전역 스타일(앱 단위로도 건다)
         self._apply_card_shadows()
 
     def on_emul_add_clicked(self):
@@ -1769,7 +1783,7 @@ class MainWindow(QMainWindow):
 
         bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
         self.emulStatus = QtWidgets.QLabel("확인 중…")
-        self.emulStatus.setStyleSheet("color:#C4B79A; font-size:13px;")
+        self.emulStatus.setStyleSheet("color:#5C5449; font-size:13px;")
         self.emulStowChk = QtWidgets.QCheckBox("안 보는 창 치우기", w)
         self.emulStowChk.setChecked(True)
         self.emulStowChk.setToolTip(
@@ -1804,7 +1818,7 @@ class MainWindow(QMainWindow):
         lv = QtWidgets.QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(6)
         cap = QtWidgets.QLabel("인스턴스 — 클릭하면 오른쪽 탭으로 열림")
-        cap.setStyleSheet("color:#F0D48C; font-weight:800; font-size:14px;")
+        cap.setStyleSheet("color:#8A6D1F; font-weight:800; font-size:14px;")
         lv.addWidget(cap)
         gridHost = QtWidgets.QWidget()
         self.emulGrid = QtWidgets.QGridLayout(gridHost)
@@ -1814,7 +1828,7 @@ class MainWindow(QMainWindow):
             "실행 중인 LDPlayer 인스턴스가 없습니다.\n"
             "자동 수확/모니터가 인스턴스를 부팅하면 여기 나타납니다.")
         self.emulEmpty.setWordWrap(True)
-        self.emulEmpty.setStyleSheet("color:#8C8271; font-size:13px;")
+        self.emulEmpty.setStyleSheet("color:#78705F; font-size:13px;")
         self.emulGrid.addWidget(self.emulEmpty, 0, 0, 1, 2)
         sa = QtWidgets.QScrollArea(); sa.setWidgetResizable(True); sa.setWidget(gridHost)
         sa.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -1833,7 +1847,7 @@ class MainWindow(QMainWindow):
             "왼쪽 카드를 클릭하면 그 인스턴스 화면이 여기 탭으로 붙습니다 "
             f"(동시 최대 {self.EMUL_MAX_ATTACH}개).")
         self.emulHint.setWordWrap(True)
-        self.emulHint.setStyleSheet("color:#8C8271; font-size:13px;")
+        self.emulHint.setStyleSheet("color:#78705F; font-size:13px;")
         rv.addWidget(self.emulHint)
         rv.addWidget(self.emulTabs, 1)
         split.addWidget(right)
@@ -2114,7 +2128,7 @@ class MainWindow(QMainWindow):
         self.dashHealth.setWordWrap(True)
         self.dashHealth.setStyleSheet(
             "font-size:14px; font-weight:700; padding:8px 10px; border-radius:8px;"
-            "background:#221C16; color:#E6DDCB; border:1px solid #3A3225;")
+            "background:#F7F5F1; color:#3A342B; border:1px solid #DDD6C9;")
         self.dashAccounts = QtWidgets.QLabel("계정: - (집계 전)")
         self.dashCoverage = QtWidgets.QLabel("커버리지: - ")
         self.dashBar = QtWidgets.QProgressBar(); self.dashBar.setRange(0, 100); self.dashBar.setValue(0)
@@ -2131,7 +2145,7 @@ class MainWindow(QMainWindow):
         v.addWidget(dash)
 
         self._watch_label = QtWidgets.QLabel("추적 중 0건")
-        self._watch_label.setStyleSheet("color:#C4B79A; font-size:13px;")
+        self._watch_label.setStyleSheet("color:#5C5449; font-size:13px;")
 
         # ── 컨트롤 바: 토글 하나 + 상태칩 ──
         top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
@@ -2452,10 +2466,10 @@ class MainWindow(QMainWindow):
         self._init_dashboard()
         return w
 
-    _CHIP_COLORS = {"ok": ("#221C16", "#E6DDCB", "#3A3225"),
-                    "warn": ("#332616", "#F0C87C", "#5A4626"),
-                    "bad": ("#3A211C", "#F0A79C", "#6A342C"),
-                    "off": ("#1C1A17", "#8C8478", "#2E2A24")}
+    _CHIP_COLORS = {"ok": ("#F7F5F1", "#3A342B", "#DDD6C9"),
+                    "warn": ("#FBF1DC", "#8A6210", "#E7D3A6"),
+                    "bad": ("#FCEBE8", "#A32B1E", "#F0C4BC"),
+                    "off": ("#F2F1EE", "#7A7367", "#E0DCD3")}
 
     def _style_chip(self, key, level="ok"):
         chip = getattr(self, "_chips", {}).get(key)
@@ -2465,7 +2479,7 @@ class MainWindow(QMainWindow):
         chip.setStyleSheet(
             "QPushButton#statChip{padding:4px 10px; border-radius:11px; font-size:12px;"
             f"background:{bg}; color:{fg}; border:1px solid {br};}}"
-            f"QPushButton#statChip:hover{{border:1px solid #F0D48C;}}")
+            f"QPushButton#statChip:hover{{border:1px solid #8A6D1F;}}")
 
     def _set_chip(self, key, text, level="ok"):
         chip = getattr(self, "_chips", {}).get(key)
@@ -2713,10 +2727,10 @@ class MainWindow(QMainWindow):
         else:
             self._set_chip("poll", "폴링 OFF", "off")
         self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
-        bg = "#3A211C" if not tok_ok else "#221C16"
+        bg = "#FCEBE8" if not tok_ok else "#F7F5F1"
         self.dashHealth.setStyleSheet(
             "font-size:14px; font-weight:700; padding:8px 10px; border-radius:8px;"
-            f"background:{bg}; color:#E6DDCB; border:1px solid #3A3225;")
+            f"background:{bg}; color:#3A342B; border:1px solid #DDD6C9;")
         self._refresh_watch_panel()
 
     def _refresh_watch_panel(self):
@@ -2741,7 +2755,7 @@ class MainWindow(QMainWindow):
         dlg.resize(760, 560)
         lay = QtWidgets.QVBoxLayout(dlg)
         summ = QtWidgets.QLabel("")
-        summ.setStyleSheet("font-weight:700; font-size:15px; padding:6px 4px; color:#F0D48C;")
+        summ.setStyleSheet("font-weight:700; font-size:15px; padding:6px 4px; color:#8A6D1F;")
         lay.addWidget(summ)
         cols = ["계정", "동네", "만료(분)", "핵심", "실패", "상태"]
         tbl = QtWidgets.QTableWidget(0, len(cols), dlg)
@@ -2772,11 +2786,11 @@ class MainWindow(QMainWindow):
                 for c, val in enumerate(vals):
                     it = QtWidgets.QTableWidgetItem(val)
                     if r["banned"]:
-                        it.setBackground(QBrush(QColor("#3A211C")))
+                        it.setBackground(QBrush(QColor("#FCEBE8")))
                     elif not r["alive"]:
-                        it.setForeground(QBrush(QColor("#6E6656")))
+                        it.setForeground(QBrush(QColor("#8B8474")))
                     elif r["core"]:
-                        it.setForeground(QBrush(QColor("#E7C77E")))
+                        it.setForeground(QBrush(QColor("#8A6D1F")))
                     tbl.setItem(i, c, it)
 
         btnRow = QtWidgets.QHBoxLayout()
@@ -3056,8 +3070,10 @@ class MainWindow(QMainWindow):
         self._alert_run(job, self._alert_populate, label="키워드 삭제 중")
 
     def on_alert_delete_all(self):
-        if QtWidgets.QMessageBox.question(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?") \
-                != QtWidgets.QMessageBox.StandardButton.Yes:
+        if not ask_yes_no(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?",
+                          "앱 등록과 라우터 배정이 함께 지워집니다."
+                          " 다시 넣으려면 엑셀 조건이나 일괄등록을 새로 눌러야 합니다.",
+                          danger=True):
             return
         # 워커가 바쁘면 아래 _alert_run 이 거절한다. 그런데 라우터 비우기는 그
         # 앞에서 이미 끝나 있어, 배정만 사라지고 앱 등록은 남는 반쪽 상태가 됐다.
@@ -3933,7 +3949,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QtWidgets.QLabel("신규/가격변동 매물을 텔레그램·구글시트로 알림. 설정은 notify.json 에 저장됩니다.", dlg),
                     0, Qt.AlignmentFlag.AlignLeft)
         result = QtWidgets.QLabel("", dlg); result.setWordWrap(True)
-        result.setStyleSheet("color:#C4B79A; font-size:14px;")
+        result.setStyleSheet("color:#5C5449; font-size:14px;")
         v.addWidget(result)
 
         bb = QtWidgets.QHBoxLayout()
@@ -3954,7 +3970,7 @@ class MainWindow(QMainWindow):
                 result.setText("⚠️ 텔레그램(토큰+방) 또는 구글시트 주소를 먼저 입력하세요.")
                 return
             test.setEnabled(False); test.setText("보내는 중…")
-            result.setStyleSheet("color:#C4B79A; font-size:14px;")
+            result.setStyleSheet("color:#5C5449; font-size:14px;")
             result.setText("전송 시도 중…")
             # 부모는 MainWindow — 다이얼로그가 먼저 닫혀도 실행 중 스레드가 삭제되지 않게
             self._notify_test = NotifyTestThread(self, cur)
@@ -3977,7 +3993,7 @@ class MainWindow(QMainWindow):
                     lines.append(("✅ 구글시트: " if res["sheet_ok"] else "❌ 구글시트: ")
                                  + res["sheet_msg"])
                 bad = (cur["tg_token"] and not res["tg_ok"]) or res["sheet_ok"] is False
-                result.setStyleSheet("color:#EFA394;" if bad else "color:#BCDCB2;")
+                result.setStyleSheet("color:#B4342A;" if bad else "color:#2E7D32;")
                 result.setText("\n".join(lines) or "테스트할 항목 없음")
                 test.setEnabled(True); test.setText("테스트 발송")
             self._notify_test.result.connect(done)
@@ -4095,11 +4111,10 @@ class MainWindow(QMainWindow):
                 return
             picked = [it.data(Qt.ItemDataRole.UserRole) for it in items]
             names = "\n".join(self._mask_proxy(p) for p, _ in picked)
-            if QtWidgets.QMessageBox.question(
-                    dlg, "프록시 삭제",
-                    f"{len(picked)}개 삭제할까요?\n\n{names}\n\n"
-                    "계정저장소 항목은 계정은 남고 프록시 연결만 해제됩니다."
-            ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            if not ask_yes_no(
+                    dlg, "프록시 삭제", f"프록시 {len(picked)}개를 삭제할까요?",
+                    f"{names}\n\n계정저장소 항목은 계정은 남고 프록시 연결만"
+                    " 해제됩니다.", danger=True):
                 return
 
             errs = []
@@ -4497,7 +4512,7 @@ class MainWindow(QMainWindow):
         예전엔 상태바에 있었다. 상태바는 세 탭 공용이라 수동 검색 화면에도
         자동 인프라 표시가 따라다녔다. 쓰는 곳에만 둔다."""
         self.healthLabel = QtWidgets.QLabel("")
-        self.healthLabel.setStyleSheet("color:#C4B79A; font-size:13px;")
+        self.healthLabel.setStyleSheet("color:#5C5449; font-size:13px;")
         self.healthBtn = QtWidgets.QPushButton("진단")
         self.healthBtn.setFixedHeight(28)
         self.healthBtn.setToolTip(
@@ -4551,7 +4566,7 @@ class MainWindow(QMainWindow):
         dlg.resize(720, 520)
         v = QtWidgets.QVBoxLayout(dlg)
         head = QtWidgets.QLabel(f"판정: {res['verdict']}")
-        head.setStyleSheet("font-weight:800; font-size:16px; color:#F0D48C; letter-spacing:1px;")
+        head.setStyleSheet("font-weight:800; font-size:16px; color:#8A6D1F; letter-spacing:1px;")
         act = QtWidgets.QLabel(f"대응: {res['action']}")
         act.setWordWrap(True)
         v.addWidget(head); v.addWidget(act)
@@ -4618,14 +4633,14 @@ class MainWindow(QMainWindow):
         self.searchProgress.setVisible(False)
         self.searchProgressLabel = QtWidgets.QLabel("")
         self.searchProgressLabel.setStyleSheet(
-            "color:#B3A88F; font-size:12px;")
+            "color:#6B6355; font-size:12px;")
         self.searchProgressLabel.setVisible(False)
         fv.addLayout(r0); fv.addLayout(r1)
         fv.addWidget(self.searchProgress); fv.addWidget(self.searchProgressLabel)
         cl.addWidget(fc)
 
         hdr = QtWidgets.QHBoxLayout()
-        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#F0D48C; font-size:16px; letter-spacing:1px;")
+        rl0 = QtWidgets.QLabel("검색 결과"); rl0.setStyleSheet("font-weight:800; color:#8A6D1F; font-size:16px; letter-spacing:1px;")
         hdr.addWidget(rl0); hdr.addStretch(1)
         cl.addLayout(hdr)
         self.ui.itemListView.setMinimumHeight(360)
@@ -5062,16 +5077,11 @@ class MainWindow(QMainWindow):
             # 되돌릴 수 없는 삭제다. refresh 토큰은 이 PC 에서 재발급할 수 없다
             # (당근 WAF 가 PC 갱신을 막는다) — 다시 넣으려면 LDPlayer 에 .ldbk 를
             # 복원해야 한다. 확인 없이 지우면 감시 계정이 조용히 하나 줄어든다.
-            if QtWidgets.QMessageBox.question(
-                    dlg, "계정 삭제",
-                    f"'{_name(r)}' 계정을 목록에서 지울까요?\n\n"
-                    "이 PC 에서는 로그인 토큰을 다시 만들 수 없습니다. 되돌리려면\n"
-                    "LDPlayer 에 .ldbk 를 복원해야 합니다.\n\n"
-                    "지운 내용은 accounts.json.deleted 에 남습니다.",
-                    QtWidgets.QMessageBox.StandardButton.Yes
-                    | QtWidgets.QMessageBox.StandardButton.No,
-                    QtWidgets.QMessageBox.StandardButton.No
-            ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            if not ask_yes_no(
+                    dlg, "계정 삭제", f"'{_name(r)}' 계정을 목록에서 지울까요?",
+                    "이 PC 에서는 로그인 토큰을 다시 만들 수 없습니다."
+                    " 되돌리려면 LDPlayer 에 .ldbk 를 복원해야 합니다.\n\n"
+                    "지운 내용은 accounts.json.deleted 에 남습니다.", danger=True):
                 return
             key = r.get("code") or r.get("label") or r.get("refresh")
             if store.remove(key):
@@ -5644,6 +5654,27 @@ def _run_watchdog():
         _t.sleep(wait)
 
 
+def ask_yes_no(parent, title, text, detail="", danger=False) -> bool:
+    """예/아니오 확인창. 예를 골랐으면 True.
+
+    QMessageBox.question 을 그대로 쓰면 버튼이 'Yes/No' 영문으로 나온다 —
+    Qt 한국어 번역이 배포에 안 들어 있어서다. 클라가 보는 화면이라 버튼 글자를
+    직접 준다. 기본 선택은 언제나 '아니오'다: 이 창이 뜨는 자리는 되돌리기
+    어려운 삭제뿐이라, 엔터를 잘못 눌러 지워지는 일이 없어야 한다."""
+    box = QtWidgets.QMessageBox(parent)
+    box.setIcon(QtWidgets.QMessageBox.Icon.Warning if danger
+                else QtWidgets.QMessageBox.Icon.Question)
+    box.setWindowTitle(title)
+    box.setText(text)
+    if detail:
+        box.setInformativeText(detail)
+    yes = box.addButton("예", QtWidgets.QMessageBox.ButtonRole.YesRole)
+    no = box.addButton("아니오", QtWidgets.QMessageBox.ButtonRole.NoRole)
+    box.setDefaultButton(no)
+    box.exec()
+    return box.clickedButton() is yes
+
+
 def _raise_window(w):
     """다른 실행이 아이콘을 눌렀다 — 이 창을 앞으로 올린다.
 
@@ -5669,10 +5700,14 @@ def _run_app():
         app = QApplication([])
         app.setWindowIcon(app_icon())   # Dock/작업표시줄/팝업 전부 명품 아이콘
         load_bundled_fonts()
-        _f = app.font()                 # 힌팅 최대 — 다크 배경에서 획이 흐려지는 것 방지
+        _f = app.font()                 # 힌팅 최대 — 원격 화면에서 획이 흐려지는 것 방지
         _f.setHintingPreference(QtGui.QFont.HintingPreference.PreferFullHinting)
         _f.setStyleStrategy(QtGui.QFont.StyleStrategy.PreferAntialias)
         app.setFont(_f)
+        # 스타일은 **앱 전체**에 건다. MainWindow 에만 걸면 부모 없이 뜨는 팝업
+        # (QMessageBox.warning(None, ...) 등)이 스타일을 못 받아 시스템 기본
+        # 모습으로 나온다 — 본창과 톤이 달라 클라가 '창이 깨졌다'고 읽었다.
+        app.setStyleSheet(APP_QSS)
         # 클라가 두 프로그램으로 쓴다: --manual(수동 검색) / --watch(매물 감시+에뮬).
         # 인자가 없으면 종전대로 3탭 전부 — 기존 바로가기·작업이 그대로 돈다.
         import sys as _sysarg

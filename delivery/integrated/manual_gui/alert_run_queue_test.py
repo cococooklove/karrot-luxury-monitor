@@ -176,8 +176,8 @@ class _FakeDel(_Fake):
     on_alert_delete_all = m.MainWindow.on_alert_delete_all
 
 
-_yes = QtWidgets.QMessageBox.StandardButton.Yes
-QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: _yes)
+# 확인창은 ask_yes_no 로 통일돼 있다(버튼 글자를 한글로 주기 위해서다).
+m.ask_yes_no = lambda *a, **k: True
 
 f = _FakeDel()
 run_and_pump(f, lambda log: "A")          # 다른 작업이 도는 중
