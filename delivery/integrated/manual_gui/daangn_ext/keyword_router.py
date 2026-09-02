@@ -45,6 +45,8 @@ register_all 이 명시적으로 "fleet_full"(그 실패가 차단이 아니라 
 """
 from __future__ import annotations
 
+import contextlib
+import copy
 import json
 import os
 import time
@@ -111,6 +113,9 @@ class KeywordRouter:
         self.slot_cap = int(slot_cap)
         self.routes_fp = routes_fp
         self._routes, self._observed_cap = self._load()
+        # 마지막으로 디스크와 맞춰졌던 모습. _save 가 "이 프로세스가 바꾼 키"를
+        # 가려내는 기준이다 — 아래 _save 주석 참고.
+        self._synced = copy.deepcopy(self._routes)
 
     # ── 영속 ──
     @staticmethod
@@ -165,15 +170,64 @@ class KeywordRouter:
         return out, observed
 
     def _save(self) -> None:
+        """디스크와 **병합**해서 쓴다. 통째로 덮지 않는다.
+
+        이 파일은 한 프로세스만 쓰지 않는다. 클라는 `--manual`(수동검색)과
+        `--watch`(매물감시)를 두 프로그램으로 띄우고, 실수로 같은 창이 둘 뜨는
+        일도 있다. 각 MainWindow 가 KeywordRouter 를 하나씩 만들어 같은
+        `keyword_routes.json` 을 쓴다.
+
+        종전에는 `dict(self._routes)` 를 통째로 덮었다. 그래서 자기 시작 시점의
+        (오래된) 사본을 든 쪽이 저장하는 순간, 다른 쪽이 방금 넣은 엑셀 조건이
+        통째로 사라졌다. 실서버 2026-09-02 00:31~00:33 에 실제로 이 일이 났다 —
+        A 창이 조건과 함께 3개를 저장(00:31:50)했는데 B 창이 덮었고, B 가 서버
+        목록을 보고 조건 없이 다시 씨딩(00:33:23)했다. 클라에게는 "엑셀이 반영
+        안 된다"로 보였다.
+
+        그래서 **내가 바꾼 키만** 디스크에 반영한다. 손대지 않은 키는 디스크
+        값을 그대로 둔다. 지운 키(`_synced` 에 있는데 지금 없는 키)는 지운다 —
+        이 구분이 없으면 '전체 삭제'가 다음 저장에서 되살아난다.
+
+        락은 accounts.json 과 같은 것을 쓴다(못 잡아도 진행 — ld_autoharvest 의
+        스테일 락 정책). 락은 겹치는 창을 좁혀줄 뿐이고, 병합이 본 방어다."""
+        try:
+            from ld_autoharvest import _file_lock
+        except Exception:
+            @contextlib.contextmanager
+            def _file_lock(_fp, log=None):
+                yield False
         try:
             d = os.path.dirname(self.routes_fp)
             if d:
                 os.makedirs(d, exist_ok=True)
-            payload = dict(self._routes)
-            if self._observed_cap is not None:
-                payload[_CAP_META_KEY] = {"observed": self._observed_cap}
-            with open(self.routes_fp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
+            with _file_lock(self.routes_fp):
+                disk, disk_cap = self._load()
+                merged = dict(disk)
+                for k in set(self._routes) | set(self._synced):
+                    mine = self._routes.get(k)
+                    was = self._synced.get(k)
+                    if mine == was:
+                        continue        # 내가 안 건드린 키 — 디스크가 진실이다
+                    if mine is None:
+                        merged.pop(k, None)
+                    else:
+                        merged[k] = mine
+                cap = self._observed_cap
+                if cap is None:
+                    cap = disk_cap
+                elif disk_cap is not None:
+                    cap = min(cap, disk_cap)    # 상한 관측은 하강만 한다
+                payload = dict(merged)
+                if cap is not None:
+                    payload[_CAP_META_KEY] = {"observed": cap}
+                with open(self.routes_fp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                # 병합 결과가 이제 내 사본이다 — 다른 창이 넣은 키도 여기서
+                # 받아 온다. 안 그러면 capacity() 가 계속 낮게 세어 이미 꽉 찬
+                # 서버에 등록을 시도한다.
+                self._routes = merged
+                self._observed_cap = cap
+                self._synced = copy.deepcopy(merged)
         except Exception:
             pass
 

@@ -5598,6 +5598,21 @@ def _run_app():
             _mode = "manual"
         elif "--watch" in _sysarg.argv:
             _mode = "watch"
+        # 같은 모드가 둘 뜨면 각자의 KeywordRouter 가 같은 keyword_routes.json 을
+        # 서로 덮어 엑셀 조건이 사라진다(실서버 2026-09-02). 모드별로만 막는다 —
+        # manual + watch 를 같이 쓰는 건 정상 사용법이다.
+        try:
+            from daangn_ext import single_instance
+            _solo = single_instance.acquire(_mode)
+        except Exception:
+            _solo = True                  # 가드가 앱을 못 켜게 만들지는 않는다
+        if not _solo:
+            QtWidgets.QMessageBox.warning(
+                None, "이미 실행 중",
+                "같은 프로그램이 이미 실행 중입니다 — 그 창을 쓰세요.\n\n"
+                "두 창이 함께 뜨면 키워드 배정 파일을 서로 덮어써서"
+                " 엑셀로 넣은 조건이 사라집니다.")
+            raise SystemExit(0)           # 0 = 정상 종료(워치독이 되살리지 않는다)
         window = MainWindow(_mode)
         # closeEvent 를 안 거치는 종료(세션 로그아웃 등)에서도 임베드 창은 되돌린다.
         app.aboutToQuit.connect(window._emul_shutdown)
