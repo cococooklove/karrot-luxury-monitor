@@ -5576,6 +5576,21 @@ def _run_watchdog():
         _t.sleep(wait)
 
 
+def _raise_window(w):
+    """다른 실행이 아이콘을 눌렀다 — 이 창을 앞으로 올린다.
+
+    최소화 상태면 편다. 창을 그냥 raise_() 만 하면 최소화된 창은 안 뜬다."""
+    try:
+        w.setWindowState(
+            (w.windowState() & ~QtCore.Qt.WindowState.WindowMinimized)
+            | QtCore.Qt.WindowState.WindowActive)
+        w.show()
+        w.raise_()
+        w.activateWindow()
+    except Exception:
+        pass
+
+
 def _run_app():
     _chdir_app_dir()
     _setup_logging()
@@ -5598,25 +5613,38 @@ def _run_app():
             _mode = "manual"
         elif "--watch" in _sysarg.argv:
             _mode = "watch"
-        # 같은 모드가 둘 뜨면 각자의 KeywordRouter 가 같은 keyword_routes.json 을
-        # 서로 덮어 엑셀 조건이 사라진다(실서버 2026-09-02). 모드별로만 막는다 —
-        # manual + watch 를 같이 쓰는 건 정상 사용법이다.
+        # 수확·폴링·라우터를 도는 창은 하나여야 한다. 둘이면 각자의
+        # KeywordRouter 가 같은 keyword_routes.json 을 서로 덮어 엑셀 조건이
+        # 사라진다(실서버 2026-09-02: --watch 아이콘 + 자동시작 --child).
+        #
+        # 잠그는 기준은 모드가 아니라 background 다. 모드로 잠그면 'watch' 와
+        # 'all' 이 다른 이름이 돼 둘 다 통과한다 — 실제로 겹친 조합이 그것이다.
+        # 수동검색(background=False)은 별도 이름이라 매물감시와 **함께 뜬다**.
+        _sikey = None
         try:
             from daangn_ext import single_instance
-            _solo = single_instance.acquire(_mode)
+            _sikey = single_instance.key_for(_mode, MainWindow.MODES)
+            _solo = single_instance.acquire(_sikey)
         except Exception:
             _solo = True                  # 가드가 앱을 못 켜게 만들지는 않는다
         if not _solo:
-            QtWidgets.QMessageBox.warning(
-                None, "이미 실행 중",
-                "같은 프로그램이 이미 실행 중입니다 — 그 창을 쓰세요.\n\n"
-                "두 창이 함께 뜨면 키워드 배정 파일을 서로 덮어써서"
-                " 엑셀로 넣은 조건이 사라집니다.")
+            # 클라는 바탕화면 아이콘으로 켠다. 경고를 띄우고 죽으면 '아이콘을
+            # 눌렀는데 안 켜진다'로 보인다. 먼저 뜬 창을 앞으로 올려 준다.
+            if not single_instance.summon(_sikey):
+                QtWidgets.QMessageBox.information(
+                    None, "이미 실행 중",
+                    "이미 실행 중입니다 — 작업표시줄에서 그 창을 여세요.")
             raise SystemExit(0)           # 0 = 정상 종료(워치독이 되살리지 않는다)
         window = MainWindow(_mode)
         # closeEvent 를 안 거치는 종료(세션 로그아웃 등)에서도 임베드 창은 되돌린다.
         app.aboutToQuit.connect(window._emul_shutdown)
         window.show()
+        if _sikey:
+            # 뒤에 오는 실행이 이 창을 불러낼 수 있게 문을 열어둔다.
+            try:
+                single_instance.serve(_sikey, lambda: _raise_window(window))
+            except Exception:
+                pass
         raise SystemExit(app.exec())     # 종료코드 전달(워치독이 정상/크래시 구분)
     except SystemExit:
         raise
