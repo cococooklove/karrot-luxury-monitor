@@ -34,7 +34,7 @@ def route(kind="app", reason="앱 알림 등록", **cond):
 # ── 열 정의 ──────────────────────────────────────────────
 ck("열 7개", len(m.ALERT_COLS) == 7, str(m.ALERT_COLS))
 ck("추가 열 있음", "추가" in m.ALERT_COLS)
-ck("끌올 열 있음", "끌올" in m.ALERT_COLS)
+ck("끌올 열 있음", any("끌올" in c for c in m.ALERT_COLS), str(m.ALERT_COLS))
 ck("id 열 인덱스 = 6", m.ALERT_COL_ID == 6, str(m.ALERT_COL_ID))
 ck("키워드 열 인덱스 = 0", m.ALERT_COL_KEYWORD == 0)
 

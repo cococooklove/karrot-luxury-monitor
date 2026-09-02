@@ -316,10 +316,10 @@ ROUTE_NAMES = {"app": "앱 알림", "sweep": "검색 스윕"}
 
 # 등록 표의 열. 인덱스를 손으로 세면 열이 하나 끼는 순간 조용히 어긋난다
 # (실제로 삭제가 id 대신 다른 열을 읽을 뻔했다). 이름으로만 참조한다.
-ALERT_COLS = ["키워드", "경로", "가격범위", "제외", "추가", "끌올", "id"]
+ALERT_COLS = ["키워드", "수집 방식", "가격범위", "제외", "추가", "끌올 기간", "id"]
 ALERT_COL_KEYWORD = ALERT_COLS.index("키워드")
-ALERT_COL_ROUTE = ALERT_COLS.index("경로")
-ALERT_COL_DAYS = ALERT_COLS.index("끌올")
+ALERT_COL_ROUTE = ALERT_COLS.index("수집 방식")
+ALERT_COL_DAYS = ALERT_COLS.index("끌올 기간")
 ALERT_COL_ID = ALERT_COLS.index("id")
 
 # 끌올일수는 앱 알림 등록 body 에 넣을 필드가 없고 filter_by_conditions 도
@@ -2202,13 +2202,58 @@ class MainWindow(QMainWindow):
         "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
     }
 
+    TAB_HELP = ("키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신.\n"
+                "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국.")
+
+    def _sync_box_visible(self, box, on):
+        """체크형 QGroupBox 는 체크를 풀어도 자식을 '비활성'으로만 만든다.
+        접으려면 직접 숨겨야 한다. qt_ 접두 내부 위젯은 건드리지 않는다."""
+        # qt_ 로 시작하는 이름은 Qt 내부 위젯(콤보 팝업 스크롤 컨테이너 등)이라
+        # 건드리지 않는다 — 표시 여부를 Qt 가 스스로 관리한다.
+        on = bool(on)
+        for c in box.findChildren(QtWidgets.QWidget):
+            if not c.objectName().startswith("qt_"):
+                c.setVisible(on)
+        # 자식을 숨겨도 레이아웃 여백은 남는다 — 접은 그룹이 빈 상자로 화면을
+        # 먹는다. 접히면 제목 줄 높이까지 줄인다.
+        lay = box.layout()
+        if lay is not None:
+            if on:
+                lay.setContentsMargins(*getattr(box, "_openMargins", (9, 9, 9, 9)))
+            else:
+                if not hasattr(box, "_openMargins"):
+                    m = lay.contentsMargins()
+                    box._openMargins = (m.left(), m.top(), m.right(), m.bottom())
+                lay.setContentsMargins(0, 0, 0, 0)
+        box.setMaximumHeight(16777215 if on
+                             else box.fontMetrics().height() + 22)
+
+    def _collapsible(self, title, inner, checked=False):
+        """접이식 그룹 한 덩어리. 자주 안 보는 것을 화면에서 치우되 지우지는
+        않는다 — 안의 위젯은 그대로 살아 있어 갱신 코드가 안 바뀐다."""
+        box = QtWidgets.QGroupBox(title)
+        box.setCheckable(True)
+        box.setChecked(bool(checked))
+        lay = QtWidgets.QVBoxLayout(box)
+        if isinstance(inner, QtWidgets.QLayout):
+            lay.addLayout(inner)
+        else:
+            lay.addWidget(inner)
+        box.toggled.connect(lambda on, b=box: self._sync_box_visible(b, on))
+        self._sync_box_visible(box, box.isChecked())
+        return box
+
     def _build_alert_tab(self):
+        """화면 순서는 맨 아래 조립부가 한 번에 정한다.
+
+        위젯을 만드는 순서와 보이는 순서를 갈라 둔 이유가 있다. 클라가 하루에
+        수십 번 보는 것은 매물 표 하나인데, 예전에는 설명문·현황·등록폼·등록표를
+        다 지나야 거기 닿았다. 자주 보는 것을 위로 올리면서도 생성 코드를
+        흔들지 않으려면 이 분리가 필요하다."""
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
-
-        v.addWidget(QtWidgets.QLabel(
-            "키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신. "
-            "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국."))
+        cond_v = QtWidgets.QVBoxLayout()      # '감시 조건'(접힘) 에 들어갈 것
+        listing_v = QtWidgets.QVBoxLayout()   # 매물 — 화면의 주인공
 
         # ── 현황 대시보드 ──
         dash = QtWidgets.QGroupBox("현황"); dl = QtWidgets.QVBoxLayout(dash)
@@ -2230,7 +2275,12 @@ class MainWindow(QMainWindow):
         for wdg in (self.dashHealth, self.dashAccounts, self.dashCoverage, self.dashBar,
                     self.dashCadence, self.dashGuide):
             dl.addWidget(wdg)
-        v.addWidget(dash)
+        # 같은 값이 위 상태칩에도 있다. 칩이 요약, 여기가 상세 — 기본은 접는다.
+        dash.setCheckable(True)
+        dash.setChecked(False)
+        dash.toggled.connect(lambda on, b=dash: self._sync_box_visible(b, on))
+        self._sync_box_visible(dash, False)
+        self.dashBox = dash
 
         self._watch_label = QtWidgets.QLabel("추적 중 0건")
         self._watch_label.setStyleSheet("color:#5C5449; font-size:13px;")
@@ -2240,6 +2290,7 @@ class MainWindow(QMainWindow):
         self.watchToggleBtn = QtWidgets.QPushButton("▶ 감시 시작")
         self.watchToggleBtn.setObjectName("startBtn")
         self.watchToggleBtn.setCheckable(True)
+        self.watchToggleBtn.setToolTip(self.TAB_HELP)
         self.watchToggleBtn.clicked.connect(self.on_watch_toggle)
         top.addWidget(self.watchToggleBtn)
         # 칩 — 읽기 전용 상태 표시지만 죽은 글자는 아니다. 누르면 그 값을 조절하는
@@ -2259,7 +2310,6 @@ class MainWindow(QMainWindow):
         # 추적중 칩은 고급 패널에 대응 항목이 없다(스윕 주기는 정책 상수다).
         # 목적지 없는 칩은 누르지 않는 편이 낫다 — 라벨로 둔다.
         top.addWidget(self._watch_label, 1)
-        v.addLayout(top)
 
         # 등록 폼
         form = QtWidgets.QGroupBox("키워드 등록"); fl = QtWidgets.QVBoxLayout(form)
@@ -2274,7 +2324,8 @@ class MainWindow(QMainWindow):
         self.alertAddBtn = QtWidgets.QPushButton("등록"); self.alertAddBtn.setObjectName("startBtn")
         # 단일계정 일괄등록은 없앴다 — register_all 은 전 계정에 같은 키워드를 쓰고
         # 라우터 capacity() 도 함대 기준이라, 한 계정만 건드리면 집계가 조용히 어긋난다.
-        self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품{len(LUXURY_BRANDS)} 전계정등록(전국)")
+        self.alertBulkAllBtn = QtWidgets.QPushButton(f"명품 브랜드 {len(LUXURY_BRANDS)}개 등록")
+        self.alertBulkAllBtn.setToolTip("전 계정에 명품 브랜드를 등록합니다(전국 커버)")
         self.alertBulkAllBtn.setObjectName("startBtn")
         self.alertRefreshBtn = QtWidgets.QPushButton("목록 새로고침")
         # 등록은 브랜드 단위로 넓게, 모델별 조건 수백 줄은 이 엑셀이 맡는다.
@@ -2283,7 +2334,7 @@ class MainWindow(QMainWindow):
         r1.addWidget(self.alertRulesBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
-        v.addWidget(form)
+        cond_v.addWidget(form)
 
         # 진행 표시 — 등록은 '계정 수 × 키워드 수' 만큼 요청이라 20초 넘게 걸린다.
         # 그동안 화면이 아무 말도 안 하면 사용자는 실패한 줄 알고 다시 누르거나
@@ -2299,11 +2350,10 @@ class MainWindow(QMainWindow):
         _bh.addWidget(self.alertBusyBar)
         _bh.addWidget(self.alertBusyLabel, 1)
         self.alertBusyRow.setVisible(False)
-        v.addWidget(self.alertBusyRow)
 
         # 커버 동네 정보
         self.alertSubLabel = QtWidgets.QLabel("동네 정보: (새로고침을 누르세요)")
-        v.addWidget(self.alertSubLabel)
+        cond_v.addWidget(self.alertSubLabel)
 
         # 등록 목록
         self.alertTable = QtWidgets.QTableWidget(0, len(ALERT_COLS), w)
@@ -2318,19 +2368,26 @@ class MainWindow(QMainWindow):
             _hh.setSectionResizeMode(
                 _c, QtWidgets.QHeaderView.ResizeMode.Stretch if _c == ALERT_COL_KEYWORD
                 else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.alertTable.setMinimumHeight(300)
-        v.addWidget(self.alertTable, 1)
+        self.alertTable.setMinimumHeight(260)
+        # id 는 서버 내부 식별자다 — 사람이 읽을 값이 아니다. 열은 남긴다
+        # (인덱스 상수와 셀 생성 함수가 쓴다). 화면에서만 감춘다.
+        self.alertTable.setColumnHidden(ALERT_COL_ID, True)
+        cond_v.addWidget(self.alertTable, 1)
 
         r2 = QtWidgets.QHBoxLayout()
         self.alertDelBtn = QtWidgets.QPushButton("선택 삭제")
+        # 전체 삭제는 고급에 둔다. 표 바로 아래 있던 동안 실서버에서 등록 21건이
+        # 그렇게 날아갔다(2026-09-02).
         self.alertDelAllBtn = QtWidgets.QPushButton("전체 삭제")
-        r2.addWidget(self.alertDelBtn); r2.addWidget(self.alertDelAllBtn); r2.addStretch(1)
-        v.addLayout(r2)
+        r2.addWidget(self.alertDelBtn); r2.addStretch(1)
+        cond_v.addLayout(r2)
 
         # ── 고급 패널에 들어갈 위젯(진단·튜닝) ──
-        self.alertPollBtn = QtWidgets.QPushButton("매칭 조회(현재계정)")
-        self.alertPollAllBtn = QtWidgets.QPushButton("전계정 매칭(전국)"); self.alertPollAllBtn.setObjectName("startBtn")
-        self.alertCoverageBtn = QtWidgets.QPushButton("커버 동네 집계")
+        self.alertPollBtn = QtWidgets.QPushButton("지금 한번 확인")
+        self.alertPollBtn.setToolTip("현재 계정의 알림함만 즉시 확인합니다")
+        self.alertPollAllBtn = QtWidgets.QPushButton("전체 계정 확인"); self.alertPollAllBtn.setObjectName("startBtn")
+        self.alertPollAllBtn.setToolTip("모든 계정의 알림함을 확인합니다(전국)")
+        self.alertCoverageBtn = QtWidgets.QPushButton("커버 범위 계산")
         self.alertFleetBtn = QtWidgets.QPushButton("계정 현황")
         self.alertFleetBtn.setToolTip("계정별 동네·토큰만료·핵심여부·폴링실패·밴격리 — 팜 운영 한 눈에")
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
@@ -2357,7 +2414,7 @@ class MainWindow(QMainWindow):
         # 관측 상한 탈출구. 서버 등록이 한 번 실패하면 라우터는 유효 상한을
         # 그 시점 used 로 내리고 스스로 올리지 않는다 — 일시적 오류였다면
         # 이 버튼(서버는 --reset-cap)이 유일한 복구 경로다.
-        self.alertResetCapBtn = QtWidgets.QPushButton("슬롯 상한 초기화")
+        self.alertResetCapBtn = QtWidgets.QPushButton("등록 한도 초기화")
         self.alertResetCapBtn.setToolTip(
             "앱 알림 슬롯 상한의 '관측치'를 지운다.\n"
             "서버가 등록을 거부하면 라우터는 유효 상한을 그때의 등록 수로 내리고\n"
@@ -2376,6 +2433,7 @@ class MainWindow(QMainWindow):
         a1.addWidget(self.alertPollBtn); a1.addWidget(self.alertPollAllBtn)
         a1.addWidget(self.alertCoverageBtn); a1.addWidget(self.alertFleetBtn)
         a1.addWidget(self.alertTgTestBtn); a1.addWidget(self.alertResetCapBtn)
+        a1.addWidget(self.alertDelAllBtn)
         a1.addStretch(1)
         av.addLayout(a1)
 
@@ -2392,11 +2450,8 @@ class MainWindow(QMainWindow):
         # 체크 해제는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨겨야 하고,
         # setChecked(False) 는 toggled 를 쏘지 않으므로 한 번은 손으로 부른다.
         self._sync_advanced_visible(self.advancedBox.isChecked())
-        v.addWidget(self.advancedBox)
 
         # ── 매물 (신규·추적을 한 표에) ──
-        v.addWidget(QtWidgets.QLabel(
-            "── 매물 (앱 알림·검색 스윕이 같은 표로 들어온다) ──"))
         fbar = QtWidgets.QHBoxLayout(); fbar.setSpacing(6)
         self.listingFilter = QtWidgets.QButtonGroup(w)
         for i, (key, label) in enumerate(
@@ -2411,7 +2466,7 @@ class MainWindow(QMainWindow):
         self.listingFilter.setExclusive(True)
         self.listingFilter.buttonClicked.connect(
             lambda _b: self._refresh_listing_table())
-        v.addLayout(fbar)
+        listing_v.addLayout(fbar)
 
         self.listingTable = QtWidgets.QTableWidget(0, 8, w)
         self.listingTable.setHorizontalHeaderLabels(
@@ -2424,13 +2479,26 @@ class MainWindow(QMainWindow):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.listingTable.horizontalHeader().setSectionResizeMode(
             2, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.listingTable.setMinimumHeight(320)
+        self.listingTable.setMinimumHeight(440)
+        self.listingTable.setToolTip(
+            "앱 알림과 검색 스윕이 같은 표로 들어옵니다. 두 번 누르면 매물이 열립니다.")
         self.listingTable.setSortingEnabled(True)
         self.listingTable.itemDoubleClicked.connect(self.on_listing_open)
-        v.addWidget(self.listingTable, 1)
+        listing_v.addWidget(self.listingTable, 1)
 
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
-        v.addWidget(self.alertLog)
+
+        # ── 조립: 자주 보는 것이 위 ──
+        # ① 지금 상태 한 줄  ② 매물  ③ 나머지는 접어 둔다
+        v.addLayout(top)
+        v.addWidget(self.alertBusyRow)
+        v.addLayout(listing_v, 1)
+        self.condBox = self._collapsible("감시 조건", cond_v)
+        self.logBox = self._collapsible("로그", self.alertLog)
+        v.addWidget(dash)
+        v.addWidget(self.condBox)
+        v.addWidget(self.advancedBox)
+        v.addWidget(self.logBox)
 
         self.alertAddBtn.clicked.connect(self.on_alert_add)
         self.alertRefreshBtn.clicked.connect(self.on_alert_refresh)
@@ -2618,14 +2686,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _sync_advanced_visible(self, on):
-        """체크형 QGroupBox 는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨긴다.
-
-        qt_ 로 시작하는 이름은 Qt 내부 위젯(콤보 팝업 스크롤 컨테이너 등)이라
-        건드리지 않는다 — 표시 여부를 Qt 가 스스로 관리한다."""
-        for c in self.advancedBox.findChildren(QtWidgets.QWidget):
-            if c.objectName().startswith("qt_"):
-                continue
-            c.setVisible(bool(on))
+        """고급 패널 접기 — 접이식 공통 규칙(_sync_box_visible)을 그대로 쓴다."""
+        self._sync_box_visible(self.advancedBox, on)
 
     _ALERT_SETTINGS_FILE = "./data/alert_settings.json"
 

@@ -401,6 +401,43 @@ if _win is not None:
        and _win.alertTable.columnCount() == len(m.ALERT_COLS),
        str(m.ALERT_COLS))
 
+    # ── 화면 순서: 매일 보는 매물 표가 위, 설정은 접어서 아래 ──
+    from PyQt6.QtCore import QPoint as _QPoint
+    from PyQt6 import QtWidgets as _QtW
+
+    def _y(wdg):
+        """창 좌표계에서의 세로 위치."""
+        return wdg.mapTo(_win, _QPoint(0, 0)).y()
+    ck("매물 표가 등록 표보다 위", _y(_win.listingTable) < _y(_win.alertTable),
+       f"listing={_y(_win.listingTable)} alert={_y(_win.alertTable)}")
+    ck("감시 시작 버튼이 매물 표보다 위",
+       _y(_win.watchToggleBtn) < _y(_win.listingTable))
+    for _n, _title in (("dashBox", "현황"), ("condBox", "감시 조건"),
+                       ("advancedBox", "고급"), ("logBox", "로그")):
+        _b = getattr(_win, _n, None)
+        ck(f"접이식 {_title}", _b is not None and _b.isCheckable()
+           and _b.isChecked() is False, str(_b))
+    ck("접으면 높이도 접힌다",
+       _win.condBox.maximumHeight() < 100, str(_win.condBox.maximumHeight()))
+    _win.condBox.setChecked(True)
+    # 창을 띄우지 않은 테스트라 isVisible() 은 항상 False 다 — 숨김 플래그를 본다.
+    ck("펼치면 안이 보인다", not _win.alertTable.isHidden()
+       and _win.condBox.maximumHeight() > 1000,
+       f"hidden={_win.alertTable.isHidden()} / {_win.condBox.maximumHeight()}")
+    _win.condBox.setChecked(False)
+    ck("id 열은 감춘다", _win.alertTable.isColumnHidden(m.ALERT_COL_ID))
+    # 전체 삭제는 표 옆에 두지 않는다 — 실서버서 등록 21건이 그렇게 날아갔다.
+    ck("전체 삭제는 고급 안에",
+       _win.alertDelAllBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
+    ck("선택 삭제는 감시 조건 안에",
+       _win.alertDelBtn in _win.condBox.findChildren(_QtW.QPushButton))
+    ck("내부 용어를 화면에서 뺐다",
+       "전계정등록" not in _win.alertBulkAllBtn.text()
+       and "매칭 조회" not in _win.alertPollBtn.text()
+       and "슬롯" not in _win.alertResetCapBtn.text(),
+       f"{_win.alertBulkAllBtn.text()} / {_win.alertPollBtn.text()}"
+       f" / {_win.alertResetCapBtn.text()}")
+
     # ── 첫 실행에서 서버에 이미 있는 키워드를 앱 슬롯으로 인정한다 ──
     # routes 파일이 없으면 라우터는 used=0 으로 본다. 그대로 두면 이미 꽉 찬
     # 서버 한도에 계속 등록을 시도하고 전부 스윕으로 밀린다.
