@@ -52,12 +52,76 @@ class AccountStore:
         """계정+프록시 한 쌍 추가 (1:1 페어링)."""
         return self.add(refresh=refresh, proxy=proxy, label=label)
 
-    def remove(self, refresh_or_label: str) -> None:
+    def remove(self, key: str) -> bool:
+        """계정 한 줄을 지운다. 지웠으면 True.
+
+        `key` 는 code / label / refresh 중 아무거나 — 화면 목록에 보이는 것이
+        code 다. 종전에는 refresh/label 만 봐서, 수확으로 들어온 계정(label 이
+        비고 code 만 있다)은 화면에서 골라도 지워지지 않았다.
+
+        **set_proxy 와 같은 이유로 파일락을 잡고 다시 읽어서 그 줄만 뺀다.**
+        종전에는 메모리 사본을 통째로 덮어써서, 그 사이 수확기가 넣은 토큰이
+        옛 값으로 되돌아가거나 새로 들어온 계정이 통째로 사라졌다. refresh
+        토큰은 이 기계에서 재발급할 수 없다 — 당근 WAF 가 PC 갱신을 막아
+        복구 경로는 폰 앱 스택이나 `.ldbk` 복원뿐이다.
+
+        지운 줄은 `accounts.json.deleted` 에 쌓아 둔다. 되돌릴 길이 하나도
+        없는 것과, 파일에서 도로 옮겨 붙이면 되는 것은 사고의 무게가 다르다.
+        """
+        key = str(key or "").strip()
+        if not key:
+            return False
+        try:
+            from ld_autoharvest import _file_lock
+        except Exception:
+            import contextlib
+
+            @contextlib.contextmanager
+            def _file_lock(_fp, log=None):
+                yield False
+
         with self._lock:
-            self.rows = [r for r in self.rows
-                         if r.get("refresh") != refresh_or_label
-                         and r.get("label") != refresh_or_label]
-        self.save()
+            with _file_lock(self.path):
+                try:
+                    with open(self.path, encoding="utf-8") as f:
+                        rows = json.load(f)
+                except FileNotFoundError:
+                    return False
+                except Exception:
+                    return False
+                keep, gone = [], []
+                for r in rows:
+                    if key in (str(r.get("code") or ""), str(r.get("label") or ""),
+                               str(r.get("refresh") or "")):
+                        gone.append(r)
+                    else:
+                        keep.append(r)
+                if not gone:
+                    return False
+                self._bury(gone)
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(keep, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+                self.rows = keep
+        return True
+
+    def _bury(self, gone: list[dict]) -> None:
+        """지운 계정을 무덤 파일에 쌓는다. 실패해도 삭제 자체는 진행한다 —
+        무덤을 못 쓴다고 사용자가 시킨 삭제를 막을 이유는 없다."""
+        path = self.path + ".deleted"
+        try:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    old = json.load(f)
+                if not isinstance(old, list):
+                    old = []
+            except Exception:
+                old = []
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(old + list(gone), f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def set_proxy(self, key: str, proxy: str | None) -> bool:
         """이 계정에 프록시를 지정한다. 성공하면 True.

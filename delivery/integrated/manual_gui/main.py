@@ -5055,10 +5055,33 @@ class MainWindow(QMainWindow):
             reload_list()
         def do_del():
             i = listw.currentRow()
-            if 0 <= i < len(store.rows):
-                r = store.rows[i]
-                store.remove(r.get("refresh") or r.get("label"))
+            if not (0 <= i < len(store.rows)):
+                QtWidgets.QMessageBox.warning(dlg, "확인", "먼저 계정을 고르세요.")
+                return
+            r = store.rows[i]
+            # 되돌릴 수 없는 삭제다. refresh 토큰은 이 PC 에서 재발급할 수 없다
+            # (당근 WAF 가 PC 갱신을 막는다) — 다시 넣으려면 LDPlayer 에 .ldbk 를
+            # 복원해야 한다. 확인 없이 지우면 감시 계정이 조용히 하나 줄어든다.
+            if QtWidgets.QMessageBox.question(
+                    dlg, "계정 삭제",
+                    f"'{_name(r)}' 계정을 목록에서 지울까요?\n\n"
+                    "이 PC 에서는 로그인 토큰을 다시 만들 수 없습니다. 되돌리려면\n"
+                    "LDPlayer 에 .ldbk 를 복원해야 합니다.\n\n"
+                    "지운 내용은 accounts.json.deleted 에 남습니다.",
+                    QtWidgets.QMessageBox.StandardButton.Yes
+                    | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No
+            ) != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            key = r.get("code") or r.get("label") or r.get("refresh")
+            if store.remove(key):
+                self._alog(f"[계정] {_name(r)} 삭제 — accounts.json.deleted 에 보관")
                 reload_list()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    dlg, "실패",
+                    "지우지 못했습니다. accounts.json 을 다른 프로그램이 쓰고 있는지"
+                    " 확인하세요.")
         addBtn.clicked.connect(do_add)
         delBtn.clicked.connect(do_del)
         closeBtn.clicked.connect(dlg.accept)
