@@ -1871,11 +1871,66 @@ class MainWindow(QMainWindow):
         sub = QtWidgets.QLabel("명품 실시간 모니터")
         sub.setStyleSheet("color:#6B6355; font-size:13px; letter-spacing:3px; padding-top:6px;")
         hl.addWidget(brand); hl.addWidget(sub); hl.addStretch(1)
+        # 우측 상단: 지금 도는 판과 최신 여부. 서버에 붙은 사람이 '이게 최신인가'를
+        # 로그 뒤지지 않고 한눈에 알게 — 배포 각인(data/deployed.json)을 읽고
+        # GitHub master 와 대조한다(네트워크는 백그라운드, 실패해도 창은 뜬다).
+        self.versionLabel = QtWidgets.QLabel()
+        self.versionLabel.setObjectName("versionLabel")
+        self.versionLabel.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                       | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.versionLabel.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        hl.addWidget(self.versionLabel)
+        self._init_version_label()
         cl.addWidget(header); cl.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.resize(1200, 840)                      # 하단 위젯 안 잘리게 넉넉히
         self.setStyleSheet(APP_QSS)                  # 전역 스타일(앱 단위로도 건다)
         self._apply_card_shadows()
+
+    # ── 판(버전) 표시 ──
+    _VERSION_RECHECK_MS = 60 * 60 * 1000     # 최신 여부는 1시간마다 다시 본다
+
+    def _init_version_label(self):
+        from daangn_ext.version import local_version, version_label
+        self._version_local = local_version(".")
+        text, state = version_label(self._version_local, "", checked=False)
+        self._set_version_text(text, state)
+        self._version_thread = None
+        self._version_timer = QtCore.QTimer(self)
+        self._version_timer.setInterval(self._VERSION_RECHECK_MS)
+        self._version_timer.timeout.connect(self._check_version_async)
+        self._version_timer.start()
+        QtCore.QTimer.singleShot(1500, self._check_version_async)   # 창 먼저 뜨고 나서
+
+    def _set_version_text(self, text, state):
+        color = {"latest": "#3D7A3F", "outdated": "#B0491A"}.get(state, "#8C8578")
+        self.versionLabel.setStyleSheet(
+            f"color:{color}; font-size:12px; letter-spacing:1px; padding-top:6px;")
+        self.versionLabel.setText(text)
+        v = self._version_local
+        tip = (f"실행 중인 판: {v.get('sha') or '미상'}\n"
+               f"설치: {v.get('installed') or '-'} ({v.get('source') or '기록 없음'})")
+        if state == "outdated":
+            tip += "\n새 판이 GitHub master 에 있습니다 — 배포가 아직 안 돌았거나 실패했습니다."
+        self.versionLabel.setToolTip(tip)
+
+    def _check_version_async(self):
+        """GitHub 조회는 스레드에서 — 창이 8초 멈추면 안 된다."""
+        if self._version_thread is not None and self._version_thread.isRunning():
+            return
+        if not (self._version_local or {}).get("short"):
+            return
+        from daangn_ext.version import fetch_latest_sha
+        th = _AlertWorker(lambda _log: fetch_latest_sha())
+        th.done.connect(self._on_version_checked)
+        self._version_thread = th
+        th.start()
+
+    def _on_version_checked(self, latest):
+        from daangn_ext.version import version_label
+        text, state = version_label(self._version_local, latest or "", checked=True)
+        self._set_version_text(text, state)
 
     def on_emul_add_clicked(self):
         """계정 추가 — .ldbk 를 골라 새 인스턴스로 복원한다.
