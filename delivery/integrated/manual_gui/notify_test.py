@@ -365,7 +365,8 @@ ck("전송 내용에 매물 포함", "샤넬0" in posted[0] and "1,000,000원" i
 arts[0]["price"] = "800000"
 n2, c2 = m._dedup_notify(arts, "강남구", None, None, None)
 m._flush_notify()
-ck("가격변동 재알림 유지", (n2, c2) == (0, 1) and any("가격변동" in p for p in posted))
+ck("가격변동 재알림 유지", (n2, c2) == (0, 1) and any("[가격 변동]" in p for p in posted))
+ck("가격변동 블록: 옛값 -> 새값", any("1,000,000원 -&gt; 800,000원" in p for p in posted))
 
 # 정지 상태에서도 마지막 flush 는 나간다
 m._stop = True
@@ -393,6 +394,71 @@ try:
     ck("하위호환 래퍼 무크래시(자격증명 없음)", True)
 except Exception as e:
     ck("하위호환 래퍼 무크래시", False, str(e)[:60])
+
+print("\n=== H. 매물 블록 문구 (텔레그램 HTML) ===")
+from daangn.notify import item_block, watch_event_block, fmt_price, fmt_stamp, esc
+import datetime as _dtm
+
+blk = item_block("신규 매물", "서울특별시 중구 장충동1가",
+                 "루이비통/ 남여공용 모노그램 지퍼 오거나이저 중지갑", 260000,
+                 "https://www.daangn.com/kr/buy-sell/-1/",
+                 stamp=_dtm.datetime(2026, 9, 2, 16, 1), stamp_label="등록")
+want = ("[신규 매물]\n서울특별시 중구 장충동1가\n"
+        "루이비통/ 남여공용 모노그램 지퍼 오거나이저 중지갑\n260,000원\n"
+        "[등록: 09/02 16:01]\n<a href=\"https://www.daangn.com/kr/buy-sell/-1/\">링크</a>")
+ck("신규 블록 = 요구 문구", blk == want, repr(blk))
+blk2 = item_block("가격 변동", "서울특별시 중구 장충동1가", "루이비통 지갑", 500000, "u",
+                  stamp=_dtm.datetime(2026, 9, 2, 16, 1), stamp_label="끌올", old_price=600000)
+ck("가격변동 블록 줄", "600,000원 -&gt; 500,000원" in blk2 and "[끌올: 09/02 16:01]" in blk2, repr(blk2))
+ck("HTML 이스케이프(제목 <, &)", "&lt;b&gt;" in item_block("x", "r", "<b>&", 1, "u"))
+ck("URL 없으면 '링크 없음'", item_block("x", "r", "t", 1, "").endswith("링크 없음"))
+ck("시각 없으면 시각 줄 생략", "[등록" not in item_block("x", "r", "t", 1, "u"))
+ck("가격 문자열('1,900,000원') 그대로", fmt_price("1,900,000원") == "1,900,000원")
+ck("가격 숫자문자열 → 콤마", fmt_price("260000") == "260,000원")
+ck("가격 0 → '-'", fmt_price(0) == "-" and fmt_price("0") == "-")
+ck("epoch → 현지 시각", fmt_stamp(int(_dtm.datetime(2026, 9, 2, 16, 1).timestamp())) == "09/02 16:01")
+utc = _dtm.datetime(2026, 9, 2, 7, 1, tzinfo=_dtm.timezone.utc).astimezone().strftime("%m/%d %H:%M")
+ck("ISO 'Z'(UTC) → 현지 변환", fmt_stamp("2026-09-02T07:01:00Z") == utc, fmt_stamp("2026-09-02T07:01:00Z"))
+ck("못 읽는 시각 → ''", fmt_stamp("abc") == "" and fmt_stamp(None) == "")
+
+ev = {"kind": "price_down", "id": "1", "title": "샤넬 클래식", "url": "u1", "region": "강남구 논현동",
+      "old": 1000000, "new": 800000, "at": 0, "price": 800000, "published_at": 0}
+wb = watch_event_block(ev)
+ck("워치 인하 → [가격 변동] 블록", wb.startswith("[가격 변동]\n강남구 논현동\n샤넬 클래식\n1,000,000원 -&gt; 800,000원"), repr(wb))
+ck("워치 published_at=0 → 시각 줄 생략", "[끌올" not in wb)
+ck("워치 판매완료 블록", watch_event_block({"kind": "sold", "id": "3", "title": "구찌", "url": "u3",
+                                          "price": 300000, "at": 0}).startswith("[판매완료]"))
+ck("워치 모르는 kind → ''", watch_event_block({"kind": "zzz"}) == "")
+
+# 묶음 머리말: 매물 블록 수만큼 센다, 안내문만 있으면 안 붙는다
+hdr_sent = []
+tgh = TelegramSender("1:X", "9", min_interval=0)
+tgh._post = lambda text, timeout=10: (hdr_sent.append(text), FakeResp(200, {"ok": True}))[1]
+tgh.enqueue_item(item_block("신규 매물", "r", "a", 1000, "u"))
+tgh.enqueue_item(item_block("신규 매물", "r", "b", 2000, "u"))
+tgh.flush()
+ck("블록 2건 → '2개의 상품이 등록되었습니다.' 머리말",
+   len(hdr_sent) == 1 and hdr_sent[0].startswith("2개의 상품이 등록되었습니다.\n\n[신규 매물]"), hdr_sent[:1])
+ck("블록 사이 빈 줄", "\n\n[신규 매물]\nr\nb" in hdr_sent[0])
+hdr_sent.clear()
+tgh.enqueue("안내 <문구> & 끝")
+tgh.flush()
+ck("안내문만 → 머리말 없음 + 이스케이프", hdr_sent == ["안내 &lt;문구&gt; &amp; 끝"], hdr_sent)
+import daangn.notify as _nm
+captured = {}
+class _FakeReq:
+    @staticmethod
+    def post(url, json=None, **kw):
+        captured.update(json or {}); return FakeResp(200, {"ok": True})
+import types, sys as _sys
+_fake_mod = types.ModuleType("curl_cffi"); _fake_mod.requests = _FakeReq
+_saved = _sys.modules.get("curl_cffi"); _sys.modules["curl_cffi"] = _fake_mod
+try:
+    TelegramSender("1:X", "9", min_interval=0).send("hi", retries=0)
+finally:
+    if _saved is not None: _sys.modules["curl_cffi"] = _saved
+    else: _sys.modules.pop("curl_cffi", None)
+ck("전송 payload parse_mode=HTML", captured.get("parse_mode") == "HTML" and captured.get("text") == "hi", captured)
 
 print("\n=== G. 실네트워크 (텔레그램 실API) ===")
 real = TelegramSender("111:BADTOKEN", "999", min_interval=0)

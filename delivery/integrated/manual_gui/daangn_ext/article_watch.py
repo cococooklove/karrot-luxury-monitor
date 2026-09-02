@@ -375,10 +375,17 @@ def state_for(row: dict, now: int) -> str:
 
 
 def _ev(kind, old_row, new_row, old, new, now):
+    # region/price/published_at 은 알림 블록용 — 사라진 매물(gone)은 new_row 에 없다.
+    price = new_row.get("price")
+    if not isinstance(price, int):
+        price = old_row.get("price")
     return {"kind": kind,
             "id": str(old_row.get("id")),
             "title": new_row.get("title") or old_row.get("title") or "",
             "url": new_row.get("url") or old_row.get("url") or "",
+            "region": new_row.get("region") or old_row.get("region") or "",
+            "price": price,
+            "published_at": new_row.get("published_at") or old_row.get("published_at") or 0,
             "old": old, "new": new, "at": int(now)}
 
 

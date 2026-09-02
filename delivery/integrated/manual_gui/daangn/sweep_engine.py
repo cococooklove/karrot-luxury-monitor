@@ -31,7 +31,7 @@ from daangn_ext.adaptive import (collect_region, collect_lanes, load_dong_region
                                  set_app_fallback_logger)
 from daangn_ext import throttle
 from daangn_ext.rest_scheduler import _rand_between
-from daangn.notify import TelegramSender, SheetWriter, match_line
+from daangn.notify import TelegramSender, SheetWriter, match_line, item_block
 
 
 # ── 휴식 안전 범위 (GUI/외부 cfg 값이 위험해도 여기서 강제 고정) ──
@@ -360,17 +360,23 @@ class SweepEngine:
     # ── 알림 ──
     def notify(self, region, article, price, changed=None):
         title = article.get("title", ""); url = article.get("href", "")
+        # 로그(GUI)는 한 줄 요약, 텔레그램은 매물 블록 — 받는 사람 문구는 한 곳(item_block).
         if changed is not None:
             msg = (f"💱 가격변동 {changed:,}→{price:,}원\n"
                    f"{title[:50]}\n📍 {region} · 지역 훑기\n{url}")
+            block = item_block("가격 변동", region, title, price, url,
+                               stamp=article.get("boostedAt"), stamp_label="끌올",
+                               old_price=changed)
         else:
-            # 앱 알림과 같은 모양으로 보낸다 — 받는 사람에게는 한 방이다.
             _, rule = self._rules_now().verdict(title, price,
                                                 article.get("content") or "")
             msg = match_line(rule.label() if rule else "",
                              title, price, region, source="지역 훑기", url=url)
+            block = item_block("신규 매물", region, title, price, url,
+                               stamp=article.get("createdAt") or article.get("boostedAt"),
+                               stamp_label="등록")
         self._log(msg)
-        self._tg.enqueue(msg)
+        self._tg.enqueue_item(block)
         self._sheet_writer.enqueue_row(
             [datetime.now().strftime("%Y-%m-%d %H:%M"),
              region, title, price, url,

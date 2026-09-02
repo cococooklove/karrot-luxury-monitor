@@ -7,14 +7,18 @@
     바로 걸린다 → enqueue/flush 로 묶어 보낸다(메시지당 최대 3900자).
   - 구글시트도 동일. append_row(1행 1콜) → append_rows(N행 1콜).
 """
+import html as _html
 import json
 import os
 import time
+from datetime import datetime as _dt
 
 TG_API = "https://api.telegram.org/bot{token}/sendMessage"
 TG_MAX_CHARS = 3900          # 텔레그램 본문 한도 4096 - 여유
 TG_MIN_INTERVAL = 3.0        # 같은 방 연속 전송 최소 간격(초). 그룹 한도 ~20msg/min
 TG_QUEUE_SOFT_CAP = 40       # 큐가 이만큼 쌓이면 호출측 flush 안 기다리고 자동 전송
+STAMP_FMT = "%m/%d %H:%M"    # 매물 블록의 시각 표기 — "09/02 16:01"
+BATCH_HEADER = "{n}개의 상품이 등록되었습니다."   # 묶음 메시지 머리말(매물 블록이 있을 때만)
 
 # 시간당 알림 상한. 설정 실수 하나가 받는 사람의 폰을 못 쓰게 만들면 안 된다.
 #
@@ -41,6 +45,100 @@ def match_line(keyword, title, price, region, source="", account="", url=""):
     tail = " · ".join(x for x in (region or "-", source, account) if x)
     return (f"🎯 [{keyword or ''}] {(title or '')[:50]}\n"
             f"💰 {price_s} · 📍 {tail}\n{url or ''}")
+
+
+def esc(s) -> str:
+    """텔레그램 HTML 모드용 이스케이프. 제목에 '<' 하나만 있어도 400 이라 전부 거친다."""
+    return _html.escape("" if s is None else str(s), quote=True)
+
+
+def fmt_price(price) -> str:
+    """260000 / '260000' / '1,900,000원' → '260,000원'. 0·빈값은 '-'."""
+    if isinstance(price, bool):
+        return str(price)
+    if isinstance(price, (int, float)):
+        return f"{int(price):,}원" if price else "-"
+    s = str(price or "").strip()
+    digits = s.replace(",", "")
+    if digits.isdigit():
+        n = int(digits)
+        return f"{n:,}원" if n else "-"
+    return s or "-"
+
+
+def fmt_stamp(ts) -> str:
+    """epoch 초 / ISO 문자열 / datetime → '09/02 16:01'(현지 시각). 못 읽으면 ''.
+
+    당근 응답의 publishedAt 은 'Z' 가 붙은 UTC 로 온다 — 그대로 찍으면 9시간 어긋난다."""
+    try:
+        if ts is None or ts == "" or ts == 0:
+            return ""
+        if isinstance(ts, _dt):
+            d = ts
+        elif isinstance(ts, (int, float)):
+            d = _dt.fromtimestamp(float(ts))
+        else:
+            s = str(ts).strip()
+            if s.replace(".", "", 1).isdigit():
+                d = _dt.fromtimestamp(float(s))
+            else:
+                d = _dt.fromisoformat(s.replace("Z", "+00:00"))
+        if d.tzinfo is not None:
+            d = d.astimezone()
+        return d.strftime(STAMP_FMT)
+    except (ValueError, OverflowError, OSError, TypeError):
+        return ""
+
+
+def item_block(kind, region, title, price, url, stamp=None, stamp_label="등록",
+               old_price=None):
+    """텔레그램 매물 1건 블록(HTML). 신규·가격변동·워치 이벤트가 같은 모양을 쓴다.
+
+        [신규 매물]
+        서울특별시 중구 장충동1가
+        루이비통/ 남여공용 모노그램 지퍼 오거나이저 중지갑
+        260,000원
+        [등록: 09/02 16:01]
+        링크                      ← 누르면 매물로 간다
+
+    가격변동은 가격 줄이 '600,000원 -> 500,000원', 시각 표시가 '[끌올: …]' 이 된다.
+    묶음 머리말("N개의 상품이 등록되었습니다.")은 TelegramSender 가 묶음당 한 번
+    붙인다 — 여기서 붙이면 묶음 안에 N번 나온다."""
+    if old_price is not None:
+        price_line = f"{esc(fmt_price(old_price))} -&gt; {esc(fmt_price(price))}"
+    else:
+        price_line = esc(fmt_price(price))
+    lines = [f"[{esc(kind)}]", esc(region or "-"), esc(title or ""), price_line]
+    st = fmt_stamp(stamp)
+    if st:
+        lines.append(f"[{esc(stamp_label)}: {st}]")
+    lines.append(f'<a href="{esc(url)}">링크</a>' if url else "링크 없음")
+    return "\n".join(lines)
+
+
+_WATCH_KIND = {
+    "entered_range": "가격 변동", "price_down": "가격 변동", "price_up": "가격 변동",
+    "republished": "끌올", "sold": "판매완료", "deleted": "삭제됨",
+}
+
+
+def watch_event_block(e) -> str:
+    """워치리스트 이벤트 1건 → item_block. 모르는 종류는 ''."""
+    e = e or {}
+    kind = e.get("kind")
+    label = _WATCH_KIND.get(kind)
+    if not label:
+        return ""
+    title = e.get("title") or e.get("id") or ""
+    if kind in ("price_down", "price_up", "entered_range"):
+        return item_block(label, e.get("region"), title, e.get("new"), e.get("url"),
+                          stamp=e.get("published_at") or e.get("at"),
+                          stamp_label="끌올", old_price=e.get("old"))
+    if kind == "republished":
+        return item_block(label, e.get("region"), title, e.get("price"), e.get("url"),
+                          stamp=e.get("published_at") or e.get("at"), stamp_label="끌올")
+    return item_block(label, e.get("region"), title, e.get("price"), e.get("url"),
+                      stamp=e.get("at"), stamp_label="확인")
 
 _TG_HINT = {
     400: "chat_id 가 잘못됐거나 메시지 형식 오류",
@@ -94,10 +192,10 @@ class TelegramSender:
         if now - win["start"] >= TG_CAP_WINDOW:
             # 창이 바뀐다. 직전 창에서 눌린 게 있으면 여기서 한 번 알린다.
             if self._suppressed:
-                self._q.append(
+                self._q.append((esc(
                     f"⚠️ 알림 상한({self.hourly_cap}건/시간)에 걸려 지난 1시간 동안 "
                     f"{self._suppressed}건을 보내지 않았습니다. 감시 범위나 조건을 "
-                    "좁히세요 — 이대로면 진짜 급매가 묻힙니다.")
+                    "좁히세요 — 이대로면 진짜 급매가 묻힙니다."), 0))
                 self._suppressed = 0
             win["start"] = now
             win["sent"] = 0
@@ -105,7 +203,16 @@ class TelegramSender:
         return win["sent"] < self.hourly_cap
 
     def enqueue(self, text):
-        """전송 대기열에 넣는다. 미설정이면 조용히 버림(설정 자체가 선택)."""
+        """일반 문구를 대기열에 넣는다. 미설정이면 조용히 버림(설정 자체가 선택).
+
+        본문은 HTML 모드로 나가므로 여기서 이스케이프한다 — 호출측이 신경 쓸 일 없게."""
+        self._enqueue(esc(text), 0)
+
+    def enqueue_item(self, block):
+        """매물 블록(item_block 결과, HTML 완성본) 1건. 묶음 머리말의 건수에 센다."""
+        self._enqueue(str(block), 1)
+
+    def _enqueue(self, text, n_items):
         if not self.enabled:
             return
         if not self._cap_check():
@@ -116,7 +223,7 @@ class TelegramSender:
                           "이번 창의 남은 알림은 묶어서 요약합니다")
             return
         _CAP_WINDOWS[self._cap_key]["sent"] += 1
-        self._q.append(str(text))
+        self._q.append((text, n_items))
         if len(self._q) >= TG_QUEUE_SOFT_CAP:
             self.flush()
 
@@ -124,25 +231,36 @@ class TelegramSender:
         return len(self._q)
 
     def _chunks(self):
-        """대기열 → 3900자 이하 묶음. 단건이 한도를 넘으면 잘라 보낸다."""
-        chunk = ""
+        """대기열 → (본문, 매물건수) 3900자 이하 묶음. 단건이 한도를 넘으면 잘라 보낸다.
+
+        큐 항목은 (text, n_items) 튜플. 맨 문자열도 받는다(테스트가 직접 넣는다)."""
+        chunk, n = "", 0
         while self._q:
-            msg = self._q.pop(0)
+            entry = self._q.pop(0)
+            msg, k = entry if isinstance(entry, tuple) else (str(entry), 0)
             while len(msg) > TG_MAX_CHARS:
                 if chunk:
-                    yield chunk
-                    chunk = ""
-                yield msg[:TG_MAX_CHARS]
-                msg = msg[TG_MAX_CHARS:]
+                    yield chunk, n
+                    chunk, n = "", 0
+                yield msg[:TG_MAX_CHARS], k
+                msg, k = msg[TG_MAX_CHARS:], 0
             if not chunk:
-                chunk = msg
+                chunk, n = msg, k
             elif len(chunk) + 2 + len(msg) <= TG_MAX_CHARS:
                 chunk += "\n\n" + msg
+                n += k
             else:
-                yield chunk
-                chunk = msg
+                yield chunk, n
+                chunk, n = msg, k
         if chunk:
-            yield chunk
+            yield chunk, n
+
+    @staticmethod
+    def with_header(text, n_items):
+        """매물 블록이 든 묶음에만 머리말을 붙인다. 안내문·테스트 문구는 그대로."""
+        if n_items <= 0:
+            return text
+        return BATCH_HEADER.format(n=n_items) + "\n\n" + text
 
     def flush(self, deadline=None, ignore_stop=False):
         """대기열 전부 전송. (성공묶음수, 실패묶음수) 반환.
@@ -161,12 +279,12 @@ class TelegramSender:
             self.should_stop = lambda: False
         sent = failed = 0
         try:
-            for chunk in self._chunks():
+            for chunk, n in self._chunks():
                 if self.should_stop() or (deadline and time.monotonic() > deadline):
-                    self._q.insert(0, chunk)
+                    self._q.insert(0, (chunk, n))
                     self._log(f"[텔레그램] 시간 초과로 {len(self._q)}건 미전송 (다음 사이클에 재전송)")
                     break
-                ok, err = self.send(chunk)
+                ok, err = self.send(self.with_header(chunk, n))
                 if ok:
                     sent += 1
                 else:
@@ -187,6 +305,7 @@ class TelegramSender:
         return requests.post(
             TG_API.format(token=self.token),
             json={"chat_id": self.chat, "text": text,
+                  "parse_mode": "HTML",          # '링크' 를 눌러서 가는 링크로
                   "disable_web_page_preview": True},
             impersonate="chrome", timeout=timeout)
 
@@ -254,7 +373,7 @@ class TelegramSender:
             return False, "봇 토큰이 비어 있음"
         if not self.chat:
             return False, "chat_id(방)가 비어 있음"
-        ok, err = self.send("✅ 당근 모니터 알림 테스트 — 이 메시지가 보이면 설정 정상입니다.",
+        ok, err = self.send(esc("✅ 당근 모니터 알림 테스트 — 이 메시지가 보이면 설정 정상입니다."),
                             retries=1)
         return (True, "텔레그램 전송 성공") if ok else (False, err)
 

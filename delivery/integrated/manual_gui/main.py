@@ -251,6 +251,19 @@ def watch_event_lines(events):
     return out
 
 
+def _enqueue_watch_blocks(tg, events, lines):
+    """워치 이벤트를 텔레그램 매물 블록으로 적재. 이벤트가 없으면(옛 호출) 줄 요약으로."""
+    from daangn.notify import watch_event_block
+    n = 0
+    for e in events or []:
+        block = watch_event_block(e)
+        if block:
+            tg.enqueue_item(block)
+            n += 1
+    if not n and lines:
+        tg.enqueue("📉 가격변동\n" + "\n".join(lines))
+
+
 def watch_sweep_budget(active, interval_sec):
     """이번 스윕에서 조회할 최대 건수.
 
@@ -1215,17 +1228,12 @@ class _NotifyThread(QtCore.QThread):
         tok, chat = self.notify.get("tg_token"), self.notify.get("tg_chat")
         if tok and chat:
             try:
-                from daangn.notify import TelegramSender
+                from daangn.notify import TelegramSender, item_block
                 tg = TelegramSender(tok, chat, log=emit)
                 for m in self.items:
-                    from daangn.notify import match_line
-                    line = match_line(
-                        m.get("_rule") or m.get("keyword") or "",
-                        m.get("title"), m.get("price"), m.get("region"),
-                        source="앱 알림",
-                        account=f"계정 {m.get('_account')}" if m.get("_account") else "",
-                        url=m.get("url"))
-                    tg.enqueue(line)
+                    tg.enqueue_item(item_block(
+                        "신규 매물", m.get("region"), m.get("title"), m.get("price"),
+                        m.get("url"), stamp=m.get("time"), stamp_label="등록"))
                 tg.flush()
                 emit(f"[텔레그램] {len(self.items)}건 전송")
             except Exception as e:
@@ -1253,10 +1261,11 @@ class _WatchNotifyThread(QtCore.QThread):
     """워치리스트 변동 알림 — 텔레그램 + 구글시트. GUI 안 멈춤."""
     log = QtCore.pyqtSignal(str)
 
-    def __init__(self, notify, lines):
+    def __init__(self, notify, lines, events=None):
         super().__init__()
         self.notify = notify or {}
-        self.lines = list(lines)
+        self.lines = list(lines)          # 로그·구글시트용 한 줄 요약
+        self.events = list(events or [])  # 텔레그램 블록용 원본 이벤트
 
     def run(self):
         import time as _t
@@ -1268,7 +1277,7 @@ class _WatchNotifyThread(QtCore.QThread):
             try:
                 from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=emit)
-                tg.enqueue("📉 가격변동\n" + "\n".join(self.lines))
+                _enqueue_watch_blocks(tg, self.events, self.lines)
                 tg.flush()
                 emit(f"[텔레그램] 변동 {len(self.lines)}건 전송")
             except Exception as e:
@@ -3708,7 +3717,7 @@ class MainWindow(QMainWindow):
         nt = getattr(self, "_notify", {}) or {}
         if not ((nt.get("tg_token") and nt.get("tg_chat")) or nt.get("sheet_url")):
             return
-        th = _WatchNotifyThread(getattr(self, "_notify", {}) or {}, lines)
+        th = _WatchNotifyThread(getattr(self, "_notify", {}) or {}, lines, events)
         th.log.connect(self._alog)
         th.finished.connect(lambda t=th: self._watch_threads.remove(t)
                             if t in self._watch_threads else None)
@@ -6289,12 +6298,9 @@ def _run_headless():
                 from daangn.notify import TelegramSender
                 tg = TelegramSender(tok, chat, log=log)
                 for m in items:
-                    tg.enqueue(match_line(
-                        m.get("_rule") or m.get("keyword") or "",
-                        m.get("title"), m.get("price"), m.get("region"),
-                        source="앱 알림",
-                        account=f"계정 {m.get('_account')}" if m.get("_account") else "",
-                        url=m.get("url")))
+                    tg.enqueue_item(item_block(
+                        "신규 매물", m.get("region"), m.get("title"), m.get("price"),
+                        m.get("url"), stamp=m.get("time"), stamp_label="등록"))
                 tg.flush(); log(f"[텔레그램] {len(items)}건 전송")
             except Exception as e:
                 log(f"[텔레그램] 실패: {str(e)[:60]}")
@@ -6311,16 +6317,16 @@ def _run_headless():
             except Exception as e:
                 log(f"[구글시트] 실패: {str(e)[:60]}")
 
-    def _notify_lines(lines, nt):
-        """워치리스트 변동 줄 전송 — 텔레그램 + 구글시트."""
+    def _notify_lines(lines, nt, events=None):
+        """워치리스트 변동 전송 — 텔레그램(매물 블록) + 구글시트(한 줄 요약)."""
         if not lines:
             return
         tok, chat = nt.get("tg_token"), nt.get("tg_chat")
         if tok and chat:
             try:
-                from daangn.notify import TelegramSender
+                from daangn.notify import TelegramSender, item_block
                 tg = TelegramSender(tok, chat, log=log)
-                tg.enqueue("📉 가격변동\n" + "\n".join(lines))
+                _enqueue_watch_blocks(tg, events, lines)
                 tg.flush()
                 log(f"[텔레그램] 변동 {len(lines)}건 전송")
             except Exception as e:
@@ -6565,14 +6571,15 @@ def _run_headless():
                                                 WATCH_SWEEP_INTERVAL)
                     if budget:
                         watch_budget.reload()
-                        lines = watch_event_lines(mark_range_entries(
+                        events = mark_range_entries(
                             watch_tracker.sweep(watch_budget.next, budget),
-                            watch_store, router, rules=alert_rules.get()))
+                            watch_store, router, rules=alert_rules.get())
+                        lines = watch_event_lines(events)
                         if getattr(watch_tracker, "last_sweep_exhausted", False):
                             log("[가격추적] 계정 예산 소진 — 남은 대상은 다음 회차로")
                         if lines:
                             log("[가격추적] " + " / ".join(lines))
-                            _notify_lines(lines, _notify_cfg())
+                            _notify_lines(lines, _notify_cfg(), events)
                 except Exception as e:
                     log(f"[가격추적] 스윕 실패: {str(e)[:120]}")
             if once:
