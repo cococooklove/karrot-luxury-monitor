@@ -2180,6 +2180,22 @@ class MainWindow(QMainWindow):
         fl.addLayout(r1)
         v.addWidget(form)
 
+        # 진행 표시 — 등록은 '계정 수 × 키워드 수' 만큼 요청이라 20초 넘게 걸린다.
+        # 그동안 화면이 아무 말도 안 하면 사용자는 실패한 줄 알고 다시 누르거나
+        # '전체 삭제'로 손을 뻗는다(실서버 2026-09-02 에 등록 21건이 그렇게 날아갔다).
+        self.alertBusyRow = QtWidgets.QWidget(w)
+        _bh = QtWidgets.QHBoxLayout(self.alertBusyRow)
+        _bh.setContentsMargins(0, 0, 0, 0)
+        self.alertBusyBar = QtWidgets.QProgressBar(self.alertBusyRow)
+        self.alertBusyBar.setRange(0, 0)          # 진행률을 모른다 — 무한 막대
+        self.alertBusyBar.setMaximumWidth(160)
+        self.alertBusyBar.setTextVisible(False)
+        self.alertBusyLabel = QtWidgets.QLabel("", self.alertBusyRow)
+        _bh.addWidget(self.alertBusyBar)
+        _bh.addWidget(self.alertBusyLabel, 1)
+        self.alertBusyRow.setVisible(False)
+        v.addWidget(self.alertBusyRow)
+
         # 커버 동네 정보
         self.alertSubLabel = QtWidgets.QLabel("동네 정보: (새로고침을 누르세요)")
         v.addWidget(self.alertSubLabel)
@@ -2892,7 +2908,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _alert_run(self, fn, on_done=None, queue=False) -> bool:
+    def _alert_run(self, fn, on_done=None, queue=False, label="처리 중") -> bool:
         """작업 하나를 워커로 돌린다. **시작했거나 대기에 넣었으면 True.**
 
         예전에는 바쁠 때 아무 값도 안 돌려줬고, 부르는 쪽은 그걸 안 봤다. 엑셀
@@ -2909,10 +2925,12 @@ class MainWindow(QMainWindow):
             if not queue:
                 self.alert("이전 작업 진행 중 — 잠시 후")
                 return False
-            self._alert_pending = (fn, on_done)
+            self._alert_pending = (fn, on_done, label)
             self._alog("[대기] 이전 작업이 끝나면 이어서 실행합니다")
+            self._alert_busy(f"{label} — 앞 작업이 끝나면 시작합니다")
             return True
         self._alog("── 작업 시작 ──")
+        self._alert_busy(f"{label}… 잠시만 기다리세요")
         self._alert_worker = _AlertWorker(fn)
         self._alert_worker.log.connect(lambda m: self._alog(m))
         if on_done:
@@ -2920,6 +2938,21 @@ class MainWindow(QMainWindow):
         self._alert_worker.finished.connect(self._alert_drain)
         self._alert_worker.start()
         return True
+
+    def _alert_busy(self, text):
+        """진행 표시. text 가 비면 감춘다.
+
+        등록·삭제는 '계정 수 × 키워드 수' 만큼 요청이라 20초를 넘긴다. 그동안
+        화면이 조용하면 사용자는 실패한 줄 알고 다시 누르거나 '전체 삭제'로
+        손을 뻗는다 — 실서버에서 등록 21건이 그렇게 사라졌다."""
+        row = getattr(self, "alertBusyRow", None)
+        if row is None:                  # 아직 탭이 안 만들어진 초기화 경로
+            return
+        if text:
+            self.alertBusyLabel.setText(str(text))
+            row.setVisible(True)
+        else:
+            row.setVisible(False)
 
     def _alert_drain(self):
         """앞 작업이 끝났다 — 대기시켜 둔 작업이 있으면 이어서 돌린다.
@@ -2929,12 +2962,13 @@ class MainWindow(QMainWindow):
         그래서 아직 돌고 있으면 조금 뒤에 다시 본다."""
         pend = getattr(self, "_alert_pending", None)
         if not pend:
+            self._alert_busy("")         # 더 할 일이 없다 — 진행 표시를 내린다
             return
         if self._alert_worker and self._alert_worker.isRunning():
             QtCore.QTimer.singleShot(200, self._alert_drain)
             return
         self._alert_pending = None
-        self._alert_run(pend[0], pend[1], queue=True)
+        self._alert_run(pend[0], pend[1], label=pend[2], queue=True)
 
     def _pi(self, s):
         s = (s or "").strip().replace(",", "")
@@ -2961,7 +2995,7 @@ class MainWindow(QMainWindow):
         def job(log):
             res = self._router.add(kw, mn, mx, excl, core_only=co, log=log)
             return {"route": res, "list": self._safe_alert_list(log)}
-        self._alert_run(job, self._alert_route_done)
+        self._alert_run(job, self._alert_route_done, label="키워드 등록 중")
 
     def _safe_alert_list(self, log):
         """현재 계정의 등록 목록. 토큰이 없으면 None — 등록 자체는 이미 끝났다."""
@@ -2991,7 +3025,7 @@ class MainWindow(QMainWindow):
             api = self._alert_api()
             data = api.list(); log(f"등록 {len(data.get('user_keywords') or [])}건")
             return data
-        self._alert_run(job, self._alert_populate)
+        self._alert_run(job, self._alert_populate, label="등록 목록 새로고침 중")
 
     def on_alert_delete(self):
         row = self.alertTable.currentRow()
@@ -3019,7 +3053,7 @@ class MainWindow(QMainWindow):
             api = self._alert_api()
             ok = api.delete(uid); log(f"삭제 {'✓' if ok else '실패'} id={uid}")
             return api.list()
-        self._alert_run(job, self._alert_populate)
+        self._alert_run(job, self._alert_populate, label="키워드 삭제 중")
 
     def on_alert_delete_all(self):
         if QtWidgets.QMessageBox.question(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?") \
@@ -3043,7 +3077,7 @@ class MainWindow(QMainWindow):
             api = self._alert_api()
             n = api.delete_all(log=log); log(f"총 {n}건 삭제")
             return api.list()
-        self._alert_run(job, self._alert_populate)
+        self._alert_run(job, self._alert_populate, label="전체 삭제 중")
 
     def _routes_map(self):
         try:
@@ -3151,7 +3185,7 @@ class MainWindow(QMainWindow):
             matches = api.new_matches()
             log(f"매칭 조회: {len(matches)}건")
             return matches
-        self._alert_run(job, self._match_populate)
+        self._alert_run(job, self._match_populate, label="알림함 확인 중")
 
     def _set_sleep_block(self, block):
         """자동폴링 중 PC 절전 차단(Windows). 절전 걸리면 감시 멈추는 함정 방지.
@@ -3388,7 +3422,7 @@ class MainWindow(QMainWindow):
         def job(log):
             res = self._router.add_many(LUXURY_BRANDS, mn, mx, core_only=co, log=log)
             return {"routes": res, "list": self._safe_alert_list(log)}
-        self._alert_run(job, self._alert_routes_done)
+        self._alert_run(job, self._alert_routes_done, label="키워드 일괄 등록 중")
 
     @staticmethod
     def _condition_groups(conditions):
@@ -3472,13 +3506,13 @@ class MainWindow(QMainWindow):
                     enabled=bool(self._load_alert_settings().get("sweep_mirror_app")))
             return self._alert_fleet().poll_all(log=log, core_only=co)
 
-        self._alert_run(job, self._match_populate)
+        self._alert_run(job, self._match_populate, label="자동 폴링 중")
 
     def on_alert_poll_all(self):
         co = self._core_only()
         def job(log):
             return self._alert_fleet().poll_all(log=log, core_only=co)
-        self._alert_run(job, self._match_populate)
+        self._alert_run(job, self._match_populate, label="전 계정 알림함 확인 중")
 
     def on_alert_coverage(self):
         co = self._core_only()
@@ -3489,7 +3523,7 @@ class MainWindow(QMainWindow):
             for code, name, cnt in cov:
                 log(f"  {code}: {name} ({cnt}지역)")
             return cov
-        self._alert_run(job, self._update_dashboard)
+        self._alert_run(job, self._update_dashboard, label="커버 동네 조회 중")
 
     def _update_dashboard(self, cov):
         if cov is None:
@@ -4188,7 +4222,8 @@ class MainWindow(QMainWindow):
             # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
             # 여기서 반환값을 안 보고 성공 메시지를 띄운 것이 "엑셀을 넣어도
             # 반영이 안 된다"의 정체였다.
-            if not self._alert_run(job, self._alert_routes_done, queue=True):
+            if not self._alert_run(job, self._alert_routes_done, queue=True,
+                                   label="엑셀 조건 배정 중"):
                 QtWidgets.QMessageBox.warning(
                     dlg, "실패", "지금은 배정을 시작할 수 없습니다."
                     " 로그를 확인하고 다시 시도하세요.")

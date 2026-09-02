@@ -85,6 +85,7 @@ class _Fake:
     def __init__(self):
         self.logs = []
         self.alerts = []
+        self.busy = []                   # 진행 표시가 켜지고 꺼진 자취
         self._alert_worker = None
         self._router = None
 
@@ -94,12 +95,15 @@ class _Fake:
     def alert(self, s):
         self.alerts.append(s)
 
+    def _alert_busy(self, text):
+        self.busy.append(text)
+
     _alert_run = m.MainWindow._alert_run
     _alert_drain = m.MainWindow._alert_drain
 
 
-def run_and_pump(f, fn, on_done=None, queue=False):
-    started = f._alert_run(fn, on_done, queue=queue)
+def run_and_pump(f, fn, on_done=None, queue=False, label="처리 중"):
+    started = f._alert_run(fn, on_done, queue=queue, label=label)
     app.processEvents()
     return started
 
@@ -182,6 +186,27 @@ app.processEvents()
 ck("라우터 배정이 남아 있다", len(f._router.routes()) == 2,
    str([r["keyword"] for r in f._router.routes()]))
 ck("바쁘다고 알린다", any("진행 중" in a for a in f.alerts), str(f.alerts))
+
+print("\n=== 7. 진행 표시가 켜지고, 끝나면 꺼진다 ===")
+f = _Fake()
+run_and_pump(f, lambda log: "A", label="엑셀 조건 배정 중")
+ck("시작할 때 켜진다", any("엑셀 조건 배정 중" in (x or "") for x in f.busy),
+   str(f.busy))
+f._alert_worker.finish()
+for _ in range(40):
+    app.processEvents()
+    if "" in f.busy:
+        break
+    QtCore.QThread.msleep(10)
+ck("끝나면 꺼진다", f.busy[-1] == "", str(f.busy))
+
+print("\n=== 8. 대기 중에도 상태를 알린다 ===")
+f = _Fake()
+run_and_pump(f, lambda log: "A", label="자동 폴링 중")
+run_and_pump(f, lambda log: "B", label="엑셀 조건 배정 중", queue=True)
+ck("대기 중이라고 말한다",
+   any("엑셀 조건 배정 중" in (x or "") and "앞 작업" in (x or "") for x in f.busy),
+   str(f.busy))
 
 bad = [n for n, ok in R if not ok]
 print(f"\n{len(R) - len(bad)}/{len(R)} PASS")
