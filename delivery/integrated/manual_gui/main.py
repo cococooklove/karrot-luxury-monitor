@@ -2220,10 +2220,53 @@ class MainWindow(QMainWindow):
         "accounts": "alertFleetBtn",    # 계정 수 → 같은 팜 현황 다이얼로그
         "coverage": "alertCoverMode",   # 커버리지 → 전국/핵심 커버 모드
         "poll": "alertPollInterval",    # 다음 폴링 → 폴링 주기
+        "rules": "rulesTable",          # 조건 수 → 조건표 자체
     }
 
     TAB_HELP = ("키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신.\n"
                 "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국.")
+
+    RULES_PREVIEW = 200      # 수백 줄을 다 그리면 창이 뜨는 데만 오래 걸린다
+
+    def _refresh_rules_view(self):  # noqa: C901
+        """조건표 요약·표를 파일 상태에 맞춘다.
+
+        파일이 밖에서 바뀌어도(엑셀을 새로 넣거나 서버에서 교체) 캐시가
+        mtime 으로 잡는다. 화면 숫자는 그 뒤에 따라와야 하므로 폴링 틱마다
+        한 번 부른다."""
+        from daangn_ext.alert_rules import brands
+        table = self._alert_rules.get()
+        rules = table.rules
+        self.rulesSummary.setText(table.detail())
+        shown = rules[:self.RULES_PREVIEW]
+        self.rulesTable.setRowCount(len(shown))
+        for r, rule in enumerate(shown):
+            prod = rule.product or ("" if rule.keyword.strip() == rule.brand_name()
+                                    else rule.keyword)
+            cells = [rule.brand_name(), prod,
+                     f"{rule.min_price:,}" if rule.min_price else "",
+                     f"{rule.max_price:,}" if rule.max_price else "",
+                     ", ".join(rule.exclude)]
+            for c, val in enumerate(cells):
+                self.rulesTable.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
+        _hh = self.rulesTable.horizontalHeader()
+        for c in range(len(self.RULE_COLS)):
+            _hh.setSectionResizeMode(
+                c, QtWidgets.QHeaderView.ResizeMode.Stretch if c == 1
+                else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        if len(rules) > len(shown):
+            self.rulesSummary.setText(
+                table.detail() + f"    ·    아래 표에는 앞 {len(shown)}줄만 보입니다")
+        self._set_chip("rules",
+                       f"조건 {len(rules)}" if rules else "조건 없음",
+                       "ok" if rules else "off")
+        # 접혀 있어도 무엇이 걸려 있는지는 보여야 한다 — 섹션 제목이 그 자리다.
+        box = getattr(self, "condBox", None)
+        if box is not None:
+            n_b = len(brands(rules)) if rules else 0
+            box._baseTitle = (f"감시 조건 · 조건 {len(rules)}개 · 브랜드 {n_b}개"
+                              if rules else "감시 조건 · 없음 — 전부 알립니다")
+            self._sync_box_visible(box, box.isChecked())
 
     def _sync_box_visible(self, box, on):
         """체크형 QGroupBox 는 체크를 풀어도 자식을 '비활성'으로만 만든다.
@@ -2329,7 +2372,8 @@ class MainWindow(QMainWindow):
         # 고급 패널 항목까지 펼쳐서 데려간다.
         self._chips = {}
         for key, text in (("token", "토큰 -"), ("accounts", "계정 -"),
-                          ("coverage", "커버리지 -"), ("poll", "다음폴링 -")):
+                          ("coverage", "커버리지 -"), ("poll", "다음폴링 -"),
+                          ("rules", "조건 -")):
             chip = QtWidgets.QPushButton(text)
             chip.setObjectName("statChip")
             chip.setFlat(True)
@@ -2366,7 +2410,27 @@ class MainWindow(QMainWindow):
         r1.addWidget(self.alertRulesBtn)
         r1.addStretch(1); r1.addWidget(self.alertRefreshBtn)
         fl.addLayout(r1)
-        cond_v.addWidget(form)
+
+        # ── 감시 조건: 클라가 넣은 엑셀이 그대로 보여야 한다 ──
+        # 예전에는 이 자리에 '등록 표'(당근에 올라간 브랜드)만 있었다. 조건
+        # 수백 줄을 넣어도 화면에는 브랜드 20줄뿐이라 안 들어간 것처럼 보였다.
+        self.rulesSummary = QtWidgets.QLabel("조건 없음")
+        self.rulesSummary.setWordWrap(True)
+        self.rulesSummary.setStyleSheet("font-size:14px; font-weight:700; color:#3A342B;")
+        cond_v.addWidget(self.rulesSummary)
+        self.rulesTable = QtWidgets.QTableWidget(0, len(self.RULE_COLS), w)
+        self.rulesTable.setHorizontalHeaderLabels(self.RULE_COLS)
+        self.rulesTable.verticalHeader().setVisible(False)
+        self.rulesTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.rulesTable.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rulesTable.setShowGrid(False)
+        self.rulesTable.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.rulesTable.setMinimumHeight(260)
+        cond_v.addWidget(self.rulesTable, 1)
+        _rb = QtWidgets.QHBoxLayout()
+        _rb.addWidget(self.alertRulesBtn); _rb.addStretch(1)
+        cond_v.addLayout(_rb)
 
         # 진행 표시 — 등록은 '계정 수 × 키워드 수' 만큼 요청이라 20초 넘게 걸린다.
         # 그동안 화면이 아무 말도 안 하면 사용자는 실패한 줄 알고 다시 누르거나
@@ -2385,7 +2449,6 @@ class MainWindow(QMainWindow):
 
         # 커버 동네 정보
         self.alertSubLabel = QtWidgets.QLabel("동네 정보: (새로고침을 누르세요)")
-        cond_v.addWidget(self.alertSubLabel)
 
         # 등록 목록
         self.alertTable = QtWidgets.QTableWidget(0, len(ALERT_COLS), w)
@@ -2405,7 +2468,6 @@ class MainWindow(QMainWindow):
         # id 는 서버 내부 식별자다 — 사람이 읽을 값이 아니다. 열은 남긴다
         # (인덱스 상수와 셀 생성 함수가 쓴다). 화면에서만 감춘다.
         self.alertTable.setColumnHidden(ALERT_COL_ID, True)
-        cond_v.addWidget(self.alertTable, 1)
 
         r2 = QtWidgets.QHBoxLayout()
         self.alertDelBtn = QtWidgets.QPushButton("선택 삭제")
@@ -2413,7 +2475,6 @@ class MainWindow(QMainWindow):
         # 그렇게 날아갔다(2026-09-02).
         self.alertDelAllBtn = QtWidgets.QPushButton("전체 삭제")
         r2.addWidget(self.alertDelBtn); r2.addStretch(1)
-        cond_v.addLayout(r2)
 
         # ── 고급 패널에 들어갈 위젯(진단·튜닝) ──
         self.alertPollBtn = QtWidgets.QPushButton("지금 한번 확인")
@@ -2480,6 +2541,14 @@ class MainWindow(QMainWindow):
         a2.addWidget(self.alertBootChk); a2.addWidget(self.alertCrashChk)
         a2.addWidget(self.alertNightChk); a2.addStretch(1)
         av.addLayout(a2)
+
+        # 등록 상태 — 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
+        # 조건과 같은 자리에 두면 둘을 같은 것으로 읽는다.
+        av.addWidget(QtWidgets.QLabel("── 당근에 등록된 키워드 ──"))
+        av.addWidget(form)
+        av.addWidget(self.alertSubLabel)
+        av.addWidget(self.alertTable, 1)
+        av.addLayout(r2)
 
         av.addWidget(self._build_sweep_settings())
         # 체크 해제는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨겨야 하고,
@@ -2664,6 +2733,7 @@ class MainWindow(QMainWindow):
             if getattr(self, "_mode_cfg", {}).get("background", True):
                 QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
+        self._refresh_rules_view()
         return w
 
     _CHIP_COLORS = {"ok": ("#F7F5F1", "#3A342B", "#DDD6C9"),
@@ -2708,12 +2778,19 @@ class MainWindow(QMainWindow):
         target = getattr(self, self.CHIP_TARGETS.get(key) or "", None)
         if target is None:
             return False
-        if not self.advancedBox.isChecked():
-            self.advancedBox.setChecked(True)       # toggled → 자식 표시
+        # 목적지가 어느 섹션에 있든 그 섹션을 편다 — '고급' 하나만 펴던 동안
+        # 조건표로 가는 칩은 접힌 섹션 뒤로 데려가고 끝났다.
+        section = self.advancedBox
+        for box in (self.condBox, self.dashBox, self.logBox, self.advancedBox):
+            if box is not None and target in box.findChildren(QtWidgets.QWidget):
+                section = box
+                break
+        if not section.isChecked():
+            section.setChecked(True)                # toggled → 자식 표시
         # 방금 펼친 위젯은 아직 좌표가 없다 — 레이아웃을 먼저 확정시켜야
         # ensureWidgetVisible 이 옛 자리로 스크롤하지 않는다.
-        parent_layout = self.advancedBox.parentWidget().layout() \
-            if self.advancedBox.parentWidget() else None
+        parent_layout = section.parentWidget().layout() \
+            if section.parentWidget() else None
         if parent_layout is not None:
             parent_layout.activate()
         area = self._enclosing_scroll(target)
@@ -3267,11 +3344,25 @@ class MainWindow(QMainWindow):
         self._alert_run(job, self._alert_populate, label="키워드 삭제 중")
 
     def on_alert_delete_all(self):
-        if not ask_yes_no(self, "전체 삭제", "등록된 키워드를 모두 삭제할까요?",
-                          "앱 등록과 라우터 배정이 함께 지워집니다."
-                          " 다시 넣으려면 [엑셀로 조건 넣기]를 새로 눌러야 합니다.",
-                          danger=True):
+        # 삭제 경로는 하나여야 한다. 조건표와 등록을 따로 지우게 두면 조건만
+        # 지운 반쪽 상태가 생기고, 그때는 브랜드 전 매물이 알림으로 쏟아진다.
+        n_rules = len(self._alert_rules.get())
+        n_reg = len(self._router.routes()) if self._router else 0
+        if not ask_yes_no(
+                self, "전체 삭제", "감시를 처음 상태로 되돌릴까요?",
+                f"· 조건 {n_rules}줄이 지워집니다\n"
+                f"· 당근에 등록된 키워드 {n_reg}개가 해제됩니다\n"
+                "· 되돌릴 수 없습니다 — 엑셀을 다시 넣어야 합니다",
+                danger=True):
             return
+        try:
+            from daangn_ext.alert_rules import RuleTable as _RT
+            os.makedirs(os.path.dirname(ALERT_RULES_FILE), exist_ok=True)
+            _RT().save(ALERT_RULES_FILE)
+            self._refresh_rules_view()
+            self._alog(f"[조건표] 조건 {n_rules}줄을 지웠습니다")
+        except Exception as e:
+            self._alog(f"[조건표] 조건 지우기 실패: {str(e)[:80]}")
         # 워커가 바쁘면 아래 _alert_run 이 거절한다. 그런데 라우터 비우기는 그
         # 앞에서 이미 끝나 있어, 배정만 사라지고 앱 등록은 남는 반쪽 상태가 됐다.
         # 지울 수 없으면 아무것도 건드리지 않는다.
@@ -3649,6 +3740,12 @@ class MainWindow(QMainWindow):
         이전 폴링이 아직 진행 중이면 조용히 스킵(무인: 모달 팝업 금지)."""
         if self._supervisor:
             self._supervisor.retune()
+        # 조건 파일이 밖에서 바뀌었을 수 있다 — 캐시가 mtime 으로 잡고,
+        # 화면 숫자는 여기서 따라간다.
+        try:
+            self._refresh_rules_view()
+        except Exception:
+            pass
         # 스윕 재동기화만 GUI 스레드에 남는다 — QThread 를 만들고 세우는 일이라
         # 워커로 못 옮긴다. 대신 네트워크를 타지 않는다.
         self._resync_search_sweep()
@@ -4390,11 +4487,10 @@ class MainWindow(QMainWindow):
 
         bb = QtWidgets.QHBoxLayout()
         sampleBtn = QtWidgets.QPushButton("샘플 엑셀 저장", dlg)
-        clearBtn = QtWidgets.QPushButton("조건 비우기", dlg)
         loadBtn = QtWidgets.QPushButton("파일 선택해서 불러오기", dlg)
         loadBtn.setObjectName("startBtn")
         closeBtn = QtWidgets.QPushButton("닫기", dlg)
-        bb.addWidget(sampleBtn); bb.addWidget(clearBtn); bb.addStretch(1)
+        bb.addWidget(sampleBtn); bb.addStretch(1)
         bb.addWidget(closeBtn); bb.addWidget(loadBtn)
         v.addLayout(bb)
 
@@ -4415,17 +4511,8 @@ class MainWindow(QMainWindow):
             os.makedirs(os.path.dirname(ALERT_RULES_FILE), exist_ok=True)
             table.save(ALERT_RULES_FILE)
             self._alert_rules.get()          # mtime 캐시 갱신
+            self._refresh_rules_view()
             show_stat()
-
-        def do_clear():
-            if QtWidgets.QMessageBox.question(
-                    dlg, "조건 비우기",
-                    "알림 조건을 모두 지웁니다. 이후 등록 키워드에 걸린 조건으로"
-                    " 돌아갑니다. 등록된 키워드는 그대로 둡니다. 진행할까요?"
-                    ) != QtWidgets.QMessageBox.StandardButton.Yes:
-                return
-            save_table(RuleTable())
-            self._alog("[조건표] 조건표를 비웠습니다 — 등록 조건으로 돌아갑니다")
 
         def confirm(rules, bs, errors) -> bool:
             """적용 전에 무엇이 들어가는지 먼저 보여준다 — 엉뚱한 파일을
@@ -4505,7 +4592,6 @@ class MainWindow(QMainWindow):
                 " 알림은 이 조건표로 거릅니다.")
 
         sampleBtn.clicked.connect(do_sample)
-        clearBtn.clicked.connect(do_clear)
         loadBtn.clicked.connect(do_load)
         closeBtn.clicked.connect(dlg.reject)
         dlg.exec()

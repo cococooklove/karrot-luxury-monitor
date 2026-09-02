@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 
 from .price import parse_price_text
@@ -90,9 +91,32 @@ def _as_int(v) -> int | None:
 class RuleTable:
     rules: list[AlertRule] = field(default_factory=list)
     drop_wanted: bool = True          # 삽니다/구합니다 글 컷
+    applied_at: int = 0               # 적용 시각(epoch). 화면이 "언제 넣은 것"을 말한다
+    source: str = ""                  # 불러온 엑셀 파일 이름
 
     def __len__(self) -> int:
         return len(self.rules)
+
+    def detail(self) -> str:
+        """브랜드 목록과 적용 시각. 줄 수는 섹션 제목이 이미 말한다."""
+        if not self.rules:
+            return "조건 없음 — 브랜드에 걸린 매물을 전부 알립니다"
+        bs = brands(self.rules)
+        head = " · ".join(bs[:6]) + (f" 외 {len(bs) - 6}개" if len(bs) > 6 else "")
+        when = (time.strftime("%m/%d %H:%M", time.localtime(self.applied_at))
+                if self.applied_at else "")
+        return head + (f"    ·    {when} 적용" if when else "")
+
+    def summary(self) -> str:
+        """화면 한 줄 요약. 조건이 없으면 그 사실을 분명히 말한다."""
+        if not self.rules:
+            return "조건 없음 — 브랜드에 걸린 매물을 전부 알립니다"
+        bs = brands(self.rules)
+        head = " · ".join(bs[:3]) + (f" 외 {len(bs) - 3}개" if len(bs) > 3 else "")
+        when = (time.strftime("%m/%d %H:%M", time.localtime(self.applied_at))
+                if self.applied_at else "")
+        return (f"조건 {len(self.rules)}개 · 브랜드 {len(bs)}개 — {head}"
+                + (f"   ({when} 적용)" if when else ""))
 
     def verdict(self, title, price=None, body="") -> tuple[str, AlertRule | None]:
         """(판정, 맞은 룰). 룰이 없으면 (PASS, None) — 아무것도 거르지 않는다."""
@@ -124,10 +148,16 @@ class RuleTable:
     # ── 저장/복원 ──
     def to_json(self) -> str:
         return json.dumps({"rules": [r.to_dict() for r in self.rules],
-                           "drop_wanted": self.drop_wanted},
+                           "drop_wanted": self.drop_wanted,
+                           "applied_at": self.applied_at,
+                           "source": self.source},
                           ensure_ascii=False, indent=1)
 
     def save(self, path) -> None:
+        # 적용 시각은 저장하는 순간이 진실이다 — 화면이 "언제 넣은 조건인지"를
+        # 말해야 클라가 자기가 넣은 그 파일인지 알아본다.
+        if self.rules and not self.applied_at:
+            self.applied_at = int(time.time())
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.to_json())
 
@@ -139,7 +169,9 @@ class RuleTable:
         except (OSError, ValueError):
             return cls()
         return cls(rules=[AlertRule.from_dict(x) for x in (d.get("rules") or [])],
-                   drop_wanted=bool(d.get("drop_wanted", True)))
+                   drop_wanted=bool(d.get("drop_wanted", True)),
+                   applied_at=int(d.get("applied_at") or 0),
+                   source=str(d.get("source") or ""))
 
 
 # ── 엑셀 로더 ──

@@ -171,15 +171,19 @@ if _win is not None:
         _win.advancedBox.setChecked(False)
     # ── 상태칩 → 고급 패널 항목 (설계 §1: 칩 클릭은 해당 항목으로 스크롤) ──
     ck("상태칩 존재",
-       set(getattr(_win, "_chips", {})) == {"token", "accounts", "coverage", "poll"},
+       set(getattr(_win, "_chips", {}))
+       == {"token", "accounts", "coverage", "poll", "rules"},
        str(sorted(getattr(_win, "_chips", {}))))
     ck("칩 목적지가 실재하는 위젯",
        all(getattr(_win, a, None) is not None
            for a in _win.CHIP_TARGETS.values()),
        str(_win.CHIP_TARGETS))
-    ck("칩 목적지는 전부 고급 패널 안",
-       all(getattr(_win, a) in _win.advancedBox.findChildren(_QW.QWidget)
-           for a in _win.CHIP_TARGETS.values()))
+    # 목적지는 접이식 섹션 어딘가에 있으면 된다 — on_chip_clicked 가 그 섹션을
+    # 편다. '고급'에만 있어야 한다고 묶어 두면 조건표로 가는 칩을 못 만든다.
+    _sections = [_win.condBox, _win.dashBox, _win.logBox, _win.advancedBox]
+    ck("칩 목적지는 접이식 섹션 안",
+       all(any(getattr(_win, a) in b.findChildren(_QW.QWidget) for b in _sections)
+           for a in _win.CHIP_TARGETS.values()), str(_win.CHIP_TARGETS))
     ck("탭이 스크롤 영역 안에 있다",
        _win._enclosing_scroll(_win.alertCoverMode) is not None)
     _win.advancedBox.setChecked(False)
@@ -421,16 +425,27 @@ if _win is not None:
        _win.condBox.maximumHeight() < 100, str(_win.condBox.maximumHeight()))
     _win.condBox.setChecked(True)
     # 창을 띄우지 않은 테스트라 isVisible() 은 항상 False 다 — 숨김 플래그를 본다.
-    ck("펼치면 안이 보인다", not _win.alertTable.isHidden()
+    ck("펼치면 안이 보인다", not _win.rulesTable.isHidden()
        and _win.condBox.maximumHeight() > 1000,
-       f"hidden={_win.alertTable.isHidden()} / {_win.condBox.maximumHeight()}")
+       f"hidden={_win.rulesTable.isHidden()} / {_win.condBox.maximumHeight()}")
     _win.condBox.setChecked(False)
     ck("id 열은 감춘다", _win.alertTable.isColumnHidden(m.ALERT_COL_ID))
     # 전체 삭제는 표 옆에 두지 않는다 — 실서버서 등록 21건이 그렇게 날아갔다.
     ck("전체 삭제는 고급 안에",
        _win.alertDelAllBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
-    ck("선택 삭제는 감시 조건 안에",
-       _win.alertDelBtn in _win.condBox.findChildren(_QtW.QPushButton))
+    # 등록 표·삭제는 '시스템이 당근에 올린 결과'다. 클라가 넣은 조건과 같은
+    # 자리에 두면 둘을 같은 것으로 읽는다.
+    ck("등록 표와 삭제는 고급 안에",
+       _win.alertTable in _win.advancedBox.findChildren(_QtW.QWidget)
+       and _win.alertDelBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
+    ck("감시 조건 안에는 조건표가 있다",
+       _win.rulesTable in _win.condBox.findChildren(_QtW.QWidget)
+       and _win.rulesSummary in _win.condBox.findChildren(_QtW.QLabel))
+    ck("조건 수가 섹션 제목에 보인다", "조건" in _win.condBox.title(),
+       _win.condBox.title())
+    ck("조건이 없으면 그 사실을 말한다",
+       "없음" in _win.condBox.title() or "0개" in _win.condBox.title(),
+       _win.condBox.title())
     ck("내부 용어를 화면에서 뺐다",
        "매칭 조회" not in _win.alertPollBtn.text()
        and "슬롯" not in _win.alertResetCapBtn.text(),

@@ -187,6 +187,15 @@ ck("'285만원' 같은 축약가도 읽는다",
    rt.verdict("루이비통 오버더문", "125만원")[0] == HIT)
 _p = tempfile.mktemp(suffix=".json")
 rt.save(_p)
+ck("화면 요약", "조건 4개" in rt.summary() and "브랜드" in rt.summary(),
+   rt.summary())
+ck("조건 없으면 그 사실을 말한다", "없음" in RuleTable().summary()
+   and "없음" in RuleTable().detail(), RuleTable().summary())
+_at = RuleTable(list(rt.rules))
+_ap = tempfile.mktemp(suffix=".json")
+_at.save(_ap)
+ck("적용 시각이 남는다", RuleTable.load(_ap).applied_at > 0
+   and "적용" in RuleTable.load(_ap).detail(), RuleTable.load(_ap).detail())
 ck("저장·복원", len(RuleTable.load(_p)) == len(rt)
    and RuleTable.load(_p).verdict("루이비통 오버더문", 900000)[0] == HIT)
 ck("없는 파일은 빈 테이블", len(RuleTable.load(tempfile.mktemp())) == 0)
