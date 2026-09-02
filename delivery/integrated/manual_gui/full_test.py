@@ -212,6 +212,18 @@ ck("브랜드는 키워드 첫 어절, 처음 순서로 중복 제거",
 ck("브랜드별 끌올일수는 가장 느슨한 값",
    brand_days(_or) == {"루이비통": 7, "샤넬": 14}, str(brand_days(_or)))
 
+# 머리글이 1행이라는 보장이 없다 — 제목·빈 줄이 위에 붙은 파일이 흔하다.
+_titled = [("루이비통 조건표", None, None), (None, None, None),
+           ("키워드", "최소가격", "최대가격"),
+           ("루이비통 나노 노에", 800000, 1300000)]
+_tr, _te = parse_rule_rows(_titled)
+ck("제목·빈 줄이 위에 있어도 머리글을 찾는다",
+   len(_tr) == 1 and _tr[0].row == 4, f"{len(_tr)} / {[r.row for r in _tr]} / {_te}")
+ck("머리글이 아예 없으면 무엇을 해야 할지 말한다",
+   not parse_rule_rows([("품명", "가격"), ("루이비통", 1)])[0]
+   and "샘플" in parse_rule_rows([("품명", "가격")])[1][0],
+   str(parse_rule_rows([("품명", "가격")])[1]))
+
 print("\n=== C. 계정·프록시 저장소 ===")
 from daangn_ext.account_store import AccountStore
 

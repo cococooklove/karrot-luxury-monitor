@@ -4398,7 +4398,7 @@ class MainWindow(QMainWindow):
             box.setText(f"조건 {len(rules)}줄 읽음\n"
                         f"등록할 브랜드 {len(bs)}개: {' · '.join(bs[:8])}"
                         + (" …" if len(bs) > 8 else "") + f"\n{cap_line}"
-                        + (f"\n경고 {len(errors)}건" if errors else ""))
+                        + (f"\n확인할 내용 {len(errors)}건" if errors else ""))
             if errors:
                 box.setDetailedText("\n".join(errors))
             box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Ok
@@ -4448,7 +4448,7 @@ class MainWindow(QMainWindow):
             bs = brands(rules)
             if not confirm(rules, bs, errors):
                 return
-            for msg in errors[:5]:
+            for msg in errors[:8]:
                 self._alog(f"[조건표] {msg}")
             save_table(RuleTable(rules))
             self._alog(f"[조건표] {len(rules)}줄 적용 · 브랜드 {len(bs)}개 등록"

@@ -135,15 +135,40 @@ class RuleTable:
 # 클라 시트: 키워드 | 최소가격 | 최대가격 (+ 선택: 제외).
 # 머리글은 부분일치로 잡는다 — "최소가격"·"최소금액"·"최소 가격" 다 받는다.
 def load_rules_from_excel(path) -> tuple[list[AlertRule], list[str]]:
+    """엑셀 → (룰, 오류·안내). **모든 시트**를 읽어 합친다.
+
+    시트 하나만 읽던 동안, 브랜드별로 탭을 나눈 파일은 첫 탭만 들어가고
+    나머지가 조용히 사라졌다. 오류도 안 났으니 알아챌 방법이 없었다.
+    """
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))   # type: ignore
+        sheets = [(ws.title, list(ws.iter_rows(values_only=True)))
+                  for ws in wb.worksheets]
     finally:
         wb.close()
-    return parse_rule_rows(rows)
+    rules: list[AlertRule] = []
+    errors: list[str] = []
+    seen: set = set()
+    read_any = False
+    for title, rows in sheets:
+        got, errs = parse_rule_rows(rows)
+        if got:
+            read_any = True
+        for r in got:
+            key = (normalize_text(r.keyword), r.min_price, r.max_price, r.exclude)
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(r)
+        # 시트가 여럿이면 어느 시트 몇 행인지까지 말해야 찾아갈 수 있다.
+        for m in errs:
+            errors.append(f"[{title}] {m}" if len(sheets) > 1 else m)
+    if len(sheets) > 1 and read_any:
+        counts = ", ".join(f"{t} {len(parse_rule_rows(r)[0])}줄" for t, r in sheets)
+        errors.insert(0, f"시트 {len(sheets)}개를 모두 읽었습니다 — {counts}")
+    return rules, errors
 
 
 def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
@@ -151,7 +176,20 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
     if not rows:
         return [], ["엑셀에 데이터가 없습니다"]
 
-    head = [normalize_text(c) for c in rows[0]]
+    # 머리글이 1행이라는 보장이 없다 — 제목 한 줄, 빈 줄, 안내문이 위에 붙은
+    # 파일이 흔하다. 위에서부터 '키워드' 가 있는 행을 찾아 거기서 시작한다.
+    head_at = None
+    for n, row in enumerate(rows[:10]):
+        cells = [normalize_text(c) for c in row]
+        if any(c and ("키워드" in c or "keyword" in c) for c in cells):
+            head_at = n
+            break
+    if head_at is None:
+        return [], ["엑셀 머리글에 '키워드' 열이 없습니다"
+                    " — [샘플 엑셀 저장]으로 형식을 받아 쓰세요"]
+    head_row = head_at
+    head = [normalize_text(c) for c in rows[head_at]]
+    rows = rows[head_at:]
 
     def col(*names) -> int | None:
         for i, h in enumerate(head):
@@ -171,7 +209,8 @@ def parse_rule_rows(rows) -> tuple[list[AlertRule], list[str]]:
     rules: list[AlertRule] = []
     errors: list[str] = []
     seen: set[tuple] = set()
-    for n, row in enumerate(rows[1:], start=2):
+    # 행 번호는 엑셀에서 보이는 그대로여야 찾아갈 수 있다.
+    for n, row in enumerate(rows[1:], start=head_row + 2):
         def cell(i):
             return row[i] if (i is not None and i < len(row)) else None
 
