@@ -511,12 +511,10 @@ if _win is not None:
                for b in (_win.alertRulesBtn, _win.rulesOpenBtn, _win.rulesReloadBtn)))
     ck("넣은 엑셀이 없으면 열기·다시 읽기는 꺼진다",
        not _win.rulesOpenBtn.isEnabled() and not _win.rulesReloadBtn.isEnabled())
-    # 우측 상단 판 표시 — 서버에 붙은 사람이 최신인지 한눈에 본다.
+    # 우측 상단 판 표시 — 판·설치 시각만. '최신' 표시는 없다(틀릴 수 있어서).
     ck("헤더 우측에 판 라벨", _win.versionLabel.text().startswith(("v ", "판 미상")),
        _win.versionLabel.text())
-    _win._on_version_checked("")
-    ck("최신 확인 실패는 '확인 못 함'", "확인 못 함" in _win.versionLabel.text()
-       or _win.versionLabel.text() == "판 미상", _win.versionLabel.text())
+    ck("'최신' 표시 없음", "최신" not in _win.versionLabel.text(), _win.versionLabel.text())
     ck("조건 수가 섹션 제목에 보인다", "조건" in _win.condBox.title(),
        _win.condBox.title())
     ck("조건이 없으면 그 사실을 말한다",

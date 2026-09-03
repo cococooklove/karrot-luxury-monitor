@@ -43,22 +43,12 @@ ck("개발 PC: git 으로 판 읽음", here["source"] == "git" and len(here["sho
 
 print("=== B. version_label ===")
 loc = {"short": "fc020db", "sha": "fc020db" + "1" * 33, "installed": "09/03 08:39", "source": "deploy"}
-t, st = V.version_label(loc, "", checked=False)
-ck("확인 전: 확인 중", st == "unknown" and "확인 중" in t and t.startswith("v fc020db · 설치 09/03 08:39"), t)
-t, st = V.version_label(loc, "", checked=True)
-ck("확인 실패: 확인 못 함", st == "unknown" and "확인 못 함" in t, t)
-t, st = V.version_label(loc, "fc020db" + "1" * 33, checked=True)
-ck("같은 sha: 최신", st == "latest" and "최신" in t, t)
-t, st = V.version_label(loc, "a1b2c3d" + "9" * 33, checked=True)
-ck("다른 sha: 새 판 있음 + 앞 7자", st == "outdated" and "새 판 a1b2c3d" in t, t)
-t, st = V.version_label({"short": "abc1234", "sha": "", "installed": "", "source": "git"}, "abc1234" + "0" * 33, True)
-ck("git 판: '개발 판' 표기·짧은 sha 로 비교", st == "latest" and "개발 판" in t, t)
-t, st = V.version_label({"short": "", "sha": "", "installed": "", "source": ""}, "x", True)
-ck("판 미상", st == "none" and t == "판 미상", t)
-
-print("=== C. fetch_latest_sha 는 예외를 안 낸다 ===")
-V.LATEST_URL = "http://127.0.0.1:9/nope"
-ck("연결 실패 → ''", V.fetch_latest_sha(timeout=2) == "")
+ck("배포 판: v + 설치 시각", V.version_label(loc) == "v fc020db · 설치 09/03 08:39", V.version_label(loc))
+ck("git 판: '개발 판'", V.version_label({"short": "abc1234", "sha": "", "installed": "", "source": "git"})
+   == "v abc1234 · 개발 판")
+ck("판 미상", V.version_label({"short": "", "sha": "", "installed": "", "source": ""}) == "판 미상")
+ck("'최신' 표시 없음", "최신" not in V.version_label(loc))
+ck("원격 대조 함수 없음", not hasattr(V, "fetch_latest_sha"))
 
 print("\n" + "=" * 46)
 bad = [n for n, c in R if not c]
