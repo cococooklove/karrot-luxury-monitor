@@ -361,6 +361,48 @@ class MultiAccountAlerts:
             total["observed_count"] = observed_count
         return total
 
+    def delete_keywords(self, keywords, log=None, core_only=False) -> int:
+        """이름이 keywords 에 든 등록을 전 유효 계정에서 지운다 → 지운 수."""
+        from .search_filters import normalize_text
+        keys = {normalize_text(str(k or "")) for k in (keywords or []) if k}
+        if not keys:
+            return 0
+        return self._delete_where(lambda kw: normalize_text(kw) in keys, log, core_only)
+
+    def delete_not_in(self, allowed_keys, log=None, core_only=False) -> int:
+        """정규화 키가 allowed_keys 에 없는 등록을 전 유효 계정에서 지운다 → 지운 수.
+
+        allowed_keys 가 비면 아무것도 지우지 않는다 — 조건표가 비었다고 함대 등록을
+        전부 날리지 않는다(main.prune_to_rules 참고)."""
+        from .search_filters import normalize_text
+        allowed = set(allowed_keys or ())
+        if not allowed:
+            return 0
+        return self._delete_where(lambda kw: normalize_text(kw) not in allowed, log, core_only)
+
+    def _delete_where(self, pred, log=None, core_only=False) -> int:
+        log = log or (lambda m: None)
+        n = 0
+        for code, access, proxy in self._valid(core_only):
+            api = KeywordAlertAPI(access, self.config_path, proxy=proxy)
+            try:
+                for k in api.keywords():
+                    kw = str(k.get("keyword") or "")
+                    if not kw or not pred(kw):
+                        continue
+                    if api.delete(k.get("id")):
+                        n += 1
+                        log(f"  계정 {str(code)[:6]} · '{kw}' 삭제 ✓ (조건표에 없음)")
+                    else:
+                        log(f"  계정 {str(code)[:6]} · '{kw}' 삭제 실패")
+            except Exception as e:
+                log(f"  계정 {str(code)[:6]} 정리 실패: {str(e)[:50]}")
+            finally:
+                api.close()
+        if n:
+            log(f"[조건표] 조건표에 없는 서버 등록 {n}건 삭제")
+        return n
+
     def poll_all(self, category_id: str = FLEA_CATEGORY, log=None, workers: int = 12,
                  core_only=False):
         """전 계정 매칭 폴링(병렬) → 합산(article_id 중복제거). 각 매물 _account 태그.

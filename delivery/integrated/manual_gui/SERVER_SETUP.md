@@ -366,7 +366,7 @@ command="powershell -NoProfile -ExecutionPolicy Bypass -File C:\karrot_deploy.ps
 
 ## 6. 테스트 순서
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
-2. 키워드 등록(계정당 최대 30개): 코드 `MultiAccountAlerts.register_all(LUXURY_BRANDS)` or GUI 1회
+2. 키워드 등록(계정당 최대 30개): GUI [엑셀로 조건 넣기] 1회 — 조건표의 브랜드만 등록되고, 조건표에 없는 등록은 자동 삭제된다
 3. 텔레그램 수신 확인
 4. 서버 재부팅 1회 → RDP 접속 → `powershell -ExecutionPolicy Bypass -File C:\karrot\ldboot.ps1`
    → `C:\karrot\ldboot.log` 에 `최종 adb devices=6 / 5` 와 `모니터 앱 시작` 확인

@@ -100,7 +100,7 @@ class RuleTable:
     def detail(self) -> str:
         """브랜드 목록과 적용 시각. 줄 수는 섹션 제목이 이미 말한다."""
         if not self.rules:
-            return "조건 없음 — 브랜드에 걸린 매물을 전부 알립니다"
+            return "조건 없음 — 엑셀을 넣기 전까지 알리지 않습니다"
         bs = brands(self.rules)
         head = " · ".join(bs[:6]) + (f" 외 {len(bs) - 6}개" if len(bs) > 6 else "")
         when = (time.strftime("%m/%d %H:%M", time.localtime(self.applied_at))
@@ -110,7 +110,7 @@ class RuleTable:
     def summary(self) -> str:
         """화면 한 줄 요약. 조건이 없으면 그 사실을 분명히 말한다."""
         if not self.rules:
-            return "조건 없음 — 브랜드에 걸린 매물을 전부 알립니다"
+            return "조건 없음 — 엑셀을 넣기 전까지 알리지 않습니다"
         bs = brands(self.rules)
         head = " · ".join(bs[:3]) + (f" 외 {len(bs) - 3}개" if len(bs) > 3 else "")
         when = (time.strftime("%m/%d %H:%M", time.localtime(self.applied_at))
@@ -119,7 +119,8 @@ class RuleTable:
                 + (f"   ({when} 적용)" if when else ""))
 
     def verdict(self, title, price=None, body="") -> tuple[str, AlertRule | None]:
-        """(판정, 맞은 룰). 룰이 없으면 (PASS, None) — 아무것도 거르지 않는다."""
+        """(판정, 맞은 룰). 룰이 없으면 (PASS, None) — 호출측(filter_by_conditions)이
+        '조건 없음 = 알리지 않음'으로 처리한다."""
         if not self.rules:
             return PASS, None
         if self.drop_wanted and looks_wanted_ad(title):

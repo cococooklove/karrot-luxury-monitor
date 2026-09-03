@@ -316,6 +316,74 @@ def boom():
 ck("조회 실패는 삼키고 0", m.seed_router_from_server(FakeRouter(), boom, L3.append, st3) == 0)
 ck("실패 로그", any("인식 실패" in x for x in L3), str(L3))
 
+print("=== J-2. 조건표가 유일한 진실 — 씨딩·알림·정리 ===")
+from daangn_ext.alert_rules import AlertRule, RuleTable
+
+ck("기본 브랜드 목록은 없다", not hasattr(m, "LUXURY_BRANDS")
+   and "LUXURY_BRANDS" not in open("main.py", encoding="utf-8").read())
+_T = RuleTable([AlertRule(keyword="샤넬 클래식", brand="샤넬", max_price=5_000_000),
+                AlertRule(keyword="에르메스 버킨", brand="에르메스")])
+_A = m.rule_brand_keys(_T)
+ck("조건표 브랜드 집합", _A == {"샤넬", "에르메스"}, str(_A))
+ck("조건표 없으면 빈 집합", m.rule_brand_keys(RuleTable()) == set() and m.rule_brand_keys(None) == set())
+ck("split_by_rules", m.split_by_rules(["샤넬", "구찌", "", "에르메스"], _A) == (["샤넬", "에르메스"], ["구찌"])
+   and m.split_by_rules(["구찌"], None) == (["구찌"], []))
+
+# 씨딩: 조건표 브랜드만 인정, 나머지는 prune_fn 으로 서버에서 삭제
+_pr, _L4, _st4 = [], [], {}
+_rt4 = FakeRouter()
+_n4 = m.seed_router_from_server(_rt4, listing(["샤넬", "구찌", "롤렉스"]), _L4.append, _st4,
+                                allowed=_A, prune_fn=_pr.append)
+ck("씨딩은 조건표 브랜드만", _n4 == 1 and _rt4.seeded == [["샤넬"]], str(_rt4.seeded))
+ck("조건표에 없는 서버 등록은 삭제로 넘긴다", _pr == [["구찌", "롤렉스"]], str(_pr))
+ck("인정 안 한 사실을 로그로", any("조건표에 없어 인정하지 않습니다" in x for x in _L4), str(_L4))
+_pr5, _L5, _st5 = [], [], {}
+_rt5 = FakeRouter()
+_n5 = m.seed_router_from_server(_rt5, listing(["샤넬", "구찌"]), _L5.append, _st5,
+                                allowed=set(), prune_fn=_pr5.append)
+ck("조건표 없으면 아무것도 인정 안 함", _n5 == 0 and _rt5.seeded == [], str(_rt5.seeded))
+ck("조건표 없으면 서버 삭제도 안 함(파일 오류 방어)", _pr5 == [], str(_pr5))
+_rt6 = FakeRouter()
+ck("allowed=None 은 옛 동작(전부 인정)",
+   m.seed_router_from_server(_rt6, listing(["샤넬", "구찌"]), [].append, {}) == 2)
+
+# 알림: 조건표 없으면 0건
+_ms = [{"keyword": "샤넬", "title": "샤넬 클래식 미디움", "price": "3,000,000원"},
+       {"keyword": "구찌", "title": "구찌 마몽", "price": "500,000원"}]
+_Lf = []
+ck("조건표 없음 → 전부 컷", m.filter_by_conditions(_ms, None, log=_Lf.append, rules=None) == ([], [], 2)
+   and m.filter_by_conditions(_ms, None, rules=RuleTable()) == ([], [], 2))
+ck("컷 이유를 로그로", any("조건이 없어" in x for x in _Lf), str(_Lf))
+_k, _w, _c = m.filter_by_conditions(_ms, None, rules=_T)
+ck("조건표 있으면 표에 걸린 것만", [x["title"] for x in _k] == ["샤넬 클래식 미디움"] and _c == 1, str(_k))
+ck("빈 목록은 그대로", m.filter_by_conditions([], None, rules=None) == ([], [], 0))
+
+# 정리: 라우터·서버에서 조건표 밖 키워드 제거
+class _PRouter(FakeRouter):
+    def __init__(self, kws):
+        super().__init__([{"keyword": k} for k in kws]); self.removed = []
+    def remove(self, kw):
+        self.removed.append(kw); self._r = [r for r in self._r if r["keyword"] != kw]
+class _Fleet:
+    def __init__(self): self.calls = []
+    def delete_not_in(self, allowed, log=None, core_only=False):
+        self.calls.append((set(allowed), core_only)); return 3
+_r7, _f7, _L7 = _PRouter(["샤넬", "구찌", "롤렉스"]), _Fleet(), []
+ck("prune: 라우터에서 조건표 밖 제거 + 서버 정리",
+   m.prune_to_rules(_r7, _f7, _A, _L7.append, core_only=True) == 5
+   and _r7.removed == ["구찌", "롤렉스"] and _f7.calls == [(_A, True)], str((_r7.removed, _f7.calls)))
+_r8, _f8 = _PRouter(["샤넬", "구찌"]), _Fleet()
+ck("prune: 조건표 없으면 아무것도 안 지움",
+   m.prune_to_rules(_r8, _f8, set(), [].append) == 0 and _r8.removed == [] and _f8.calls == [])
+_src_main = open("main.py", encoding="utf-8").read()
+ck("엑셀 적용 경로가 정리를 부른다",
+   "prune_to_rules(self._router, self._alert_fleet()" in _src_main
+   and _src_main.count("prune_to_rules(router, m, _allowed") == 1)
+ck("폴링 틱·헤드리스 루프 씨딩이 조건표 집합을 넘긴다",
+   _src_main.count("allowed=_allowed") >= 3)
+ck("조건 없음 문구가 '알리지 않음'", "알리지 않습니다" in RuleTable().summary()
+   and "전부 알립니다" not in _src_main)
+
 print("=== K. GUI 폴링 틱도 씨딩을 지난다 ===")
 _tick_code = m.MainWindow._auto_poll_tick.__code__
 src_tick = set(_tick_code.co_names)

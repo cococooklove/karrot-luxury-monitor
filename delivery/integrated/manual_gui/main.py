@@ -18,11 +18,6 @@ from daangn.ui_mainwindow import Ui_MainWindow
 from PyQt6 import QtWidgets, QtCore, QtGui
 
 
-# 명품 브랜드(키워드 알림 일괄등록용) — parse_luxury.BRANDS 대표명
-LUXURY_BRANDS = ["샤넬", "루이비통", "에르메스", "구찌", "프라다", "디올", "셀린느",
-                 "보테가베네타", "생로랑", "발렌시아가", "펜디", "버버리", "몽클레르",
-                 "고야드", "롤렉스", "까르띠에", "티파니", "불가리", "반클리프", "오메가"]
-
 WATCH_SWEEP_INTERVAL = 600          # 워치리스트 스윕 주기(초)
 
 
@@ -505,44 +500,7 @@ def toss_tree(tree):
     tree.setUniformRowHeights(True)
     tree.setMouseTracking(True)
     tree.setItemDelegate(TossTreeDelegate(tree))
-    _wire_tristate(tree)
     return tree
-
-
-def _wire_tristate(tree):
-    """부모↔자식 체크 전파를 직접 한다 — Qt 의 ItemIsAutoTristate 는 숨은
-    자식을 계산에서 뺀다. 검색으로 동 하나만 남기고 [전체 선택]을 누르면 구가
-    '전부 체크'로 읽혀 숨은 동 88곳까지 딸려 왔다(압구정 1 → 89). 항목 flag 에
-    AutoTristate 를 주면 안 된다 — 둘이 겹쳐 서로를 되돌린다."""
-    C, U, P = (Qt.CheckState.Checked, Qt.CheckState.Unchecked,
-               Qt.CheckState.PartiallyChecked)
-    busy = [False]
-
-    def on_changed(item, col):
-        if busy[0] or col != 0:
-            return
-        busy[0] = True
-        try:
-            st = item.checkState(0)
-            if item.childCount() and st != P:        # 아래로: 자손 전부. 부분은 안 내려간다
-                stack = [item]
-                while stack:
-                    it = stack.pop()
-                    for i in range(it.childCount()):
-                        c = it.child(i)
-                        if c.checkState(0) != st:
-                            c.setCheckState(0, st)
-                        stack.append(c)
-            p = item.parent()
-            while p is not None:                      # 위로: 자식 상태로 부모를 다시 센다
-                states = {p.child(i).checkState(0) for i in range(p.childCount())}
-                new = C if states == {C} else U if states == {U} else P
-                if p.checkState(0) != new:
-                    p.setCheckState(0, new)
-                p = p.parent()
-        finally:
-            busy[0] = False
-    tree.itemChanged.connect(on_changed)
 
 
 class FlowLayout(QtWidgets.QLayout):
@@ -1031,8 +989,13 @@ def sweep_revive_step(revives, want_n):
                      f" 되살립니다 ({n}/{SWEEP_REVIVE_MAX})")
 
 
-def seed_router_from_server(router, list_fn, log, state):
+def seed_router_from_server(router, list_fn, log, state, allowed=None, prune_fn=None):
     """routes 파일이 비어 있을 때만 서버 등록 목록을 읽어 라우터에 인정시킨다.
+
+    allowed(조건표 브랜드 집합, rule_brand_keys)를 주면 **그 안의 키워드만** 인정한다.
+    빈 집합 = 조건표 없음 = 아무것도 인정하지 않는다. 나머지는 prune_fn(목록)으로
+    서버에서 지운다 — 옛 일괄등록이 남긴 브랜드가 라우터로 되살아나 알림함 15칸을
+    먹는 경로를 여기서 끊는다. None 이면 전부 인정(옛 동작, 테스트용).
 
     자동 시작(GUI 8초 지연·헤드리스 부팅)은 등록 화면을 거치지 않고 바로 폴링
     틱으로 들어간다. 그 경로가 씨딩을 안 하면 라우터는 함대가 비었다고 믿고
@@ -1056,6 +1019,15 @@ def seed_router_from_server(router, list_fn, log, state):
     try:
         data = list_fn() or {}
         kws = [k.get("keyword") for k in (data.get("user_keywords") or [])]
+        kws, extras = split_by_rules(kws, allowed)
+        if extras:
+            log(f"[라우터] 서버 등록 {len(extras)}개는 조건표에 없어 인정하지 않습니다"
+                + (": " + ", ".join(extras[:6]) + (" …" if len(extras) > 6 else "")))
+            if prune_fn is not None and allowed:
+                try:
+                    prune_fn(extras)
+                except Exception as e:
+                    log(f"[라우터] 서버 정리 실패: {str(e)[:80]}")
         seeded = router.seed_from_server(kws) if kws else 0
         if seeded:
             log(f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
@@ -1306,31 +1278,35 @@ class HeadlessSweepRunner:
 
 
 def filter_by_conditions(matches, router, log=None, rules=None):
-    """앱 경로 매칭에 등록 조건을 한 번 더 태운다.
+    """앱 경로 매칭에 조건표를 태운다. **조건표가 유일한 진실이다.**
 
     앱 알림은 당근 서버가 판정하고, 우리가 넘길 수 있는 건 최소가·최대가·
     제외어뿐이다. 추가키워드·끌올일수는 전달할 방법 자체가 없다. 그래서
-    엑셀에 조건을 적어도 앱 경로에서는 사실상 무시됐다(실측 2026-08-30:
-    등록된 20개 브랜드가 전부 app 경로였고 추가키워드·끌올일수가 하나도
-    안 걸리고 있었다).
+    등록은 브랜드 단위로 넓게 하고 거르는 일은 여기서 조건표가 한다.
 
-    rules(알림 조건 엑셀)가 있으면 그게 조건의 진실이다 — 등록은 브랜드
-    단위라 모델별 가격대를 담을 수 없기 때문이다. 표의 한 줄이라도 맞으면
-    알리고, 상한만 넘긴 매물은 추적으로 돌린다.
+    조건표가 없으면 **아무것도 알리지 않는다.** 예전에는 '조건 없음 = 전부
+    알림'이었는데, 그 상태에서 서버에 남은 브랜드 등록이 시간당 수백 건을
+    쏟아냈다. 브랜드 등록 자체가 조건표에서만 나오므로(엑셀로 조건 넣기),
+    조건표가 없는데 매칭이 온다는 것은 서버에 낡은 등록이 남았다는 뜻이다 —
+    그건 prune_to_rules 가 지운다.
 
     앱 매칭 payload 에는 제목·가격만 있고 본문과 끌올 시각이 없다. 그래서
     여기서는 제목과 가격까지만 본다 — 본문에만 있는 제외어와 끌올일수는
     이 경로에서 거를 수 없고 검색 스윕이 맡는다. 가격을 못 읽으면 가격
     조건은 건너뛴다(못 읽었다는 이유로 버리지 않는다).
+
+    router 인자는 호출부 호환용으로만 남았다 — 판정에 쓰지 않는다.
     """
     items = list(matches or [])
-    has_rules = rules is not None and len(rules)
-    if not items or (router is None and not has_rules):
+    if not items:
         return items, [], 0
+    if rules is None or not len(rules):
+        if log:
+            log(f"[조건표] 조건이 없어 매칭 {len(items)}건을 알리지 않습니다 — "
+                "[엑셀로 조건 넣기]로 조건표를 넣으세요")
+        return [], [], len(items)
     from daangn_ext.alert_rules import HIT, WATCH
-    from daangn_ext.article_watch import parse_price_text
-    from daangn_ext.search_filters import (contains_keyword, looks_wanted_ad,
-                                           normalize_text)
+    from daangn_ext.search_filters import looks_wanted_ad
     kept, watch_only, cut = [], [], 0
     for m in items:
         raw_title = m.get("title") or ""
@@ -1338,44 +1314,12 @@ def filter_by_conditions(matches, router, log=None, rules=None):
         if looks_wanted_ad(raw_title):
             cut += 1
             continue
-        if has_rules:
-            # 룰 테이블이 있으면 등록 키워드에 걸린 조건 대신 이걸 쓴다.
-            # 등록은 브랜드 단위라 모델별 가격대를 담을 수 없다.
-            verdict, rule = rules.verdict(raw_title, m.get("price"))
-            if verdict == HIT:
-                # 어느 줄에 걸렸는지 알림에 남긴다 — 등록 키워드는 브랜드라
-                # "[루이비통]" 만 뜨면 어떤 조건에 맞았는지 알 수 없다.
-                kept.append(dict(m, _rule=rule.label()))
-            elif verdict == WATCH:
-                watch_only.append(m)
-            else:
-                cut += 1
-            continue
-        try:
-            cond = router.condition_for(m.get("keyword"))
-        except Exception:
-            cond = {}
-        if not cond:
-            kept.append(m)
-            continue
-        title = normalize_text(raw_title)
-        over_max = False
-        ok = True
-        if ok:
-            ok = all(not contains_keyword(title, x) for x in (cond.get("exclude") or []) if x)
-        if ok:
-            ok = all(contains_keyword(title, x) for x in (cond.get("extra") or []) if x)
-        if ok and (cond.get("min") is not None or cond.get("max") is not None):
-            price = parse_price_text(m.get("price"))
-            if price:
-                if cond.get("min") is not None and price < int(cond["min"]):
-                    ok = False
-                if cond.get("max") is not None and price > int(cond["max"]):
-                    ok = False
-                    over_max = True
-        if ok:
-            kept.append(m)
-        elif over_max:
+        verdict, rule = rules.verdict(raw_title, m.get("price"))
+        if verdict == HIT:
+            # 어느 줄에 걸렸는지 알림에 남긴다 — 등록 키워드는 브랜드라
+            # "[루이비통]" 만 뜨면 어떤 조건에 맞았는지 알 수 없다.
+            kept.append(dict(m, _rule=rule.label()))
+        elif verdict == WATCH:
             # 상한만 넘긴 매물은 버리지 않고 추적한다. 값이 내려오면
             # mark_range_entries 가 '조건 진입'으로 알린다.
             watch_only.append(m)
@@ -1386,6 +1330,59 @@ def filter_by_conditions(matches, router, log=None, rules=None):
             + (f" · 상한 초과 {len(watch_only)}건은 인하 대기로 추적" if watch_only else ""))
     return kept, watch_only, cut
 
+
+def rule_brand_keys(table) -> set:
+    """조건표의 브랜드 집합(정규화). 조건표가 없으면 빈 집합 = 어떤 키워드도 인정하지 않는다.
+
+    서버·라우터에 있는 키워드가 '조건표 것인가'를 판정하는 유일한 기준이다."""
+    from daangn_ext.alert_rules import brands
+    from daangn_ext.search_filters import normalize_text
+    if table is None or not len(table):
+        return set()
+    return {normalize_text(b) for b in brands(table.rules) if b}
+
+
+def split_by_rules(keywords, allowed):
+    """키워드 목록을 (조건표에 있는 것, 없는 것)으로 가른다. allowed=None 이면 전부 인정."""
+    from daangn_ext.search_filters import normalize_text
+    ok, extra = [], []
+    for kw in keywords or []:
+        kw = str(kw or "").strip()
+        if not kw:
+            continue
+        (ok if allowed is None or normalize_text(kw) in allowed else extra).append(kw)
+    return ok, extra
+
+
+def prune_to_rules(router, fleet, allowed, log, core_only=False) -> int:
+    """조건표에 없는 키워드를 라우터·대기열·서버 등록에서 지운다 → 지운 수.
+
+    조건표가 비었으면 **아무것도 지우지 않는다.** 파일을 못 읽은 한 번의 오류로
+    함대 등록을 전부 날리면 안 된다 — 그때는 filter_by_conditions 가 알림만 멈춘다.
+    비우고 싶으면 [전체 삭제]가 따로 있다.
+
+    남은 등록을 지워야 하는 이유는 낭비만이 아니다. 알림함은 15건에서 잘리고
+    페이징이 없다 — 조건표에 없는 브랜드의 매칭이 그 15칸을 먹으면 진짜 매칭이
+    밀려 나간다."""
+    log = log or (lambda m: None)
+    if not allowed:
+        return 0
+    n = 0
+    if router is not None:
+        try:
+            _, extras = split_by_rules([r.get("keyword") for r in router.routes()], allowed)
+            for kw in extras:
+                router.remove(kw)
+                n += 1
+                log(f"[조건표] '{kw}' 는 조건표에 없어 등록에서 뺍니다")
+        except Exception as e:
+            log(f"[조건표] 라우터 정리 실패: {str(e)[:80]}")
+    if fleet is not None:
+        try:
+            n += int(fleet.delete_not_in(allowed, log=log, core_only=core_only) or 0)
+        except Exception as e:
+            log(f"[조건표] 서버 등록 정리 실패: {str(e)[:80]}")
+    return n
 
 def dedupe_new_matches(matches, watch_store, fallback):
     """폴링 결과에서 아직 안 본 매치만 고른다 → (fresh, dropped).
@@ -1923,6 +1920,12 @@ QLabel#mutedNote { color: #8B857A; font-size: 13px; }
    단계 카드와 다른 앱처럼 보였다. */
 QWidget#settingsPage { background: #F5F3EE; }
 QWidget#settingsCol { background: transparent; }
+/* 에뮬레이터 탭 — 같은 회색 바탕 위 카드 둘(인스턴스 목록 · 부착 화면).
+   제목 줄 하나에 상태와 버튼을 모은다. 카드 안 탭·스크롤은 테두리를 뺀다. */
+QWidget#emulPage { background: #F5F3EE; }
+QWidget#emulPage QSplitter::handle { background: transparent; width: 12px; }
+QFrame#stepCard QTabWidget::pane { border: none; }
+QFrame#stepCard QScrollArea { background: transparent; }
 QFrame#settingRow { background: transparent; border: none; border-bottom: 1px solid #F1EEE8; }
 QFrame#settingRow[last="true"] { border-bottom: none; }
 QLabel#rowLabel { color: #3A342B; font-size: 14px; font-weight: 700; }
@@ -2453,14 +2456,21 @@ class MainWindow(QMainWindow):
         self._emul_rescan = False        # 스캔 도중 새 창이 떴다 → 끝나면 바로 한 번 더
         self._emul_console = ldwin.find_console()
 
+        # 회색 바탕 위 제목 줄 + 카드 둘. 맨 위 줄이 제목·상태·버튼을 한 번에
+        # 말한다 — 예전엔 흰 바탕에 라벨과 버튼이 흩어져 어디가 시작인지 없었다.
         w = QtWidgets.QWidget()
+        w.setObjectName("emulPage")
         v = QtWidgets.QVBoxLayout(w)
-        v.setContentsMargins(12, 10, 12, 10); v.setSpacing(8)
+        v.setContentsMargins(20, 18, 20, 18); v.setSpacing(12)
 
-        bar = QtWidgets.QHBoxLayout(); bar.setSpacing(8)
+        bar = QtWidgets.QHBoxLayout(); bar.setSpacing(10)
+        _tt = QtWidgets.QVBoxLayout(); _tt.setSpacing(2)
+        _t = QtWidgets.QLabel("에뮬레이터"); _t.setObjectName("stepTitle")
         self.emulStatus = QtWidgets.QLabel("확인 중…")
-        self.emulStatus.setStyleSheet("color:#5C5449; font-size:13px;")
+        self.emulStatus.setObjectName("stepSub")
+        _tt.addWidget(_t); _tt.addWidget(self.emulStatus)
         self.emulRefreshBtn = QtWidgets.QPushButton("새로고침", w)
+        self.emulRefreshBtn.setObjectName("ghostBtn")
         self.emulRefreshBtn.clicked.connect(lambda: self._emul_scan())
         # 계정을 늘리는 유일한 경로다. '계정+프록시' 의 refresh 토큰 추가는 당근
         # WAF 이전 경로라 지금은 동작하지 않는다 — 토큰은 에뮬 안 앱에서만 나온다.
@@ -2473,21 +2483,17 @@ class MainWindow(QMainWindow):
         for b in (self.emulRefreshBtn, self.emulAddBtn):
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                             QtWidgets.QSizePolicy.Policy.Fixed)
-        bar.addWidget(self.emulStatus); bar.addStretch(1)
-        bar.addWidget(self.emulAddBtn)
-        bar.addWidget(self.emulRefreshBtn)
+        bar.addLayout(_tt, 1)
+        bar.addWidget(self.emulRefreshBtn, 0, Qt.AlignmentFlag.AlignVCenter)
+        bar.addWidget(self.emulAddBtn, 0, Qt.AlignmentFlag.AlignVCenter)
         v.addLayout(bar)
 
         split = QtWidgets.QSplitter(Qt.Orientation.Horizontal, w)
 
-        # 좌: 인스턴스 썸네일 그리드
-        left = QtWidgets.QWidget()
-        lv = QtWidgets.QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(6)
-        cap = QtWidgets.QLabel("인스턴스 — 클릭하면 그 탭으로 이동")
-        cap.setStyleSheet("color:#8A6D1F; font-weight:800; font-size:14px;")
-        lv.addWidget(cap)
+        # 좌: 인스턴스 썸네일 그리드 (카드)
+        left, lv = self._step_card(None, "인스턴스", "클릭하면 그 탭으로 이동합니다.")
         gridHost = QtWidgets.QWidget()
+        gridHost.setStyleSheet("background: transparent;")
         self.emulGrid = QtWidgets.QGridLayout(gridHost)
         self.emulGrid.setContentsMargins(0, 0, 0, 0); self.emulGrid.setSpacing(10)
         self.emulGrid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -2495,24 +2501,22 @@ class MainWindow(QMainWindow):
             "실행 중인 LDPlayer 인스턴스가 없습니다.\n"
             "자동 수확/모니터가 인스턴스를 부팅하면 여기 나타납니다.")
         self.emulEmpty.setWordWrap(True)
-        self.emulEmpty.setStyleSheet("color:#78705F; font-size:13px;")
+        self.emulEmpty.setObjectName("mutedNote")
         self.emulGrid.addWidget(self.emulEmpty, 0, 0, 1, 2)
         sa = QtWidgets.QScrollArea(); sa.setWidgetResizable(True); sa.setWidget(gridHost)
         sa.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         lv.addWidget(sa, 1)
         split.addWidget(left)
 
-        # 우: 부착된 인스턴스 탭
-        right = QtWidgets.QWidget()
-        rv = QtWidgets.QVBoxLayout(right)
-        rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
+        # 우: 부착된 인스턴스 탭 (카드)
+        right, rv = self._step_card(None, "화면", "")
         self.emulTabs = QtWidgets.QTabWidget(right)
         self.emulTabs.setDocumentMode(True)
         self.emulTabs.setTabsClosable(False)   # 닫으면 창이 바탕화면으로 나간다
         self.emulHint = QtWidgets.QLabel(
             "실행 중인 인스턴스 화면이 여기 탭으로 자동으로 붙습니다.")
         self.emulHint.setWordWrap(True)
-        self.emulHint.setStyleSheet("color:#78705F; font-size:13px;")
+        self.emulHint.setObjectName("mutedNote")
         rv.addWidget(self.emulHint)
         rv.addWidget(self.emulTabs, 1)
         split.addWidget(right)
@@ -2830,7 +2834,7 @@ class MainWindow(QMainWindow):
         if box is not None:
             n_b = len(brands(rules)) if rules else 0
             box._baseTitle = (f"조건 {len(rules)}개 · 브랜드 {n_b}개"
-                              if rules else "조건 없음 — 브랜드 매물을 전부 알립니다")
+                              if rules else "조건 없음 — 엑셀을 넣기 전까지 알리지 않습니다")
             self._sync_box_visible(box, box.isChecked())
 
     def _sync_box_visible(self, box, on):
@@ -2892,8 +2896,10 @@ class MainWindow(QMainWindow):
             head.addWidget(badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         tv = QtWidgets.QVBoxLayout(); tv.setSpacing(2)
         t = QtWidgets.QLabel(title); t.setObjectName("stepTitle")
-        d = QtWidgets.QLabel(sub); d.setObjectName("stepSub"); d.setWordWrap(True)
-        tv.addWidget(t); tv.addWidget(d)
+        tv.addWidget(t)
+        if sub:
+            d = QtWidgets.QLabel(sub); d.setObjectName("stepSub"); d.setWordWrap(True)
+            tv.addWidget(d)
         head.addLayout(tv, 1)
         cl.addLayout(head)
         return card, cl
@@ -3042,7 +3048,7 @@ class MainWindow(QMainWindow):
                 _c, QtWidgets.QHeaderView.ResizeMode.Stretch if _c == ALERT_COL_KEYWORD
                 else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.alertTable.setShowGrid(False)
-        self.alertTable.setMinimumHeight(320)
+        self.alertTable.setMinimumHeight(220)
         # id 는 서버 내부 식별자다 — 사람이 읽을 값이 아니다. 열은 남긴다
         # (인덱스 상수와 셀 생성 함수가 쓴다). 화면에서만 감춘다.
         self.alertTable.setColumnHidden(ALERT_COL_ID, True)
@@ -3080,7 +3086,7 @@ class MainWindow(QMainWindow):
         # 안 보였다. 카드가 순서를, 배지가 단계를 말한다.
         rules_w = QtWidgets.QWidget()
         rules_w.setObjectName("rulesPage")
-        rv = QtWidgets.QVBoxLayout(rules_w); rv.setContentsMargins(20, 18, 20, 18); rv.setSpacing(14)
+        rv = QtWidgets.QVBoxLayout(rules_w); rv.setContentsMargins(20, 18, 20, 18); rv.setSpacing(12)
         card1, c1 = self._step_card(
             1, "감시 조건",
             "엑셀 한 장으로 브랜드와 조건을 넣습니다. 엑셀에서 고친 뒤에는 [다시 읽기]를 누르세요.")
@@ -3885,8 +3891,9 @@ class MainWindow(QMainWindow):
         # 한도에 계속 등록을 시도한다.
         if self._router is not None and kws:
             try:
-                seeded = self._router.seed_from_server(
-                    [k.get("keyword") for k in kws])
+                _ok_kws, _ = split_by_rules([k.get("keyword") for k in kws],
+                                            rule_brand_keys(self._alert_rules.get()))
+                seeded = self._router.seed_from_server(_ok_kws)
                 if seeded:
                     self._alog(
                         f"[라우터] 서버에 이미 등록된 키워드 {seeded}개를 앱 슬롯으로 인식")
@@ -4217,8 +4224,12 @@ class MainWindow(QMainWindow):
             # 씨딩하지 않으면 무인 첫 실행이 함대가 빈 줄 알고 꽉 찬 서버 한도에
             # 등록을 시도해 전부 스윕으로 민다. routes 가 차 있으면 조회조차 안 한다.
             # 승격은 씨딩 결과에 기대므로 반드시 뒤에 온다.
+            _allowed = rule_brand_keys(self._alert_rules.get())
             seed_router_from_server(
-                self._router, lambda: self._quiet_keyword_list(co), log, state)
+                self._router, lambda: self._quiet_keyword_list(co), log, state,
+                allowed=_allowed,
+                prune_fn=lambda extras: self._alert_fleet().delete_keywords(
+                    extras, log=log, core_only=co))
             if self._router:
                 try:
                     for p in self._router.rebalance(core_only=co, log=log):
@@ -4309,7 +4320,7 @@ class MainWindow(QMainWindow):
         tree = toss_tree(QtWidgets.QTreeWidget(parent))
         tree.setMinimumWidth(240)
         self.auto_area_leaves = []
-        CK = Qt.ItemFlag.ItemIsUserCheckable       # 전파는 toss_tree 가 한다(AutoTristate 금지)
+        CK = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate
         try:
             with open("./OUT.json", encoding="utf-8") as _f:
                 data = _json.load(_f)
@@ -4354,6 +4365,7 @@ class MainWindow(QMainWindow):
         search.setObjectName("tossSearch")
         search.setPlaceholderText("지역 검색  (예: 강남, 분당)")
         search.setClearButtonEnabled(True)
+        search.setMinimumWidth(160)                  # 좁은 수동 탭 패널에서 "…" 로 접히지 않게
 
         def _parents():
             seen, out = set(), []
@@ -4462,7 +4474,7 @@ class MainWindow(QMainWindow):
         # 지역 — 미선택이면 기본 지역(서울·경기). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
         area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
-        area.setMaximumHeight(420)                   # 행 40px — 검색줄·칩 빼고 여덟 줄쯤
+        area.setMaximumHeight(520)                   # 행 40px — 검색줄·칩 빼고 여덟 줄쯤
         gv.addWidget(area)
 
         # 전국은 의식적으로 켜야 한다 — 동 6537곳 × 키워드가 한 사이클이라
@@ -5147,6 +5159,9 @@ class MainWindow(QMainWindow):
                 res.extend(self._router.add_many(
                     ks, None, None, None, core_only=co, log=log,
                     days=d, replace_cond=True) or [])
+            # 조건표에서 빠진 브랜드는 라우터·서버에서 지운다 — 엑셀이 진실이다.
+            prune_to_rules(self._router, self._alert_fleet(),
+                           rule_brand_keys(self._alert_rules.get()), log, co)
             return {"routes": res, "list": self._safe_alert_list(log)}
         # queue=True — 자동수확·자동폴링이 도는 중이라도 버리지 않는다.
         if not self._alert_run(job, self._alert_routes_done, queue=True,
@@ -5625,7 +5640,7 @@ class MainWindow(QMainWindow):
             parent = QtWidgets.QTreeWidgetItem(self.ui.areaTree)
             parent.setText(0, f"{sido}")
             parent.setData(0, AREA_FULL_ROLE, f"{sido}")
-            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable)   # 전파는 toss_tree 가 한다
+            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
             parent.setCheckState(0, Qt.CheckState.Unchecked)
 
             sido_locations: list[tuple[str, str]] = []
@@ -5638,7 +5653,7 @@ class MainWindow(QMainWindow):
                 child1 = QtWidgets.QTreeWidgetItem(parent)
                 child1.setText(0, name2.strip() or child1_txt)
                 child1.setData(0, AREA_FULL_ROLE, child1_txt)
-                child1.setFlags(child1.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child1.setFlags(child1.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
                 child1.setCheckState(0, Qt.CheckState.Unchecked)
 
                 area_locations: list[tuple[str, str]] = []
@@ -6900,8 +6915,11 @@ def _run_headless():
                 f" (커버 {'핵심' if co else '전국'})")
             # 등록 **전에** 씨딩한다 — 이 브랜치 이전 경로로 이미 서버가 꽉 차
             # 있으면, 인정하지 않고 등록하면 전부 실패해 스윕으로 밀린다.
+            _allowed = rule_brand_keys(load_alert_rules())
             seed_router_from_server(
-                router, lambda: _server_keyword_list(co), log, seed_state)
+                router, lambda: _server_keyword_list(co), log, seed_state,
+                allowed=_allowed,
+                prune_fn=lambda extras: m.delete_keywords(extras, log=log, core_only=co))
             try:
                 # 가격은 넘기지 않는다 — 당근 서버가 먼저 자르면 조건표가 볼
                 # 매물 자체가 없어진다. 거르는 일은 조건표가 한다.
@@ -6911,6 +6929,7 @@ def _run_headless():
                                              replace_cond=True):
                         log(f"[등록] {r.get('keyword')} → {r.get('route')}"
                             f" ({r.get('reason') or ''})")
+                prune_to_rules(router, m, _allowed, log, co)
             except Exception as e:
                 log(f"[등록] 실패: {str(e)[:80]}")
         if once:
@@ -6941,8 +6960,12 @@ def _run_headless():
             # ── 라우터 · 검색 스윕 — GUI _auto_poll_tick 과 같은 순서 ──
             # 씨딩 → 승격 → 스윕 재동기화. 재동기화는 루프 1회에 한 번뿐이라
             # 대기열이 요동쳐도 재시작은 폴링 주기당 한 번을 넘지 않는다.
+            _allowed = rule_brand_keys(load_alert_rules())
             seed_router_from_server(
-                router, lambda: _server_keyword_list(core_only), log, seed_state)
+                router, lambda: _server_keyword_list(core_only), log, seed_state,
+                allowed=_allowed,
+                prune_fn=lambda extras: m.delete_keywords(extras, log=log,
+                                                          core_only=core_only))
             if router is not None:
                 try:
                     for p in router.rebalance(core_only=core_only, log=log):

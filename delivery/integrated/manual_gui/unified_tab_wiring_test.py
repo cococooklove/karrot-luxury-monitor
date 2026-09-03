@@ -530,10 +530,22 @@ if _win is not None:
     _win._router = _rS
     _win._sweep_queue = _FakeQueue([])
     _win.alertLog.clear()
+    # 씨딩은 조건표 브랜드만 인정한다 — 조건표가 진실이고, 없으면 아무것도 안 인정.
+    from daangn_ext.alert_rules import AlertRule as _AR, RuleTable as _RT
+
+    class _RulesStub:
+        def __init__(self, t): self.t = t
+        def get(self): return self.t
+    _sv_rules = _win._alert_rules
+    _win._alert_rules = _RulesStub(_RT([_AR(keyword="샤넬 클래식", brand="샤넬"),
+                                        _AR(keyword="루이비통 네버풀", brand="루이비통")]))
     _win._alert_populate({"user_keywords": [{"keyword": "샤넬", "id": 1},
-                                            {"keyword": "루이비통", "id": 2}]})
+                                            {"keyword": "루이비통", "id": 2},
+                                            {"keyword": "구찌", "id": 9}]})
     _cap = _rS.capacity()
-    ck("첫 실행에 서버 등록분을 슬롯으로 인식", _cap["used"] == 2, str(_cap))
+    ck("첫 실행에 서버 등록분 중 조건표 브랜드만 슬롯으로 인식", _cap["used"] == 2, str(_cap))
+    ck("조건표에 없는 서버 등록(구찌)은 인정 안 함",
+       "구찌" not in [r["keyword"] for r in _rS.routes()], str(_rS.routes()))
     ck("씨딩 사실을 로그에 남긴다",
        "앱 슬롯으로 인식" in _win.alertLog.toPlainText(),
        _win.alertLog.toPlainText().strip()[:100])
@@ -548,6 +560,7 @@ if _win is not None:
     ck("두 번째는 씨딩 로그 없음",
        "앱 슬롯으로 인식" not in _win.alertLog.toPlainText())
     _win._router, _win._sweep_queue = _svr, _svq
+    _win._alert_rules = _sv_rules
     _win.alertTable.setRowCount(0)
     _win.alertLog.clear()
 
@@ -668,9 +681,18 @@ if _win is not None:
     _win._watch_store = _FakeStore({"777"})
     _win._match_seen_fallback = set()
     _win.alertLog.clear()
-    _win._match_populate([{"article_id": "777", "id": "inbox-1"},
-                          {"article_id": "888", "id": "inbox-2"},
-                          {"title": "키 없음"}])
+    # 조건표가 없으면 아무것도 알리지 않는 것이 계약이다 — 여기서 보는 건
+    # 중복 제거이므로 조건표에 걸리는 제목을 준다.
+    from daangn_ext.alert_rules import AlertRule as _AR2, RuleTable as _RT2
+
+    class _RulesStub2:
+        def __init__(self, t): self.t = t
+        def get(self): return self.t
+    _sv_rules2 = _win._alert_rules
+    _win._alert_rules = _RulesStub2(_RT2([_AR2(keyword="샤넬", brand="샤넬")]))
+    _win._match_populate([{"article_id": "777", "id": "inbox-1", "title": "샤넬 백"},
+                          {"article_id": "888", "id": "inbox-2", "title": "샤넬 지갑"},
+                          {"title": "샤넬 — 키 없음"}])
     ck("본 매물은 빼고 신규만 알린다",
        [x.get("article_id") for x in (_notified[0] if _notified else [])] == ["888"],
        str(_notified))
@@ -683,9 +705,10 @@ if _win is not None:
     _win._watch_store = None
     _win._match_seen_fallback = set()
     _notified.clear()
-    _win._match_populate([{"article_id": "999", "id": "inbox-3"}])
-    _win._match_populate([{"article_id": "999", "id": "inbox-3"}])
+    _win._match_populate([{"article_id": "999", "id": "inbox-3", "title": "샤넬 백"}])
+    _win._match_populate([{"article_id": "999", "id": "inbox-3", "title": "샤넬 백"}])
     ck("저장소 없어도 한 번만 알린다", len(_notified) == 1, str(_notified))
+    _win._alert_rules = _sv_rules2
     for _n in ("_notify_matches", "_refresh_listing_table", "_refresh_alert_health"):
         _win.__dict__.pop(_n, None)
     (_win._watch_store, _win._watch_tracker, _win._match_seen_fallback) = _sv
