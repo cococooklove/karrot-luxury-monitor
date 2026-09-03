@@ -35,7 +35,9 @@ h = W.parse_feed_html(html)
 ck("ld+json ItemList 에서 매물", len(h) > 100, str(len(h)))
 ck("본문·가격·href", h[0]["content"] and isinstance(h[0]["price"], int) and h[0]["href"].startswith("https://"))
 ck("시각 없음 → 0", h[0]["boosted_at"] == 0)
-ck("ld+json 없는 HTML 은 빈 목록", W.parse_feed_html("<html></html>") == [])
+ck("ld+json 없는 HTML 은 None", W.parse_feed_html("<html></html>") is None)
+empty_itemlist_html = '<script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","numberOfItems":0,"itemListElement":[]}</script>'
+ck("ItemList 있는데 비어 있음 → []", W.parse_feed_html(empty_itemlist_html) == [])
 
 print("=== D. 워터마크 ===")
 d = tempfile.mkdtemp(); cp = os.path.join(d, "feed_cursor.json")
@@ -93,6 +95,30 @@ ck("200 인데 매물 0 → EMPTY", W.fetch_feed("x", 1, 31, get=lambda u, p, t:
 def boom(u, p, t): raise RuntimeError("net")
 ck("예외 → ERR·None", W.fetch_feed("x", 1, 31, get=boom) == (None, "ERR"))
 ck("기본 헤더에 토큰 없음", "authorization" not in {k.lower() for k in W.DEFAULT_HEADERS})
+
+# 200 non-JSON 폴백 시나리오들
+def get_html_with_articles(u, p, t):
+    if "_data=" in u: return 200, html
+    return 200, html
+arts_fallback, kind_fallback = W.fetch_feed("x", 1, 31, get=get_html_with_articles)
+ck("200 HTML with articles → FALLBACK", kind_fallback == "FALLBACK" and len(arts_fallback) > 100)
+
+def get_plain_html(u, p, t):
+    return 200, "<html><body>login</body></html>"
+ck("200 plain HTML (no ItemList) → ERR", W.fetch_feed("x", 1, 31, get=get_plain_html) == (None, "ERR"))
+
+ck("200 with empty ItemList → EMPTY", W.fetch_feed("x", 1, 31, get=lambda u, p, t: (200, empty_itemlist_html))[1] == "EMPTY")
+
+# 403/429 폴백 with edge cases
+def get_403_then_empty_itemlist(u, p, t):
+    if "_data=" in u: return 403, '{"error":"forbidden"}'
+    return 200, empty_itemlist_html
+ck("403 → HTML retry with empty ItemList → EMPTY", W.fetch_feed("x", 1, 31, get=get_403_then_empty_itemlist)[1] == "EMPTY")
+
+def get_403_then_plain(u, p, t):
+    if "_data=" in u: return 403, '{"error":"forbidden"}'
+    return 200, "<html><body>login</body></html>"
+ck("403 → HTML retry without ItemList → ERR", W.fetch_feed("x", 1, 31, get=get_403_then_plain) == (None, "ERR"))
 
 pool = W.ProxyPool(["http://a", "http://b"], cooldown_sec=60)
 ck("라운드로빈", [pool.pick(), pool.pick(), pool.pick()] == ["http://a", "http://b", "http://a"])

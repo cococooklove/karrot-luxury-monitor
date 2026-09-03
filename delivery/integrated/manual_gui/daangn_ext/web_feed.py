@@ -97,9 +97,10 @@ def parse_feed_json(j: dict) -> list[dict]:
 _LD = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.S)
 
 
-def parse_feed_html(html: str) -> list[dict]:
+def parse_feed_html(html: str) -> list[dict] | None:
     """로더 경로가 바뀌었을 때의 폴백 — 같은 페이지 HTML 의 ld+json ItemList.
-    시각이 없어 boosted_at=0 이다(워터마크는 href 로만 판정)."""
+    시각이 없어 boosted_at=0 이다(워터마크는 href 로만 판정).
+    ItemList 없음 → None(로그인/차단 페이지). ItemList 있음 → list(빌 수 있음)."""
     for m in _LD.finditer(html or ""):
         try:
             d = json.loads(m.group(1))
@@ -121,7 +122,7 @@ def parse_feed_html(html: str) -> list[dict]:
                 "region": "", "category": "", "thumbnail": str(it.get("image") or ""),
             })
         return out
-    return []
+    return None
 
 
 class FeedCursor:
@@ -216,6 +217,8 @@ def fetch_feed(name, region_id, category, proxy=None, get=None, timeout=25):
             return None, "ERR"
         if status2 == 200:
             arts = parse_feed_html(text2)
+            if arts is None:
+                return None, "ERR"
             return (arts, "FALLBACK") if arts else ([], "EMPTY")
         return None, "BLOCK"
     if status != 200:
@@ -224,7 +227,9 @@ def fetch_feed(name, region_id, category, proxy=None, get=None, timeout=25):
         arts = parse_feed_json(json.loads(text))
     except ValueError:
         arts = parse_feed_html(text)
-        return (arts, "FALLBACK") if arts else (None, "ERR")
+        if arts is None:
+            return None, "ERR"
+        return (arts, "FALLBACK") if arts else ([], "EMPTY")
     return (arts, "OK") if arts else ([], "EMPTY")
 
 
