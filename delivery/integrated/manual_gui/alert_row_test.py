@@ -59,7 +59,7 @@ ck("경로 셀 툴팁 = 사유", tips.get(RT) == "앱 알림 등록", str(tips))
 ck("앱+끌올 → 끌올 셀 경고 툴팁", "적용되지 않" in (tips.get(D) or ""), str(tips))
 
 # ── 상태 열: 서버/스윕/미등록/확인불가/없음 ────────────────
-for _st, _name in (("sweep", "스윕 대기"), ("missing", "⚠ 미등록"), ("unknown", "확인 불가")):
+for _st, _name in (("sweep", "스윕 대기"), ("missing", "미등록"), ("unknown", "확인 불가")):
     vals, tips = m.alert_row_cells("샤넬", route("app"), "", "", "", _st)
     ck(f"상태 {_st} → {_name} + 툴팁", vals[S] == _name and bool(tips.get(S)),
        str((vals[S], tips.get(S))))

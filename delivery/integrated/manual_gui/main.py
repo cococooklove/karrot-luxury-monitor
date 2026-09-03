@@ -328,6 +328,26 @@ def _ts_text(ts):
 
 ROUTE_NAMES = {"app": "앱 알림", "sweep": "검색 스윕"}
 
+
+class RowLineDelegate(QtWidgets.QStyledItemDelegate):
+    """표의 줄 구분선. 스타일시트 `::item { border-bottom }` 으로 그리면
+    Qt 가 셀 배경(setBackground)을 통째로 무시해 버려서, 선은 여기서 긋는다."""
+    LINE = "#F1EEE8"
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        painter.save()
+        painter.setPen(QtGui.QColor(self.LINE))
+        r = option.rect
+        painter.drawLine(r.left(), r.bottom(), r.right(), r.bottom())
+        painter.restore()
+
+
+def row_lines(table):
+    """모든 QTableWidget 에 붙인다 — 안 붙이면 그 표만 줄 구분선이 없다."""
+    table.setItemDelegate(RowLineDelegate(table))
+    return table
+
 # 등록 표의 열. 인덱스를 손으로 세면 열이 하나 끼는 순간 조용히 어긋난다
 # (실제로 삭제가 id 대신 다른 열을 읽을 뻔했다). 이름으로만 참조한다.
 ALERT_COLS = ["키워드", "상태", "수집 방식", "가격범위", "제외", "추가", "끌올 기간", "id"]
@@ -347,10 +367,8 @@ DAYS_APP_TIP = ("끌올일수는 앱 알림 경로에서는 적용되지 않습�
 # 차이를 보여 주는 것이다. 이 열이 없으면 표는 조건표의 복사본으로 읽히고,
 # 앱 알림이 안 올 때 서버 등록이 빠졌는지 확인할 길이 없다.
 REG_SERVER, REG_SWEEP, REG_MISSING, REG_UNKNOWN = "server", "sweep", "missing", "unknown"
-# 미등록만 기호를 단다 — 이 표의 색은 QTableWidget::item 스타일시트가 전부
-# 덮어 버려(글자색·바탕 모두) 색으로는 구분할 수 없다. 글자로 튀게 한다.
 REG_STATUS_NAMES = {REG_SERVER: "서버 등록", REG_SWEEP: "스윕 대기",
-                    REG_MISSING: "⚠ 미등록", REG_UNKNOWN: "확인 불가"}
+                    REG_MISSING: "미등록", REG_UNKNOWN: "확인 불가"}
 REG_STATUS_TIPS = {
     REG_SERVER: "당근 앱 알림 서버에 실제 등록돼 있습니다",
     REG_SWEEP: "앱 슬롯이 차서 검색 스윕이 대신 훑습니다 (서버 등록 아님)",
@@ -359,6 +377,9 @@ REG_STATUS_TIPS = {
                   " 계정 토큰·앱 슬롯(30개)을 확인하세요"),
     REG_UNKNOWN: "서버 목록을 못 읽어 등록 여부를 알 수 없습니다 (토큰 확인)",
 }
+REG_MISSING_BG = "#FCEBE8"   # 계정표 '점검필요' 와 같은 붉은 바탕
+REG_MISSING_FG = "#B3261E"
+REG_UNKNOWN_FG = "#8B8474"
 
 
 def alert_row_cells(keyword, route, price, exclude, uid, status=None):
@@ -1607,6 +1628,25 @@ QGroupBox#sectionBox::title { subcontrol-origin: margin; left: 0px; top: 4px; pa
 QGroupBox#sectionBox:checked { color: #1F1B16; }
 QGroupBox#sectionBox:hover { color: #9A7B2E; }
 QGroupBox#sectionBox::indicator { width: 0px; height: 0px; margin: 0; border: none; }
+/* 카드 첫 섹션 — 카드 머리글 바로 아래라 구분선이 필요 없다. */
+QGroupBox#sectionBox[firstInCard="true"] { border-top: none; margin-top: 0; padding-top: 6px; }
+
+/* 조건 탭 — 단계 카드. 회색 바탕 위에 흰 카드 두 장(① 조건, ② 지역)이
+   순서대로 놓인다. 접이식 줄 세 개가 한 면에 늘어서 있던 동안 어디가 시작이고
+   무엇이 필수인지 보이지 않았다. 카드가 순서를, 배지가 단계를 말한다. */
+QWidget#rulesPage { background: #F5F3EE; }
+QFrame#stepCard { background: #FFFFFF; border: 1px solid #E8E3D9; border-radius: 20px; }
+QLabel#stepBadge { background: #9A7B2E; color: #FFFFFF; border-radius: 14px; min-width: 28px; max-width: 28px;
+  min-height: 28px; max-height: 28px; font-size: 14px; font-weight: 800; qproperty-alignment: AlignCenter; }
+QLabel#stepTitle { color: #1F1B16; font-size: 19px; font-weight: 800; }
+QLabel#stepSub { color: #8B857A; font-size: 13px; font-weight: 500; }
+QLabel#mutedNote { color: #8B857A; font-size: 13px; }
+/* 보조 동작은 글자 버튼 — 주 동작(금색) 옆에서 같은 무게로 보이면 안 된다. */
+QPushButton#linkBtn { background: transparent; border: none; color: #8A6D1F; padding: 9px 10px; font-weight: 700; }
+QPushButton#linkBtn:hover { background: #FBF6EA; border-radius: 10px; }
+QPushButton#linkBtn:disabled { color: #B5AC9A; background: transparent; }
+QPushButton#ghostBtn { background: #F2F0EC; border: none; border-radius: 10px; color: #3A342B; padding: 8px 14px; font-size: 13px; }
+QPushButton#ghostBtn:hover { background: #E8E4DC; }
 
 /* 목록 필터 — 고르는 값이지 누르는 명령이 아니다. 버튼처럼 도드라지면
    [감시 시작] 과 같은 무게로 보인다. 선택된 하나만 진하게. */
@@ -1621,7 +1661,11 @@ QTreeWidget::item:selected, QListWidget::item:selected { background: #F0E6CC; co
 QTreeWidget::item:hover, QListWidget::item:hover { background: #F7F5F1; }
 
 QTableWidget { gridline-color: transparent; }
-QTableWidget::item { padding: 11px 6px; color: #1F1B16; border-bottom: 1px solid #F1EEE8; }
+/* ::item 에 color 를 주면 setForeground 가, border 를 주면 setBackground 가
+   전부 무시된다(QStyleSheetStyle). 실제로 미등록 빨강·계정표 점검필요 바탕이
+   그래서 안 보였다. 글자색은 위 QTableWidget 규칙이 물려주고, 줄 구분선은
+   RowLineDelegate 가 그린다. 여기엔 padding 만 둔다. */
+QTableWidget::item { padding: 11px 6px; }
 QTableWidget::item:selected { background: #F5EFDD; color: #1F1B16; }
 QTableWidget { selection-background-color: #F5EFDD; }
 QHeaderView::section { background: #FFFFFF; color: #8B857A; padding: 12px 8px; border: none; border-bottom: 1px solid #EAE6DE; font-weight: 700; font-size: 12px; letter-spacing: 0.3px; }
@@ -2587,25 +2631,30 @@ class MainWindow(QMainWindow):
         # 예전에는 여기 조건 수백 줄을 표로 그렸다. 스크롤 상자 안에서 7줄씩
         # 보이는 표는 읽을 수도 고칠 수도 없다 — 엑셀이 둘 다 낫다. 화면은
         # 무엇이 언제 어느 파일에서 들어갔는지만 말하고, 내용은 그 파일을 연다.
-        self.rulesSummary = QtWidgets.QLabel("조건 없음")
-        self.rulesSummary.setWordWrap(True)
-        self.rulesSummary.setStyleSheet("font-size:14px; font-weight:700; color:#3A342B;")
-        cond_v.addWidget(self.rulesSummary)
+        # 주 동작(엑셀 넣기)은 금색 하나, 열기·다시 읽기는 글자 버튼이다 —
+        # 셋이 같은 무게로 나란히 있던 동안 무엇을 먼저 눌러야 하는지 몰랐다.
         self.rulesOpenBtn = QtWidgets.QPushButton("엑셀 열기")
+        self.rulesOpenBtn.setObjectName("linkBtn")
+        self.rulesOpenBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.rulesOpenBtn.setToolTip("넣은 조건표 엑셀을 엑셀 프로그램으로 엽니다")
         self.rulesOpenBtn.clicked.connect(self.on_rules_open_excel)
-        self.rulesReloadBtn = QtWidgets.QPushButton("엑셀 다시 읽기")
+        self.rulesReloadBtn = QtWidgets.QPushButton("다시 읽기")
+        self.rulesReloadBtn.setObjectName("linkBtn")
+        self.rulesReloadBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.rulesReloadBtn.setToolTip(
             "엑셀에서 고쳐 저장한 뒤 누르면 같은 파일을 다시 읽어 적용합니다")
         self.rulesReloadBtn.clicked.connect(self.on_rules_reload_excel)
-        _rb = QtWidgets.QHBoxLayout()
+        _rb = QtWidgets.QHBoxLayout(); _rb.setSpacing(4)
         _rb.addWidget(self.alertRulesBtn)
+        _rb.addSpacing(6)
         _rb.addWidget(self.rulesOpenBtn)
         _rb.addWidget(self.rulesReloadBtn)
         _rb.addStretch(1)
         cond_v.addLayout(_rb)
-        cond_v.addWidget(QtWidgets.QLabel(
-            "조건은 엑셀에서 고칩니다. 고쳐 저장한 뒤 [엑셀 다시 읽기]를 누르세요."))
+        self.rulesSummary = QtWidgets.QLabel("조건 없음")
+        self.rulesSummary.setObjectName("mutedNote")
+        self.rulesSummary.setWordWrap(True)
+        cond_v.addWidget(self.rulesSummary)
 
         # 진행 표시 — 등록은 '계정 수 × 키워드 수' 만큼 요청이라 20초 넘게 걸린다.
         # 그동안 화면이 아무 말도 안 하면 사용자는 실패한 줄 알고 다시 누르거나
@@ -2626,7 +2675,7 @@ class MainWindow(QMainWindow):
         self.alertSubLabel = QtWidgets.QLabel("동네 정보: (감시를 시작하면 채워집니다)")
 
         # 등록 목록
-        self.alertTable = QtWidgets.QTableWidget(0, len(ALERT_COLS), w)
+        self.alertTable = row_lines(QtWidgets.QTableWidget(0, len(ALERT_COLS), w))
         self.alertTable.setHorizontalHeaderLabels(ALERT_COLS)
         self.alertTable.verticalHeader().setVisible(False)
         self.alertTable.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -2682,7 +2731,7 @@ class MainWindow(QMainWindow):
         # 이 표는 조건표의 복사본이 아니라 '서버에 실제 걸렸나'를 보는 창이다.
         # 이름·설명이 그걸 말하지 않으면 엑셀이 있는데 왜 또 있냐는 질문이 온다.
         _rh = QtWidgets.QLabel(
-            "엑셀 조건 ≠ 서버 등록. <b>⚠ 미등록</b>은 조건은 있지만 당근에 아직"
+            "엑셀 조건 ≠ 서버 등록. 빨간 <b>미등록</b>은 조건은 있지만 당근에 아직"
             " 안 올라간 키워드 — 앱 알림이 안 오는 첫 번째 이유입니다.")
         _rh.setWordWrap(True)
         _rh.setStyleSheet("color: #555;")
@@ -2742,7 +2791,7 @@ class MainWindow(QMainWindow):
             lambda _b: self._refresh_listing_table())
         listing_v.addLayout(fbar)
 
-        self.listingTable = QtWidgets.QTableWidget(0, len(LISTING_COLS), w)
+        self.listingTable = row_lines(QtWidgets.QTableWidget(0, len(LISTING_COLS), w))
         self.listingTable.setHorizontalHeaderLabels(
             LISTING_COLS)
         self.listingTable.verticalHeader().setVisible(False)
@@ -3173,7 +3222,7 @@ class MainWindow(QMainWindow):
         summ.setStyleSheet("font-weight:700; font-size:15px; padding:6px 4px; color:#8A6D1F;")
         lay.addWidget(summ)
         cols = ["계정", "동네", "만료(분)", "핵심", "실패", "상태"]
-        tbl = QtWidgets.QTableWidget(0, len(cols), dlg)
+        tbl = row_lines(QtWidgets.QTableWidget(0, len(cols), dlg))
         tbl.setHorizontalHeaderLabels(cols)
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -3469,16 +3518,20 @@ class MainWindow(QMainWindow):
 
     def _alert_row(self, r, keyword, route, price, exclude, uid, status=None):
         """표 한 줄. 값 구성은 alert_row_cells(순수 함수)가 한다.
-        미등록 줄은 키워드·상태를 굵게 — 표에서 눈에 띄어야 할 유일한 줄이다.
-        (색은 QTableWidget::item 스타일시트가 덮어 setForeground/Background
-        둘 다 안 먹는다. 글꼴은 덮지 않는다.)"""
+        미등록 줄은 붉은 바탕 + 붉고 굵은 키워드·상태 — 표에서 눈에 띄어야 할
+        유일한 줄이다."""
         vals, tips = alert_row_cells(keyword, route, price, exclude, uid, status)
         for c, val in enumerate(vals):
             cell = QtWidgets.QTableWidgetItem(val)
             if c in tips:
                 cell.setToolTip(tips[c])
-            if status == REG_MISSING and c in (ALERT_COL_KEYWORD, ALERT_COL_STATUS):
-                f = cell.font(); f.setBold(True); cell.setFont(f)
+            if status == REG_MISSING:
+                cell.setBackground(QtGui.QBrush(QtGui.QColor(REG_MISSING_BG)))
+                if c in (ALERT_COL_KEYWORD, ALERT_COL_STATUS):
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor(REG_MISSING_FG)))
+                    f = cell.font(); f.setBold(True); cell.setFont(f)
+            elif status == REG_UNKNOWN and c == ALERT_COL_STATUS:
+                cell.setForeground(QtGui.QBrush(QtGui.QColor(REG_UNKNOWN_FG)))
             self.alertTable.setItem(r, c, cell)
 
     def _queue_entries(self):
@@ -4536,7 +4589,7 @@ class MainWindow(QMainWindow):
             " — '오버 더 문'은 '오버더문'도 잡습니다."))
         cap = QtWidgets.QLabel(dlg)
         v.addWidget(cap)
-        tbl = QtWidgets.QTableWidget(0, len(self.RULE_COLS), dlg)
+        tbl = row_lines(QtWidgets.QTableWidget(0, len(self.RULE_COLS), dlg))
         tbl.setHorizontalHeaderLabels(self.RULE_COLS)
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)

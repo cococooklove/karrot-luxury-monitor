@@ -577,6 +577,23 @@ if _win is not None:
     _win._router, _win._sweep_queue = _svr, _svq
     _win.alertTable.setRowCount(0)
     _win.alertLog.clear()
+
+    # ── 셀 색이 실제로 그려진다 (스타일시트 함정) ──
+    # ::item 에 color/border 를 주면 setForeground/setBackground 가 조용히
+    # 무시된다. 아이템 속성이 아니라 픽셀로 확인해야 이 회귀를 잡는다.
+    from PyQt6 import QtGui as _QtG
+    _rm = _win._routes_map
+    _win._router = None
+    _win._routes_map = lambda: {"구찌": {"keyword": "구찌", "route": "app", "cond": {}}}
+    _win._sweep_queue = _FakeQueue([])
+    _win._alert_populate({"user_keywords": []})
+    _img = _win.alertTable.grab().toImage()
+    _want = _QtG.QColor(m.REG_MISSING_BG)
+    _hit = sum(1 for _x in range(0, _img.width(), 3) for _y in range(0, _img.height(), 3)
+               if _img.pixelColor(_x, _y) == _want)
+    ck("미등록 줄의 붉은 바탕이 픽셀로 보인다", _hit > 50, f"{_hit}px")
+    _win._routes_map, _win._sweep_queue = _rm, _svq
+    _win.alertTable.setRowCount(0)
     # close() 는 부르지 않는다 — closeEvent 가 모달 확인창을 띄워 offscreen 에서 멈춘다.
 
 # ── 중복 판정(dedupe_new_matches) ──

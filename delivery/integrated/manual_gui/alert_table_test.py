@@ -27,7 +27,7 @@ def ck(name, cond, extra=""):
 
 
 try:
-    from PyQt6 import QtWidgets
+    from PyQt6 import QtWidgets, QtCore
 except Exception as e:
     print(f"[SKIP] PyQt6 없음 ({type(e).__name__})")
     raise SystemExit(0)
@@ -123,11 +123,17 @@ ck("서버에 없는 키워드도 함께 보인다", any(r[0] == "구찌" for r 
 ck("중복 줄이 없다", len(rows) == 2, f"{len(rows)}행")
 ck("서버에 있는 줄 = 서버 등록", sh[S] == "서버 등록", sh[S])
 gu = [r for r in rows if r[0] == "구찌"][0]
-ck("앱 경로인데 서버에 없으면 = ⚠ 미등록", gu[S] == "⚠ 미등록", gu[S])
+ck("앱 경로인데 서버에 없으면 = 미등록", gu[S] == "미등록", gu[S])
 _gi = f.alertTable.item([r[0] for r in rows].index("구찌"), S)
-ck("미등록은 굵게", _gi.font().bold())
+ck("미등록은 굵고 붉다", _gi.font().bold()
+   and _gi.foreground().color().name() == m.REG_MISSING_FG.lower(),
+   _gi.foreground().color().name())
+ck("미등록 줄은 붉은 바탕",
+   _gi.background().color().name() == m.REG_MISSING_BG.lower(),
+   _gi.background().color().name())
 _si = f.alertTable.item([r[0] for r in rows].index("샤넬"), S)
-ck("서버 등록은 보통 굵기", not _si.font().bold())
+ck("서버 등록은 보통 굵기·바탕 없음", not _si.font().bold()
+   and _si.background().style() == QtCore.Qt.BrushStyle.NoBrush)
 
 print("\n=== 3. 스윕 대기열도 함께 ===")
 f = _Fake(EXCEL_ROUTES, [{"keyword": "롤렉스", "min": 1000000, "max": None,
