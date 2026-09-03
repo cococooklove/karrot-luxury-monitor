@@ -191,16 +191,51 @@ class AccountStore:
         return True
 
     def set_role(self, key, role: str) -> bool:
+        """이 계정의 역할(alert/sweep)을 지정한다. 성공하면 True.
+
+        `key` 는 code / label / refresh 중 아무거나 — set_proxy 와 같은 방식.
+
+        **set_proxy 와 같은 이유로 파일락을 잡고 다시 읽어서 그 줄만 고친다.**
+        수확기가 같은 파일에 새 계정·갱신 토큰을 병합해 쓴다 — 메모리 사본을
+        통째로 덮어쓰면 그 사이 들어온 계정/토큰이 사라진다.
+        """
         if role not in ROLES:
             return False
+        key = str(key or "").strip()
+        if not key:
+            return False
+        try:
+            from ld_autoharvest import _file_lock
+        except Exception:
+            import contextlib
+
+            @contextlib.contextmanager
+            def _file_lock(_fp, log=None):
+                yield False
+
         with self._lock:
-            for r in self.rows:
-                if key in (r.get("code"), r.get("label"), r.get("refresh")):
-                    r["role"] = role
-                    break
-            else:
-                return False
-        self.save()
+            with _file_lock(self.path):
+                try:
+                    with open(self.path, encoding="utf-8") as f:
+                        rows = json.load(f)
+                except FileNotFoundError:
+                    rows = []
+                except Exception:
+                    return False
+                hit = None
+                for r in rows:
+                    if key in (str(r.get("code") or ""), str(r.get("label") or ""),
+                               str(r.get("refresh") or "")):
+                        hit = r
+                        break
+                if hit is None:
+                    return False
+                hit["role"] = role
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(rows, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+                self.rows = rows
         return True
 
     def proxies(self) -> list[str]:

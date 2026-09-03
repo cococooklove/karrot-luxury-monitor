@@ -21,6 +21,20 @@ json.dump(rows, open(fp, "w", encoding="utf-8"))
 ck("역할 기본 alert", AS.account_role({"code": "A1"}) == AS.ROLE_ALERT and AS.account_role({"role": "sweep"}) == AS.ROLE_SWEEP)
 ck("모르는 값은 alert", AS.account_role({"role": "banana"}) == AS.ROLE_ALERT)
 st = AS.AccountStore(fp)
+
+# 수확기가 그 사이 새 계정을 파일에 병합해 넣은 상황을 흉내 — in-memory 사본엔 없음
+on_disk = json.load(open(fp, encoding="utf-8"))
+on_disk.append({"code": "N1", "refresh": "r9", "access": jwt(), "proxy": None})
+json.dump(on_disk, open(fp, "w", encoding="utf-8"))
+st.set_role("A1", "sweep")
+after_rows = json.load(open(fp, encoding="utf-8"))
+ck("동시쓰기 유실 없음 — 수확기가 넣은 N1 이 살아있다",
+   any(r.get("code") == "N1" for r in after_rows))
+ck("역할 갱신도 같이 반영됨",
+   next((r for r in after_rows if r.get("code") == "A1"), {}).get("role") == "sweep")
+# N1 은 이 유실검증 전용 시뮬레이션 — 이후 검증에 섞이지 않게 지운다
+json.dump([r for r in after_rows if r.get("code") != "N1"], open(fp, "w", encoding="utf-8"))
+
 ck("set_role 저장", st.set_role("A1", "sweep") and json.load(open(fp))[0]["role"] == "sweep")
 ck("잘못된 역할 거절", not st.set_role("A1", "x"))
 st.set_role("A1", "alert")
