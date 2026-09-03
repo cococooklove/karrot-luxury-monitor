@@ -1,11 +1,11 @@
-"""실행 중인 판이 무엇이고 최신인지 — 창 우측 상단에 적는다.
+"""실행 중인 판이 무엇인지 — 창 우측 상단에 적는다.
 
 설계 이유:
   - 서버는 git 이 없다. 배포가 남기는 data/deployed.json(sha·설치시각)이 유일한
     자기 판 기록이다. 개발 PC 에는 그 파일이 없으니 git 에 묻고, 둘 다 없으면
     '판 미상' 으로 적되 앱은 멀쩡히 뜬다.
-  - '최신인지' 는 GitHub 의 master 끝 커밋과 비교한다. 네트워크는 실패할 수 있으니
-    확인 못 하면 확인 못 했다고 적는다 — 최신이라고 우기지 않는다.
+  - '최신' 판정은 하지 않는다. 판과 설치 시각만 적고, 최신인지는 보는 사람이
+    커밋 기록과 대조한다 — 틀린 '최신' 표시가 없는 표시보다 나쁘다.
   - 여기는 Qt 를 모른다. 순수 함수라 테스트가 창 없이 돈다.
 """
 import json
@@ -13,10 +13,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-REPO = "cococooklove/karrot-luxury-monitor"
-LATEST_URL = f"https://api.github.com/repos/{REPO}/commits/master"
 STAMP_FILE = os.path.join("data", "deployed.json")
-NET_TIMEOUT = 8
 
 
 def local_version(app_dir=".") -> dict:
@@ -56,36 +53,14 @@ def _local_stamp(iso) -> str:
         return ""
 
 
-def fetch_latest_sha(timeout=NET_TIMEOUT) -> str:
-    """GitHub master 끝 커밋 sha. 실패하면 ''(예외를 밖으로 내지 않는다)."""
-    try:
-        from urllib.request import Request, urlopen
-        req = Request(LATEST_URL, headers={"Accept": "application/vnd.github+json",
-                                           "User-Agent": "karrot-monitor"})
-        with urlopen(req, timeout=timeout) as r:
-            return str(json.load(r).get("sha") or "")
-    except Exception:
-        return ""
-
-
-def version_label(local: dict, latest_sha, checked=False) -> tuple:
-    """(표시 문구, 상태) — 상태는 latest | outdated | unknown | none.
-
-    checked=False 면 아직 확인 전(기동 직후) — '확인 중'. 확인 뒤 sha 가 비면
-    '확인 못 함'. 판 자체가 없으면(none) 최신 여부는 묻지 않는다."""
+def version_label(local: dict) -> str:
+    """'v 056224c · 설치 09/02 18:56' / 'v abc1234 · 개발 판' / '판 미상'."""
     short = local.get("short") or ""
     if not short:
-        return "판 미상", "none"
+        return "판 미상"
     head = f"v {short}"
     if local.get("installed"):
         head += f" · 설치 {local['installed']}"
     elif local.get("source") == "git":
         head += " · 개발 판"
-    if not checked:
-        return head + " · 최신 확인 중…", "unknown"
-    latest = (latest_sha or "").strip()
-    if not latest:
-        return head + " · 최신 확인 못 함", "unknown"
-    if latest.startswith(short) or (local.get("sha") and latest == local["sha"]):
-        return head + " · ✓ 최신", "latest"
-    return head + f" · ⚠ 새 판 {latest[:7]} 있음", "outdated"
+    return head
