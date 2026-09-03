@@ -1767,8 +1767,8 @@ class MainWindow(QMainWindow):
     MODES = {
         "manual": {"tabs": ("manual",), "background": False,
                    "title": "수동 검색"},
-        "watch":  {"tabs": ("alert", "emul"), "background": True,
-                   "title": "매물 감시"},
+        "watch":  {"tabs": ("rules", "results", "emul", "settings"),
+                   "background": True, "title": "매물 감시"},
     }
 
     def __init__(self, mode="watch"):
@@ -1851,15 +1851,23 @@ class MainWindow(QMainWindow):
         manual_w = self._scroll(self._build_manual_tab())
         # 검색 스윕 스레드 핸들 — 탭은 없어졌지만 엔진은 라우터가 부린다.
         self.auto_monitor = None
-        alert_w = self._scroll(self._build_alert_tab())
+        # 매물 감시는 조건·결과·설정 세 탭으로 나뉜다. 한 탭에 접이식 네 개로
+        # 쌓았던 동안 설정은 고급 패널·알림 창·계정 창 세 곳에 흩어졌고,
+        # 클라는 어디를 펴야 하는지 몰랐다. 위젯은 한 함수가 다 만든다.
+        rules_w, results_w, settings_w = (
+            self._scroll(p) for p in self._build_alert_tab())
         # 에뮬레이터는 실제 창을 끼워넣으므로 스크롤로 감싸지 않는다(크기 = 탭 영역).
         emul_w = self._build_emul_tab()
-        if "manual" in show:
-            self.tabs.addTab(manual_w, "수동 검색")
-        if "alert" in show:
-            self.tabs.addTab(alert_w, "매물 감시")
-        if "emul" in show:
-            self.tabs.addTab(emul_w, "에뮬레이터")
+        for key, page, title in (("manual", manual_w, "수동 검색"),
+                                 ("rules", rules_w, "조건"),
+                                 ("results", results_w, "결과"),
+                                 ("emul", emul_w, "에뮬레이터"),
+                                 ("settings", settings_w, "설정")):
+            if key in show:
+                self.tabs.addTab(page, title)
+        # 하루에 수십 번 보는 것은 결과다 — 조건은 첫 탭이지만 첫 화면은 아니다.
+        if "results" in show:
+            self.tabs.setCurrentWidget(results_w)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         # 명품 브랜드 헤더(골드 워드마크) + 탭
         central = QtWidgets.QWidget()
@@ -2318,8 +2326,8 @@ class MainWindow(QMainWindow):
                 print(f"[에뮬레이터] 창 복구 실패: {type(e).__name__}: {e}")
 
     # ── 키워드 알림 탭 ─────────────────────────────────────────────
-    # ── 상태칩 → 고급 패널 항목 ──
-    # 칩은 값을 보여줄 뿐 조절은 고급 패널이 한다. 사용자가 "커버리지 78%" 를
+    # ── 상태칩 → 대응 항목 ──
+    # 칩은 값을 보여줄 뿐 조절은 조건·설정 탭이 한다. 사용자가 "커버리지 78%" 를
     # 보고 그 설정으로 가는 길이 없으면 칩은 죽은 글자다(설계 §1: 칩 클릭은 해당
     # 고급 패널 항목으로 스크롤한다). 대응 항목이 없는 칩은 여기 넣지 않는다 —
     # 없는 목적지를 지어내면 사용자가 엉뚱한 곳으로 간다.
@@ -2433,15 +2441,15 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_alert_tab(self):
-        """화면 순서는 맨 아래 조립부가 한 번에 정한다.
+        """매물 감시 위젯을 전부 만들고 (조건, 결과, 설정) 세 페이지로 돌려준다.
 
-        위젯을 만드는 순서와 보이는 순서를 갈라 둔 이유가 있다. 클라가 하루에
-        수십 번 보는 것은 매물 표 하나인데, 예전에는 설명문·현황·등록폼·등록표를
-        다 지나야 거기 닿았다. 자주 보는 것을 위로 올리면서도 생성 코드를
-        흔들지 않으려면 이 분리가 필요하다."""
-        w = QtWidgets.QWidget()
+        위젯을 만드는 순서와 보이는 순서를 갈라 둔 이유가 있다. 여기저기서
+        서로의 위젯을 참조하므로 생성은 한 함수에 두고, 어느 탭에 놓을지는
+        맨 아래 조립부가 한 번에 정한다. 한 탭에 접이식 네 개로 쌓았던
+        동안 클라는 하루에 수십 번 보는 매물 표 아래 접힌 것을 못 찾았다."""
+        w = QtWidgets.QWidget()               # 결과 페이지 — 매물 표의 집
         v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
-        cond_v = QtWidgets.QVBoxLayout()      # '감시 조건'(접힘) 에 들어갈 것
+        cond_v = QtWidgets.QVBoxLayout()      # '감시 조건' 에 들어갈 것
         listing_v = QtWidgets.QVBoxLayout()   # 매물 — 화면의 주인공
 
         # ── 현황 대시보드 ──
@@ -2484,8 +2492,8 @@ class MainWindow(QMainWindow):
         self.watchToggleBtn.setToolTip(self.TAB_HELP)
         self.watchToggleBtn.clicked.connect(self.on_watch_toggle)
         top.addWidget(self.watchToggleBtn)
-        # 칩 — 읽기 전용 상태 표시지만 죽은 글자는 아니다. 누르면 그 값을 조절하는
-        # 고급 패널 항목까지 펼쳐서 데려간다.
+        # 칩 — 읽기 전용 상태 표시지만 죽은 글자는 아니다. 누르면 그 값을 다루는
+        # 탭(조건·설정)의 항목까지 데려간다.
         self._chips = {}
         for key, text in (("token", "토큰 -"), ("accounts", "계정 -"),
                           ("coverage", "커버리지 -"), ("poll", "다음폴링 -"),
@@ -2494,12 +2502,12 @@ class MainWindow(QMainWindow):
             chip.setObjectName("statChip")
             chip.setFlat(True)
             chip.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            chip.setToolTip("누르면 고급 패널의 해당 설정으로 이동합니다")
+            chip.setToolTip("누르면 그 값을 다루는 탭으로 이동합니다")
             chip.clicked.connect(lambda _c=False, k=key: self.on_chip_clicked(k))
             self._chips[key] = chip
             self._style_chip(key, "ok")
             top.addWidget(chip)
-        # 추적중 칩은 고급 패널에 대응 항목이 없다(스윕 주기는 정책 상수다).
+        # 추적중 칩은 대응 항목이 없다(스윕 주기는 정책 상수다).
         # 목적지 없는 칩은 누르지 않는 편이 낫다 — 라벨로 둔다.
         top.addWidget(self._watch_label, 1)
 
@@ -2575,12 +2583,12 @@ class MainWindow(QMainWindow):
 
         # 삭제 경로는 '전체 삭제' 하나다. 낱개 삭제는 조건표와 등록을 어긋나게
         # 만들고, 표 바로 아래 있던 동안 실서버에서 등록 21건이 날아갔다
-        # (2026-09-02). 고급에 둔다.
+        # (2026-09-02). 설정 탭의 고급(접힘)에 둔다.
         self.alertDelAllBtn = QtWidgets.QPushButton("전체 삭제")
 
-        # ── 고급 패널에 들어갈 위젯(튜닝) ──
+        # ── 화면에서 뺀 튜닝값(저장·복원이 계속 쓴다) ──
         # 폴링·커버 계산은 감시 시작이 스스로 한다. 계정 현황·프록시·진단은
-        # 계정+프록시 창 안으로 옮겼다 — 여기 버튼 여덟 개가 나란히 있던 동안
+        # 계정+프록시 창 안으로 옮겼다 — 버튼 여덟 개가 나란히 있던 동안
         # 클라는 어느 것을 눌러야 하는지 몰랐다.
         self.alertPollInterval = QtWidgets.QSpinBox(); self.alertPollInterval.setRange(30, 3600)
         self.alertPollInterval.setValue(120); self.alertPollInterval.setSuffix("초")
@@ -2596,39 +2604,53 @@ class MainWindow(QMainWindow):
         # 부팅 자동실행은 설치본(install.ps1)이 LDPlayer 순차 기동 뒤에 앱을
         # 띄우는 경로로 등록한다 — 앱이 따로 등록하면 로그온 때 둘이 동시에
         # 인스턴스를 띄워 함대가 hang 한다.
-        # ── 고급 (접힘) ──
-        # 평소엔 토글 하나면 된다. 진단·튜닝이 필요할 때만 편다.
-        self.advancedBox = QtWidgets.QGroupBox("고급")
-        self.advancedBox.setObjectName("sectionBox")
-        self.advancedBox.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.advancedBox.setCheckable(True)
-        self.advancedBox.setChecked(False)
-        av = QtWidgets.QVBoxLayout(self.advancedBox)
-        self.advancedBox.toggled.connect(self._sync_advanced_visible)
         sweep = self._build_sweep_settings()
 
-        # 첫 줄 = 다른 창으로 가는 입구 + 되돌리기. 주기·커버는 감시 시작이
-        # 알아서 정하는 값이라 화면에서 뺐다(위젯은 살아 있고 저장값도 읽는다).
-        a1 = QtWidgets.QHBoxLayout(); a1.setSpacing(8)
-        a1.addWidget(self.autoNotifyBtn)
-        a1.addWidget(self.autoAccountsBtn)
-        a1.addWidget(self.healthLabel)
-        a1.addStretch(1); a1.addWidget(self.alertDelAllBtn)
-        av.addLayout(a1)
+        # ── 조건 페이지: 조건표 → 훑을 지역 → 등록 상태 ──
+        # 등록 상태는 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
+        # 조건과 같은 상자에 두면 둘을 같은 것으로 읽는다 — 상자를 가른다.
+        rules_w = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(rules_w); rv.setContentsMargins(16, 14, 16, 14); rv.setSpacing(10)
+        self.condBox = self._collapsible("감시 조건", cond_v, checked=True)
+        rv.addWidget(self.condBox)
+        self.areaBox = self._collapsible("훑을 지역", sweep, checked=True)
+        rv.addWidget(self.areaBox)
+        reg_v = QtWidgets.QVBoxLayout()
+        reg_v.addWidget(self.alertSubLabel)
+        reg_v.addWidget(self.alertTable, 1)
+        self.regBox = self._collapsible("당근에 등록된 키워드", reg_v, checked=True)
+        rv.addWidget(self.regBox, 1)
 
-        # 훑을 지역 — 고급에서 클라가 고를 것은 이것 하나다.
-        av.addWidget(QtWidgets.QLabel("── 훑을 지역 ──"))
-        av.addWidget(sweep)
-
-        # 등록 상태 — 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
-        # 조건과 같은 자리에 두면 둘을 같은 것으로 읽는다.
-        av.addWidget(QtWidgets.QLabel("── 당근에 등록된 키워드 ──"))
-        av.addWidget(self.alertSubLabel)
-        av.addWidget(self.alertTable, 1)
-
-        # 체크 해제는 자식을 '비활성'으로만 만든다 — 접으려면 직접 숨겨야 하고,
-        # setChecked(False) 는 toggled 를 쏘지 않으므로 한 번은 손으로 부른다.
-        self._sync_advanced_visible(self.advancedBox.isChecked())
+        # ── 설정 페이지: 알림(인라인) → 계정·프록시(창) → 고급(접힘) ──
+        settings_w = QtWidgets.QWidget()
+        sv = QtWidgets.QVBoxLayout(settings_w); sv.setContentsMargins(16, 14, 16, 14); sv.setSpacing(10)
+        self.notifyBox = QtWidgets.QGroupBox("알림 — 텔레그램 · 구글시트")
+        self._build_notify_form(self.notifyBox)
+        sv.addWidget(self.notifyBox)
+        # 계정 현황·프록시 목록·프록시 진단은 계정+프록시 창 안에 있다 —
+        # 전부 같은 accounts.json 을 보는 화면이라 한 입구로 모았다. fleet
+        # 상태·진단 서브창이 딸려 있어 이것만은 인라인으로 펴지 않는다.
+        acct = QtWidgets.QGroupBox("계정 · 프록시")
+        al = QtWidgets.QHBoxLayout(acct); al.setSpacing(10)
+        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시 열기", acct)
+        self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
+        self.autoAccountsBtn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
+                                          QtWidgets.QSizePolicy.Policy.Fixed)
+        al.addWidget(self.autoAccountsBtn)
+        al.addWidget(self.healthLabel, 1)
+        sv.addWidget(acct)
+        # 고급 = 되돌리기. 평소엔 쓸 일이 없어 접어 둔다.
+        adv_v = QtWidgets.QVBoxLayout()
+        _dr = QtWidgets.QHBoxLayout(); _dr.setSpacing(10)
+        _dr.addWidget(self.alertDelAllBtn)
+        _dl = QtWidgets.QLabel("당근에 등록된 키워드를 전부 지웁니다. "
+                               "조건표 엑셀을 다시 넣으면 다시 등록됩니다.")
+        _dl.setWordWrap(True)
+        _dr.addWidget(_dl, 1)
+        adv_v.addLayout(_dr)
+        self.advancedBox = self._collapsible("고급", adv_v)
+        sv.addWidget(self.advancedBox)
+        sv.addStretch(1)
 
         # ── 매물 (신규·추적을 한 표에) ──
         fbar = QtWidgets.QHBoxLayout(); fbar.setSpacing(6)
@@ -2671,16 +2693,13 @@ class MainWindow(QMainWindow):
 
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
 
-        # ── 조립: 자주 보는 것이 위 ──
-        # ① 지금 상태 한 줄  ② 매물  ③ 나머지는 접어 둔다
+        # ── 결과 페이지 조립: 자주 보는 것이 위 ──
+        # ① 지금 상태 한 줄  ② 매물  ③ 현황(접힘 — 칩이 요약이다)  ④ 로그
         v.addLayout(top)
         v.addWidget(self.alertBusyRow)
         v.addLayout(listing_v, 1)
-        self.condBox = self._collapsible("감시 조건", cond_v)
-        self.logBox = self._collapsible("로그", self.alertLog)
+        self.logBox = self._collapsible("로그", self.alertLog, checked=True)
         v.addWidget(dash)
-        v.addWidget(self.condBox)
-        v.addWidget(self.advancedBox)
         v.addWidget(self.logBox)
 
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
@@ -2776,7 +2795,7 @@ class MainWindow(QMainWindow):
                 QtCore.QTimer.singleShot(8000, self._autostart_poll)
         self._init_dashboard()
         self._refresh_rules_view()
-        return w
+        return rules_w, w, settings_w
 
     _CHIP_COLORS = {"ok": ("#F7F5F1", "#3A342B", "#DDD6C9"),
                     "warn": ("#FBF1DC", "#8A6210", "#E7D3A6"),
@@ -2814,27 +2833,36 @@ class MainWindow(QMainWindow):
         return None
 
     def on_chip_clicked(self, key):
-        """상태칩 → 고급 패널을 펼치고 대응 항목으로 스크롤. 목적지 없으면 무시.
+        """상태칩 → 대응 항목이 있는 탭으로 가서 그 항목을 보여 준다. 목적지
+        없으면 무시.
 
-        반환값은 실제로 데려갔는지다(테스트가 확인한다)."""
+        칩은 결과 탭에 있고 목적지는 조건·설정 탭에 있다 — 탭을 먼저 바꾸고,
+        접힌 상자 뒤면 펴고, 스크롤로 데려간다. 반환값은 실제로 데려갔는지다
+        (테스트가 확인한다)."""
         target = getattr(self, self.CHIP_TARGETS.get(key) or "", None)
         if target is None:
             return False
-        # 목적지가 어느 섹션에 있든 그 섹션을 편다 — '고급' 하나만 펴던 동안
-        # 조건표로 가는 칩은 접힌 섹션 뒤로 데려가고 끝났다.
-        section = self.advancedBox
-        for box in (self.condBox, self.dashBox, self.logBox, self.advancedBox):
-            if box is not None and target in box.findChildren(QtWidgets.QWidget):
-                section = box
+        page = None
+        for i in range(self.tabs.count()):
+            p = self.tabs.widget(i)
+            if target in p.findChildren(QtWidgets.QWidget):
+                page = p
+                if self.tabs.currentIndex() != i:
+                    self.tabs.setCurrentIndex(i)
                 break
-        if not section.isChecked():
-            section.setChecked(True)                # toggled → 자식 표시
+        # 목적지가 어느 상자에 있든 그 상자를 편다 — '고급' 하나만 펴던 동안
+        # 조건표로 가는 칩은 접힌 섹션 뒤로 데려가고 끝났다.
+        p = target.parentWidget()
+        while p is not None and p is not page:
+            if (isinstance(p, QtWidgets.QGroupBox) and p.isCheckable()
+                    and not p.isChecked()):
+                p.setChecked(True)                  # toggled → 자식 표시
+            p = p.parentWidget()
         # 방금 펼친 위젯은 아직 좌표가 없다 — 레이아웃을 먼저 확정시켜야
         # ensureWidgetVisible 이 옛 자리로 스크롤하지 않는다.
-        parent_layout = section.parentWidget().layout() \
-            if section.parentWidget() else None
-        if parent_layout is not None:
-            parent_layout.activate()
+        inner = page.widget() if isinstance(page, QtWidgets.QScrollArea) else page
+        if inner is not None and inner.layout() is not None:
+            inner.layout().activate()
         area = self._enclosing_scroll(target)
 
         def _reveal():
@@ -3997,20 +4025,10 @@ class MainWindow(QMainWindow):
         self._sweepLegacy.setVisible(False)
         gv.addWidget(self._sweepLegacy)
 
-        # 다른 창으로 가는 버튼은 고급 패널 첫 줄이 배치한다. 시작 버튼은
-        # 없다 — 스윕은 감시 토글이 켜고 끈다.
-        # 엑셀은 '매물 감시' 탭의 [엑셀로 조건 넣기] 하나로 모았다. 여기에도
-        # 엑셀 버튼이 있던 동안, 등록용과 알림용이 따로 있는 줄 알고 클라가
-        # 같은 시트를 양쪽에 넣었다.
-        self.autoNotifyBtn = QtWidgets.QPushButton("알림 설정", self)
-        self.autoNotifyBtn.clicked.connect(self.on_auto_notify_clicked)
-        # 계정 현황·프록시 목록·프록시 진단은 계정+프록시 창 안에 있다 —
-        # 전부 같은 accounts.json 을 보는 화면이라 한 입구로 모았다.
-        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시", self)
-        self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
-        for b in (self.autoNotifyBtn, self.autoAccountsBtn):
-            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
-                            QtWidgets.QSizePolicy.Policy.Fixed)
+        # 시작 버튼은 없다 — 스윕은 감시 토글이 켜고 끈다. 알림·계정 설정은
+        # 설정 탭에 있다. 엑셀은 조건 탭의 [엑셀로 조건 넣기] 하나로 모았다.
+        # 여기에도 엑셀 버튼이 있던 동안, 등록용과 알림용이 따로 있는 줄
+        # 알고 클라가 같은 시트를 양쪽에 넣었다.
 
         # 복원이 먼저, 배선이 나중이다 — 순서가 바뀌면 복원값이 저장을 유발해
         # 첫 실행에서 '기본값을 사용자가 고른 값'으로 굳혀 버린다.
@@ -4149,94 +4167,119 @@ class MainWindow(QMainWindow):
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
 
-    def on_auto_notify_clicked(self):
-        """알림 설정 다이얼로그 — 텔레그램/구글시트. 저장 지속 + 테스트 발송."""
-        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("알림 설정"); dlg.resize(560, 300)
-        v = QtWidgets.QVBoxLayout(dlg); f = QtWidgets.QFormLayout()
-        tok = QtWidgets.QLineEdit(self._notify["tg_token"], dlg); tok.setPlaceholderText("텔레그램 봇 토큰 (예: 123456:AA...)")
-        chat = QtWidgets.QLineEdit(self._notify["tg_chat"], dlg); chat.setPlaceholderText("chat_id / 방 (예: -1001234567890)")
-        sheet = QtWidgets.QLineEdit(self._notify["sheet_url"], dlg); sheet.setPlaceholderText("구글시트 주소(선택)")
-        cred = QtWidgets.QLineEdit(self._notify["sheet_cred"], dlg)
-        cred.setPlaceholderText("구글 서비스계정 JSON 키 경로(시트 쓸 때만 필요)")
-        credBtn = QtWidgets.QPushButton("찾기", dlg); credBtn.setFixedWidth(60)
-        credRow = QtWidgets.QWidget(dlg); credLay = QtWidgets.QHBoxLayout(credRow)
+    def _build_notify_form(self, box):
+        """알림 설정 — 설정 탭에 바로 펼친 폼(텔레그램·구글시트).
+
+        예전엔 '알림 설정' 버튼 → 다이얼로그였다. 고급 패널을 펴고, 버튼을
+        찾고, 창을 띄우는 세 걸음 뒤에야 토큰 칸이 나왔다. 설정 탭이 생긴
+        뒤로는 폼이 그 자리에 있다. 값은 self._notify 가 원본이고 저장은
+        notify.json 이다 — 다이얼로그 때와 같다."""
+        n = self._notify
+        v = QtWidgets.QVBoxLayout(box); v.setSpacing(8)
+        f = QtWidgets.QFormLayout(); f.setSpacing(8)
+        self.notifyToken = QtWidgets.QLineEdit(n["tg_token"], box)
+        self.notifyToken.setPlaceholderText("텔레그램 봇 토큰 (예: 123456:AA...)")
+        self.notifyChat = QtWidgets.QLineEdit(n["tg_chat"], box)
+        self.notifyChat.setPlaceholderText("chat_id / 방 (예: -1001234567890)")
+        self.notifySheet = QtWidgets.QLineEdit(n["sheet_url"], box)
+        self.notifySheet.setPlaceholderText("구글시트 주소(선택)")
+        self.notifyCred = QtWidgets.QLineEdit(n["sheet_cred"], box)
+        self.notifyCred.setPlaceholderText("구글 서비스계정 JSON 키 경로(시트 쓸 때만 필요)")
+        self.notifyCredBtn = QtWidgets.QPushButton("찾기", box)
+        self.notifyCredBtn.setFixedWidth(60)
+        credRow = QtWidgets.QWidget(box); credLay = QtWidgets.QHBoxLayout(credRow)
         credLay.setContentsMargins(0, 0, 0, 0); credLay.setSpacing(6)
-        credLay.addWidget(cred, 1); credLay.addWidget(credBtn)
+        credLay.addWidget(self.notifyCred, 1); credLay.addWidget(self.notifyCredBtn)
 
         def pick_cred():
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                dlg, "서비스계정 JSON 키 선택", "", "JSON (*.json)")
+                self, "서비스계정 JSON 키 선택", "", "JSON (*.json)")
             if path:
-                cred.setText(path)
-        credBtn.clicked.connect(pick_cred)
+                self.notifyCred.setText(path)
+        self.notifyCredBtn.clicked.connect(pick_cred)
 
-        f.addRow("텔레그램 토큰", tok); f.addRow("텔레그램 방", chat)
-        f.addRow("구글시트", sheet); f.addRow("시트 인증파일", credRow)
+        f.addRow("텔레그램 토큰", self.notifyToken); f.addRow("텔레그램 방", self.notifyChat)
+        f.addRow("구글시트", self.notifySheet); f.addRow("시트 인증파일", credRow)
         v.addLayout(f)
-        v.addWidget(QtWidgets.QLabel("신규/가격변동 매물을 텔레그램·구글시트로 알림. 설정은 notify.json 에 저장됩니다.", dlg),
-                    0, Qt.AlignmentFlag.AlignLeft)
-        result = QtWidgets.QLabel("", dlg); result.setWordWrap(True)
-        result.setStyleSheet("color:#5C5449; font-size:14px;")
-        v.addWidget(result)
+        v.addWidget(QtWidgets.QLabel(
+            "신규/가격변동 매물을 텔레그램·구글시트로 알림. [저장]을 눌러야 적용되고, "
+            "notify.json 에 남습니다.", box))
+        self.notifyResult = QtWidgets.QLabel("", box); self.notifyResult.setWordWrap(True)
+        self.notifyResult.setStyleSheet("color:#5C5449; font-size:14px;")
+        v.addWidget(self.notifyResult)
 
         bb = QtWidgets.QHBoxLayout()
-        test = QtWidgets.QPushButton("테스트 발송", dlg)
-        ok = QtWidgets.QPushButton("저장", dlg); ok.setObjectName("startBtn")
-        cancel = QtWidgets.QPushButton("취소", dlg)
-        bb.addWidget(test); bb.addStretch(1); bb.addWidget(cancel); bb.addWidget(ok)
+        self.notifyTestBtn = QtWidgets.QPushButton("테스트 발송", box)
+        self.notifySaveBtn = QtWidgets.QPushButton("저장", box)
+        self.notifySaveBtn.setObjectName("startBtn")
+        bb.addWidget(self.notifyTestBtn); bb.addStretch(1); bb.addWidget(self.notifySaveBtn)
         v.addLayout(bb)
+        self.notifyTestBtn.clicked.connect(self.on_notify_test)
+        self.notifySaveBtn.clicked.connect(self.on_notify_save)
 
-        def collect():
-            return {"tg_token": tok.text().strip(), "tg_chat": chat.text().strip(),
-                    "sheet_url": sheet.text().strip(),
-                    "sheet_cred": cred.text().strip() or "./credentials.json"}
+    def _collect_notify(self):
+        return {"tg_token": self.notifyToken.text().strip(),
+                "tg_chat": self.notifyChat.text().strip(),
+                "sheet_url": self.notifySheet.text().strip(),
+                "sheet_cred": self.notifyCred.text().strip() or "./credentials.json"}
 
-        def on_test():
-            cur = collect()
-            if not (cur["tg_token"] and cur["tg_chat"]) and not cur["sheet_url"]:
-                result.setText("⚠️ 텔레그램(토큰+방) 또는 구글시트 주소를 먼저 입력하세요.")
-                return
-            test.setEnabled(False); test.setText("보내는 중…")
+    def _refresh_notify_form(self):
+        """self._notify → 폼. 파일에서 다시 읽었을 때 화면을 맞춘다."""
+        n = self._notify
+        self.notifyToken.setText(n["tg_token"]); self.notifyChat.setText(n["tg_chat"])
+        self.notifySheet.setText(n["sheet_url"]); self.notifyCred.setText(n["sheet_cred"])
+
+    def on_notify_test(self):
+        """폼에 적힌 값으로 시험 발송 — 저장 전 값이다. 결과는 폼 아래 줄에."""
+        cur = self._collect_notify()
+        result, test = self.notifyResult, self.notifyTestBtn
+        if not (cur["tg_token"] and cur["tg_chat"]) and not cur["sheet_url"]:
             result.setStyleSheet("color:#5C5449; font-size:14px;")
-            result.setText("전송 시도 중…")
-            # 부모는 MainWindow — 다이얼로그가 먼저 닫혀도 실행 중 스레드가 삭제되지 않게
-            self._notify_test = NotifyTestThread(self, cur)
+            result.setText("⚠️ 텔레그램(토큰+방) 또는 구글시트 주소를 먼저 입력하세요.")
+            return
+        test.setEnabled(False); test.setText("보내는 중…")
+        result.setStyleSheet("color:#5C5449; font-size:14px;")
+        result.setText("전송 시도 중…")
+        # 부모는 MainWindow — 창이 먼저 닫혀도 실행 중 스레드가 삭제되지 않게
+        self._notify_test = NotifyTestThread(self, cur)
 
-            def done(res):
-                try:
-                    render(res)
-                except RuntimeError:
-                    pass            # 결과 도착 전 다이얼로그가 닫힌 경우
+        def done(res):
+            try:
+                render(res)
+            except RuntimeError:
+                pass            # 결과 도착 전 창이 닫힌 경우
 
-            def render(res):
-                lines = []
-                if cur["tg_token"] or cur["tg_chat"]:
-                    lines.append(("✅ 텔레그램: " if res["tg_ok"] else "❌ 텔레그램: ")
-                                 + res["tg_msg"])
-                if res["sheet_ok"] is None:
-                    if cur["sheet_url"]:
-                        lines.append("❌ 구글시트: " + res["sheet_msg"])
-                else:
-                    lines.append(("✅ 구글시트: " if res["sheet_ok"] else "❌ 구글시트: ")
-                                 + res["sheet_msg"])
-                bad = (cur["tg_token"] and not res["tg_ok"]) or res["sheet_ok"] is False
-                result.setStyleSheet("color:#B4342A;" if bad else "color:#2E7D32;")
-                result.setText("\n".join(lines) or "테스트할 항목 없음")
-                test.setEnabled(True); test.setText("테스트 발송")
-            self._notify_test.result.connect(done)
-            self._notify_test.start()
-        test.clicked.connect(on_test)
+        def render(res):
+            lines = []
+            if cur["tg_token"] or cur["tg_chat"]:
+                lines.append(("✅ 텔레그램: " if res["tg_ok"] else "❌ 텔레그램: ")
+                             + res["tg_msg"])
+            if res["sheet_ok"] is None:
+                if cur["sheet_url"]:
+                    lines.append("❌ 구글시트: " + res["sheet_msg"])
+            else:
+                lines.append(("✅ 구글시트: " if res["sheet_ok"] else "❌ 구글시트: ")
+                             + res["sheet_msg"])
+            bad = (cur["tg_token"] and not res["tg_ok"]) or res["sheet_ok"] is False
+            result.setStyleSheet("color:#B4342A;" if bad else "color:#2E7D32;")
+            result.setText("\n".join(lines) or "테스트할 항목 없음")
+            test.setEnabled(True); test.setText("테스트 발송")
+        self._notify_test.result.connect(done)
+        self._notify_test.start()
 
-        def on_save():
-            self._notify.update(collect())
-            saved, err = self._save_notify()
-            if not saved:
-                self.alert(f"알림 설정 저장 실패 — {err}\n(이번 실행 동안만 적용됩니다)")
-            dlg.accept()
-        ok.clicked.connect(on_save)
-        cancel.clicked.connect(dlg.reject)
-        dlg.exec()
-
+    def on_notify_save(self):
+        """폼 → self._notify → notify.json. 인증파일 공란은 기본 경로로 보정."""
+        self._notify.update(self._collect_notify())
+        self._refresh_notify_form()             # 보정된 값(기본 경로)을 되비춘다
+        saved, err = self._save_notify()
+        if not saved:
+            self.alert(f"알림 설정 저장 실패 — {err}\n(이번 실행 동안만 적용됩니다)")
+            self.notifyResult.setStyleSheet("color:#B4342A;")
+            self.notifyResult.setText("❌ 저장 실패 — " + err)
+            return False
+        self.notifyResult.setStyleSheet("color:#2E7D32;")
+        self.notifyResult.setText("✅ 저장했습니다")
+        return True
 
     @staticmethod
     def _mask_proxy(p: str) -> str:

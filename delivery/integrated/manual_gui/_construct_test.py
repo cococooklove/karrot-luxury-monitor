@@ -33,8 +33,8 @@ w = main.MainWindow()
 titles = [w.tabs.tabText(i) for i in range(w.tabs.count())]
 # 3탭 합본 모드는 없앴다 — 합본 창은 수확·폴링·라우터를 같이 소유해 따로 띄운
 # 매물 감시 창과 같은 keyword_routes.json 을 놓고 다툰다. 인자가 없으면 매물 감시다.
-ck("기본은 매물 감시 2탭", w.tabs.count() == 2, str(titles))
-ck("탭 이름", titles == ["매물 감시", "에뮬레이터"], str(titles))
+ck("기본은 매물 감시 4탭", w.tabs.count() == 4, str(titles))
+ck("탭 이름", titles == ["조건", "결과", "에뮬레이터", "설정"], str(titles))
 _wm = main.MainWindow(mode="manual")
 _mt = [_wm.tabs.tabText(i) for i in range(_wm.tabs.count())]
 ck("수동 검색은 제 모드로만 뜬다", _mt == ["수동 검색"], str(_mt))
@@ -42,9 +42,9 @@ ck("수동 검색은 제 모드로만 뜬다", _mt == ["수동 검색"], str(_mt
 ck("자동 모니터 탭 위젯 제거",
    not any(hasattr(w, x) for x in ("autoCondLabel", "auto_conditions",
                                    "autoStartBtn", "autoLog")))
-# 스윕 설정은 고급 패널로 이사했다.
-ck("스윕 설정은 고급 패널에",
-   all(hasattr(w, x) for x in ("autoNotifyBtn", "autoAreaTree", "autoRestMin")))
+# 스윕 설정은 조건 탭(지역)·설정 탭(알림)으로 이사했다.
+ck("스윕 설정 위젯 존재",
+   all(hasattr(w, x) for x in ("notifyToken", "autoAreaTree", "autoRestMin")))
 # 엑셀은 '매물 감시' 탭 [엑셀로 조건 넣기] 하나로 모았다.
 ck("조건표 엑셀 핸들러 배선", callable(getattr(w, "on_alert_rules_excel", None)))
 ck("고급 패널에 엑셀 버튼 없음", not hasattr(w, "autoExcelBtn"))

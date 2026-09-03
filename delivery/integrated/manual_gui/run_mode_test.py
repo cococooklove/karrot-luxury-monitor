@@ -37,7 +37,8 @@ print("=== 1. 모드 정의 ===")
 ck("MODES 가 있다", modes is not None)
 ck("두 모드 — 합본(all)은 없다", set(modes or {}) == {"manual", "watch"}, str(set(modes or {})))
 ck("manual 은 수동 검색만", tuple(modes["manual"]["tabs"]) == ("manual",))
-ck("watch 는 감시+에뮬", tuple(modes["watch"]["tabs"]) == ("alert", "emul"))
+ck("watch 는 조건·결과·에뮬·설정", tuple(modes["watch"]["tabs"])
+   == ("rules", "results", "emul", "settings"))
 
 print("\n=== 2. 수확기는 감시 쪽만 돌린다 ===")
 # 둘 다 돌리면 같은 인스턴스에 force-stop 이 겹친다. 수동은 토큰을 소비만 한다.
@@ -49,11 +50,11 @@ ck("자동 폴링도 모드로 갈린다",
 
 print("\n=== 3. 위젯은 모드와 무관하게 다 만든다 ===")
 # 서로의 위젯을 참조하는 코드가 흩어져 있어, 안 만들면 AttributeError 가 난다.
-ck("세 탭 위젯을 모두 만든다",
-   "manual_w = " in src and "alert_w = " in src and "emul_w = " in src)
-ck("노출만 모드로 고른다", src.count("if \"manual\" in show:") == 1
-   and src.count("if \"alert\" in show:") == 1
-   and src.count("if \"emul\" in show:") == 1)
+ck("탭 위젯을 모두 만든다",
+   "manual_w = " in src and "rules_w, results_w, settings_w = " in src
+   and "emul_w = " in src)
+ck("노출만 모드로 고른다", src.count("if key in show:") == 1
+   and all(f'("{k}", ' in src for k in ("manual", "rules", "results", "emul", "settings")))
 
 print("\n=== 4. 진입점 ===")
 ck("--manual 을 읽는다", '"--manual" in _sysarg.argv' in src)

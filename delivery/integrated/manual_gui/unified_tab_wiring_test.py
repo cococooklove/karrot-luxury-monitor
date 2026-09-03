@@ -153,9 +153,12 @@ except Exception as _e:
 ck("MainWindow 생성", _win is not None, _win_err)
 if _win is not None:
     titles = [_win.tabs.tabText(i) for i in range(_win.tabs.count())]
-    # 인자 없이 뜨면 매물 감시다(3탭 합본 모드는 없앴다).
-    ck("기본은 매물 감시 2탭", _win.tabs.count() == 2, str(titles))
-    ck("탭 이름", titles == ["매물 감시", "에뮬레이터"], str(titles))
+    # 인자 없이 뜨면 매물 감시다(3탭 합본 모드는 없앴다). 감시는 조건·결과·설정
+    # 세 탭으로 나뉜다 — 한 탭에 접이식 네 개로 쌓였던 동안 설정이 세 곳에 흩어졌다.
+    ck("기본은 매물 감시 4탭", _win.tabs.count() == 4, str(titles))
+    ck("탭 이름", titles == ["조건", "결과", "에뮬레이터", "설정"], str(titles))
+    ck("첫 화면은 결과", _win.tabs.tabText(_win.tabs.currentIndex()) == "결과",
+       _win.tabs.tabText(_win.tabs.currentIndex()))
     ck("감시 토글 존재", hasattr(_win, "watchToggleBtn"))
     ck("고급 패널 존재", hasattr(_win, "advancedBox"))
     ck("고급 패널 접힘",
@@ -181,7 +184,7 @@ if _win is not None:
         # 휴식·지역 간·레인·주기·커버 스핀박스는 안 보인다.
         # isHidden 은 자기 자신에 hide 를 불렀을 때만 참이다 — 숨긴 것은
         # 컨테이너라 isVisibleTo(고급) 로 본다.
-        _ab = _win.advancedBox
+        _ab = _win.areaBox
         ck("펼쳐도 튜닝 스핀박스는 숨김",
            not any(w.isVisibleTo(_ab) for w in (
                _win.autoRestMin, _win.autoGapMin, _win.autoLanes,
@@ -190,9 +193,9 @@ if _win is not None:
            _win.autoAreaTree.isVisibleTo(_ab) and _win.autoNationwide.isVisibleTo(_ab))
         ck("'지역 훑기' 상자 없음",
            not any(b.title() == "지역 훑기"
-                   for b in _win.advancedBox.findChildren(_QW.QGroupBox)))
+                   for b in _win.areaBox.findChildren(_QW.QGroupBox)))
         _win.advancedBox.setChecked(False)
-    # ── 상태칩 → 고급 패널 항목 (설계 §1: 칩 클릭은 해당 항목으로 스크롤) ──
+    # ── 상태칩 → 대응 항목 (설계 §1: 칩 클릭은 해당 항목이 있는 탭으로 데려간다) ──
     ck("상태칩 존재",
        set(getattr(_win, "_chips", {}))
        == {"token", "accounts", "coverage", "poll", "rules"},
@@ -201,29 +204,41 @@ if _win is not None:
        all(getattr(_win, a, None) is not None
            for a in _win.CHIP_TARGETS.values()),
        str(_win.CHIP_TARGETS))
-    # 목적지는 접이식 섹션 어딘가에 있으면 된다 — on_chip_clicked 가 그 섹션을
-    # 편다. '고급'에만 있어야 한다고 묶어 두면 조건표로 가는 칩을 못 만든다.
-    _sections = [_win.condBox, _win.dashBox, _win.logBox, _win.advancedBox]
-    ck("칩 목적지는 접이식 섹션 안",
-       all(any(getattr(_win, a) in b.findChildren(_QW.QWidget) for b in _sections)
+    # 목적지는 어느 탭·어느 상자에 있어도 된다 — on_chip_clicked 가 탭을 바꾸고
+    # 접힌 상자를 편다. 칩은 결과 탭에, 목적지는 조건·설정 탭에 있다.
+    def _tab_of(wdg):
+        for _i in range(_win.tabs.count()):
+            if wdg in _win.tabs.widget(_i).findChildren(_QW.QWidget):
+                return _win.tabs.tabText(_i)
+        return None
+    ck("칩 목적지는 탭 안에",
+       all(_tab_of(getattr(_win, a)) is not None
            for a in _win.CHIP_TARGETS.values()), str(_win.CHIP_TARGETS))
     ck("탭이 스크롤 영역 안에 있다",
        _win._enclosing_scroll(_win.autoAccountsBtn) is not None)
-    _win.advancedBox.setChecked(False)
+    _win.tabs.setCurrentIndex(1)
     _moved = _win.on_chip_clicked("token")
-    ck("칩을 누르면 접힌 고급 패널이 펴진다",
-       _moved and _win.advancedBox.isChecked())
+    ck("토큰 칩 → 설정 탭으로 간다",
+       _moved and _win.tabs.tabText(_win.tabs.currentIndex()) == "설정",
+       _win.tabs.tabText(_win.tabs.currentIndex()))
     ck("토큰 칩 → 계정+프록시로 데려간다",
        _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
-    ck("펴진 목적지는 보인다", not _win.autoAccountsBtn.isHidden())
-    ck("이미 펴져 있어도 데려간다", _win.on_chip_clicked("accounts")
+    ck("목적지는 보인다", not _win.autoAccountsBtn.isHidden())
+    ck("이미 그 탭이어도 데려간다", _win.on_chip_clicked("accounts")
        and _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
+    _win.condBox.setChecked(False)
+    _win.tabs.setCurrentIndex(1)
+    ck("조건 칩 → 조건 탭, 접힌 상자를 편다", _win.on_chip_clicked("rules")
+       and _win.tabs.tabText(_win.tabs.currentIndex()) == "조건"
+       and _win.condBox.isChecked() and _win.focusWidget() is _win.alertRulesBtn,
+       f"{_win.tabs.tabText(_win.tabs.currentIndex())} / {_win.focusWidget()}")
+    _win.tabs.setCurrentIndex(1)
     # 커버 모드·폴링 주기는 화면에서 뺐다 — 칩은 값만 보여주고 데려가지 않는다.
     ck("커버리지·폴링 칩은 목적지가 없다",
        "coverage" not in _win.CHIP_TARGETS and "poll" not in _win.CHIP_TARGETS)
     ck("커버 모드·주기 위젯은 살아 있되 숨김",
-       not _win.alertCoverMode.isVisibleTo(_win.advancedBox)
-       and not _win.alertPollInterval.isVisibleTo(_win.advancedBox))
+       not _win.alertCoverMode.isVisibleTo(_win.areaBox)
+       and not _win.alertPollInterval.isVisibleTo(_win.areaBox))
     # 대응 항목 없는 칩은 아무 데도 데려가지 않는다(엉뚱한 목적지보다 낫다).
     ck("추적중은 목적지가 없다", "watch" not in _win.CHIP_TARGETS)
     ck("모르는 칩은 무시", _win.on_chip_clicked("watch") is False)
@@ -245,9 +260,14 @@ if _win is not None:
        and callable(getattr(_win, "_sweep_cfg", None)))
     for _attr in ("autoAreaTree", "autoExtra", "autoExclude", "autoMin",
                   "autoMax", "autoDays", "autoRestMin", "autoRestMax",
-                  "autoGapMin", "autoGapMax", "autoLanes", "autoNotifyBtn",
-                  "autoAccountsBtn"):
+                  "autoGapMin", "autoGapMax", "autoLanes", "autoAccountsBtn"):
         ck(f"스윕 설정 이사: {_attr}", hasattr(_win, _attr))
+    # 알림 설정은 다이얼로그가 아니라 설정 탭의 폼이다.
+    ck("알림 폼 위젯", all(hasattr(_win, a) for a in (
+        "notifyBox", "notifyToken", "notifyChat", "notifySheet", "notifyCred",
+        "notifyTestBtn", "notifySaveBtn", "notifyResult")))
+    ck("알림 다이얼로그 제거", not hasattr(_win, "autoNotifyBtn")
+       and not hasattr(_win, "on_auto_notify_clicked"))
     # 토큰 갱신은 스위치가 아니다 — 유일한 갱신 경로라 항상 켜져 있다.
     ck("토큰 갱신 체크박스 제거", not hasattr(_win, "autoTokenRefresh"))
     ck("스윕 cfg 는 토큰 공급자를 늘 단다",
@@ -261,11 +281,11 @@ if _win is not None:
     ck("단일계정 일괄등록 제거", not hasattr(_win, "alertBulkBtn")
        and not hasattr(_win, "on_alert_bulk"))
     ck("엑셀 조건 캐시 제거", not hasattr(_win, "auto_conditions"))
-    # 엑셀 버튼은 '매물 감시' 탭 하나로 모았다 — 등록용/알림용이 따로 있는 줄
+    # 엑셀 버튼은 조건 탭 하나로 모았다 — 등록용/알림용이 따로 있는 줄
     # 알고 같은 시트를 양쪽에 넣는 일이 반복됐다.
-    ck("고급 패널 엑셀 버튼 제거", not hasattr(_win, "autoExcelBtn")
+    ck("지역 상자 엑셀 버튼 제거", not hasattr(_win, "autoExcelBtn")
        and not hasattr(_win, "on_auto_excel_clicked"))
-    ck("조건표 엑셀 버튼은 매물 감시 탭에", hasattr(_win, "alertRulesBtn")
+    ck("조건표 엑셀 버튼은 조건 탭에", hasattr(_win, "alertRulesBtn")
        and callable(getattr(_win, "on_alert_rules_excel", None)))
 
     # ── 조건표 엑셀 → 브랜드 등록 (워크북 안 연다) ──
@@ -442,15 +462,25 @@ if _win is not None:
     def _y(wdg):
         """창 좌표계에서의 세로 위치."""
         return wdg.mapTo(_win, _QPoint(0, 0)).y()
-    ck("매물 표가 등록 표보다 위", _y(_win.listingTable) < _y(_win.alertTable),
-       f"listing={_y(_win.listingTable)} alert={_y(_win.alertTable)}")
+    # 탭 배치 — 결과(매물)·조건(조건표·지역·등록 상태)·설정(알림·계정·고급)
+    ck("매물 표는 결과 탭", _tab_of(_win.listingTable) == "결과")
+    ck("조건표·지역·등록 표는 조건 탭",
+       all(_tab_of(x) == "조건" for x in (
+           _win.alertRulesBtn, _win.autoAreaTree, _win.alertTable)))
+    ck("알림 폼·계정 버튼·전체 삭제는 설정 탭",
+       all(_tab_of(x) == "설정" for x in (
+           _win.notifyToken, _win.autoAccountsBtn, _win.alertDelAllBtn)))
     ck("감시 시작 버튼이 매물 표보다 위",
        _y(_win.watchToggleBtn) < _y(_win.listingTable))
-    for _n, _title in (("dashBox", "현황"), ("condBox", "감시 조건"),
-                       ("advancedBox", "고급"), ("logBox", "로그")):
+    # 제 탭이 생긴 상자는 펴 두고, 칩이 요약하는 현황과 되돌리기(고급)만 접는다.
+    for _n, _title, _open in (("dashBox", "현황", False), ("condBox", "감시 조건", True),
+                              ("areaBox", "훑을 지역", True),
+                              ("regBox", "당근에 등록된 키워드", True),
+                              ("advancedBox", "고급", False), ("logBox", "로그", True)):
         _b = getattr(_win, _n, None)
-        ck(f"접이식 {_title}", _b is not None and _b.isCheckable()
-           and _b.isChecked() is False, str(_b))
+        ck(f"접이식 {_title} ({'펼침' if _open else '접힘'})",
+           _b is not None and _b.isCheckable() and _b.isChecked() is _open, str(_b))
+    _win.condBox.setChecked(False)
     ck("접으면 높이도 접힌다",
        _win.condBox.maximumHeight() < 100, str(_win.condBox.maximumHeight()))
     _win.condBox.setChecked(True)
@@ -458,15 +488,15 @@ if _win is not None:
     ck("펼치면 안이 보인다", not _win.rulesSummary.isHidden()
        and _win.condBox.maximumHeight() > 1000,
        f"hidden={_win.rulesSummary.isHidden()} / {_win.condBox.maximumHeight()}")
-    _win.condBox.setChecked(False)
     ck("id 열은 감춘다", _win.alertTable.isColumnHidden(m.ALERT_COL_ID))
     # 전체 삭제는 표 옆에 두지 않는다 — 실서버서 등록 21건이 그렇게 날아갔다.
     ck("전체 삭제는 고급 안에",
        _win.alertDelAllBtn in _win.advancedBox.findChildren(_QtW.QPushButton))
     # 등록 표·삭제는 '시스템이 당근에 올린 결과'다. 클라가 넣은 조건과 같은
     # 자리에 두면 둘을 같은 것으로 읽는다.
-    ck("등록 표는 고급 안에",
-       _win.alertTable in _win.advancedBox.findChildren(_QtW.QWidget))
+    ck("등록 표는 조건 탭의 제 상자 안에(조건 상자와 별개)",
+       _win.alertTable in _win.regBox.findChildren(_QtW.QWidget)
+       and _win.alertTable not in _win.condBox.findChildren(_QtW.QWidget))
     # 삭제 경로는 전체 삭제 하나다. 낱개 삭제와 수동 등록 폼은 조건표와
     # 어긋나는 뒷문이라 없앴다.
     ck("낱개 삭제·수동 등록 폼 제거",
@@ -692,8 +722,8 @@ if _win is not None:
 
     ck("전국 훑기 체크박스 존재", hasattr(_win, "autoNationwide"))
     ck("전국 훑기는 기본 꺼짐", _win.autoNationwide.isChecked() is False)
-    ck("전국 훑기도 고급 패널 안",
-       _win.autoNationwide in _win.advancedBox.findChildren(_QW.QWidget))
+    ck("전국 훑기도 지역 상자 안",
+       _win.autoNationwide in _win.areaBox.findChildren(_QW.QWidget))
     ck("저장 배선 존재", callable(getattr(_win, "_sweep_settings_patch", None))
        and callable(getattr(_win, "_save_sweep_settings", None))
        and callable(getattr(_win, "_restore_sweep_settings", None)))
