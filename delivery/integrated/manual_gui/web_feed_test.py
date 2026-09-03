@@ -43,14 +43,16 @@ cur = W.FeedCursor(cp)
 key = W.cursor_key(6035, 31)
 now = max(x["boosted_at"] for x in arts) + 60
 
-# Append synthetic old article (controller resolution)
+# Append synthetic articles (controller resolution + status filter validation)
 old_art = dict(arts[0]); old_art["href"] = "https://www.daangn.com/kr/buy-sell/x-old/"; old_art["boosted_at"] = now - 3*3600; old_art["status"] = "ongoing"
-arts_with_old = arts + [old_art]
+reserved_art = dict(arts[0]); reserved_art["href"] = "https://www.daangn.com/kr/buy-sell/x-reserved/"; reserved_art["boosted_at"] = now - 3600; reserved_art["status"] = "reserved"
+closed_art = dict(arts[0]); closed_art["href"] = "https://www.daangn.com/kr/buy-sell/x-closed/"; closed_art["boosted_at"] = now - 1800; closed_art["status"] = "closed"
+arts_with_all = arts + [old_art, reserved_art, closed_art]
 
-first = cur.new_articles(key, arts_with_old, now)
-ongoing_recent = [x for x in arts_with_old if x["status"] == "ongoing" and now - x["boosted_at"] <= W.FIRST_VISIT_WINDOW_SEC]
-ck("첫 방문은 최근 2시간만", first == ongoing_recent and len(first) < len(arts_with_old), f"{len(first)}/{len(arts_with_old)}")
-ck("판매중 아닌 것 제외", all(x["status"] == "ongoing" for x in first))
+first = cur.new_articles(key, arts_with_all, now)
+ongoing_recent = [x for x in arts_with_all if x["status"] == "ongoing" and now - x["boosted_at"] <= W.FIRST_VISIT_WINDOW_SEC]
+ck("첫 방문은 최근 2시간만", first == ongoing_recent and len(first) < len(arts_with_all), f"{len(first)}/{len(arts_with_all)}")
+ck("판매중 아닌 것 제외", all(x["status"] == "ongoing" for x in first) and "x-reserved" not in [x["href"] for x in first] and "x-closed" not in [x["href"] for x in first])
 cur.advance(key, arts, now); cur.save()
 cur2 = W.FeedCursor(cp)
 ck("워터마크 저장·복원", cur2.get(key)["boosted_at"] == max(x["boosted_at"] for x in arts))
@@ -63,5 +65,12 @@ ck("advance 는 실패(빈 목록)에 워터마크를 안 올린다",
    (cur2.advance(key, [], now + 999) or True) and cur2.get(key)["boosted_at"] == max(x["boosted_at"] for x in arts))
 ck("폴백(시각 0)은 href 만으로 판정",
    W.FeedCursor(os.path.join(d, "c2.json")).new_articles("k", h[:3], now) == [x for x in h[:3] if x["status"] == "ongoing"])
+# Degraded cursor file (missing "seen" key) should not crash
+degraded_cp = os.path.join(d, "degraded.json")
+with open(degraded_cp, "w", encoding="utf-8") as f:
+    json.dump({"6035:31": {"boosted_at": 0}}, f)
+degraded_cur = W.FeedCursor(degraded_cp)
+degraded_result = degraded_cur.new_articles("6035:31", arts[:3], now)
+ck("손상된 커서(missing seen)는 안전하게 처리", degraded_result == [x for x in arts[:3] if x["status"] == "ongoing" and now - x["boosted_at"] <= W.FIRST_VISIT_WINDOW_SEC])
 
 n_ok = sum(1 for _, c in R if c); print(f"\n{n_ok}/{len(R)} PASS"); sys.exit(0 if n_ok == len(R) else 1)

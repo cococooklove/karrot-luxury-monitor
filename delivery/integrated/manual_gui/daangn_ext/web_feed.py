@@ -13,8 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import quote
 
 FEED_ROUTE = "routes/kr.buy-sell._index"
@@ -145,8 +144,8 @@ class FeedCursor:
 
     def new_articles(self, key, arts, now) -> list[dict]:
         st = self._d.get(key)
-        seen = set(st["seen"]) if st else set()
-        wm = int(st["boosted_at"]) if st else 0
+        seen = set(st.get("seen") or []) if st else set()
+        wm = int(st.get("boosted_at") or 0) if st else 0
         out = []
         for a in arts:
             if a.get("status") != "ongoing" or not a.get("href"):
@@ -167,9 +166,9 @@ class FeedCursor:
         if not arts:
             return
         st = self._d.get(key) or {"boosted_at": 0, "seen": []}
-        st["boosted_at"] = max(int(st["boosted_at"]), max(int(a.get("boosted_at") or 0) for a in arts))
+        st["boosted_at"] = max(int(st.get("boosted_at") or 0), max(int(a.get("boosted_at") or 0) for a in arts))
         seen = [a["href"] for a in arts if a.get("href")]
-        st["seen"] = (seen + [h for h in st["seen"] if h not in seen])[:SEEN_KEEP]
+        st["seen"] = (seen + [h for h in (st.get("seen") or []) if h not in seen])[:SEEN_KEEP]
         st["visited_at"] = int(now)
         self._d[key] = st
         self._dirty = True
