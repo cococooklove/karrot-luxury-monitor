@@ -365,6 +365,7 @@ command="powershell -NoProfile -ExecutionPolicy Bypass -File C:\karrot_deploy.ps
 파인 채 남는다.
 
 ## 6. 테스트 순서
+0. `python tools/feed_smoke.py --minutes 60` → ok 비율 95% 이상이면 피드 켜 둔다
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
 2. 키워드 등록(계정당 최대 30개): GUI 조건 탭 표에 적고 [조건 적용] 1회 — 조건표의 브랜드만 등록되고, 조건표에 없는 등록은 자동 삭제된다
 3. 텔레그램 수신 확인

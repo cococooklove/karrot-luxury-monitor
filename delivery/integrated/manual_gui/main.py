@@ -1394,12 +1394,17 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
         "out_json": "./OUT.json",
         "db_path": "./auto_seen.db",
     }
-    cfg.update(sweep_scope_for(s.get("sweep_regions"),
-                               s.get(SWEEP_NATIONWIDE_KEY),
-                               out_json=cfg["out_json"], log=log,
-                               n_conditions=len(entries or []) or 1,
-                               lanes=sweep_lanes_effective(
-                                   cfg["lanes"], bool(token_provider), len(cfg["proxies"]))))
+    if sweep_app_enabled(s):
+        # 앱 키워드 스윕은 보완층이다 — 타지역 택배 매물이 목적이라 지역 1~2곳이면 된다.
+        cfg.update({"scope": "regions",
+                    "regions": list(s.get("sweep_regions_app") or FEED_DEFAULTS["sweep_regions_app"])})
+    else:
+        cfg.update(sweep_scope_for(s.get("sweep_regions"),
+                                   s.get(SWEEP_NATIONWIDE_KEY),
+                                   out_json=cfg["out_json"], log=log,
+                                   n_conditions=len(entries or []) or 1,
+                                   lanes=sweep_lanes_effective(
+                                       cfg["lanes"], bool(token_provider), len(cfg["proxies"]))))
     cfg["conditions"] = sweep_conditions(
         entries,
         extra=[x for x in (s.get("sweep_extra") or []) if x],
@@ -5550,13 +5555,19 @@ class MainWindow(QMainWindow):
         }
         # 범위 판정은 헤드리스(headless_sweep_cfg)와 같은 함수를 쓴다 —
         # 여기서만 '미선택=전국'이면 GUI 에서 본 범위와 서버가 도는 범위가 갈린다.
-        cfg.update(sweep_scope_for(self._selected_auto_regions(),
-                                   self.autoNationwide.isChecked(),
-                                   out_json=cfg["out_json"],
-                                   log=self._alog,
-                                   n_conditions=len(self._queue_entries()) or 1,
-                                   # GUI 는 항상 수확 토큰 경로(앱API)다.
-                                   lanes=sweep_lanes_effective(cfg["lanes"], True, 0)))
+        s = self._load_alert_settings()
+        if sweep_app_enabled(s):
+            # 앱 키워드 스윕은 보완층이다 — 타지역 택배 매물이 목적이라 지역 1~2곳이면 된다.
+            cfg.update({"scope": "regions",
+                        "regions": list(s.get("sweep_regions_app") or FEED_DEFAULTS["sweep_regions_app"])})
+        else:
+            cfg.update(sweep_scope_for(self._selected_auto_regions(),
+                                       self.autoNationwide.isChecked(),
+                                       out_json=cfg["out_json"],
+                                       log=self._alog,
+                                       n_conditions=len(self._queue_entries()) or 1,
+                                       # GUI 는 항상 수확 토큰 경로(앱API)다.
+                                       lanes=sweep_lanes_effective(cfg["lanes"], True, 0)))
         return cfg
 
     @staticmethod
@@ -5618,6 +5629,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _start_search_sweep(self):
+        if not sweep_app_enabled(self._load_alert_settings()):
+            self._alog("[검색스윕] 앱 스윕 꺼짐(설정) — 피드가 발굴합니다")
+            return
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
             # stop() 은 비동기다(최대 8초). 그 안에 다시 켜면 여기서 조용히 막혔다 —
             # 재시작이 통째로 사라지는 것처럼 보이므로 로그를 남긴다.
@@ -7195,6 +7209,7 @@ def _run_headless():
     last_harvest = 0.0
     next_harvest = 0.0          # 첫 루프에서 곧바로 한 번 수확한다
     hstats = {}
+    app_sweep_off_logged = [False]   # 틱마다 안 찍고 프로세스당 한 번만
     watch_store = watch_tracker = watch_budget = None
     last_watch_sweep = 0.0
     try:
@@ -7382,7 +7397,15 @@ def _run_headless():
                     enabled=sweep_mirror_enabled(
                         st, len(load_alert_rules())))
             if sweep_runner is not None:
-                sweep_runner.resync()
+                if sweep_app_enabled(st):
+                    app_sweep_off_logged[0] = False
+                    sweep_runner.resync()
+                else:
+                    if sweep_runner.running():
+                        sweep_runner.stop()
+                    if not app_sweep_off_logged[0]:
+                        log("[검색스윕] 앱 스윕 꺼짐(설정) — 피드가 발굴합니다")
+                        app_sweep_off_logged[0] = True
             if feed_runner is not None:
                 if once:
                     # --once 는 스레드를 띄우지 않고 한 회차만 동기로 돈다 —

@@ -893,6 +893,9 @@ if _win is not None:
     _win._sweep_revives = 0
     _win._sweep_cfg = lambda: {"conditions": [{"keyword": "샤넬"}],
                                "out_json": "./OUT.json"}
+    # 앱 스윕은 기본 꺼짐(설정) — 이 블록은 되살리기 상한 자체를 재는 것이라
+    # 켜진 걸로 두고 잰다. _start_search_sweep 의 스위치 검사를 우회한다.
+    _win._load_alert_settings = lambda: {"sweep_app_enabled": True}
     _win.alertLog.clear()
     for _ in range(m.SWEEP_REVIVE_MAX + 6):
         _win._resync_search_sweep()
@@ -915,6 +918,7 @@ if _win is not None:
        str(len(_deleted_am)))
     _am_mod.AutoMonitor = _real_AM
     _win.__dict__.pop("_sweep_cfg", None)
+    _win.__dict__.pop("_load_alert_settings", None)
     _win.auto_monitor = None
     (_win._supervisor, _win._sweep_queue, _win.auto_monitor,
      _win._sweep_kws) = _sv3

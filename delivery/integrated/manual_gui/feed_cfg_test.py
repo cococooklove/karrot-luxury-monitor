@@ -32,4 +32,8 @@ ck("옛 키 sweep_mirror_app 이관", m.sweep_app_enabled({"sweep_mirror_app": T
    and m.sweep_app_enabled({"sweep_mirror_app": True, "sweep_app_enabled": False}) is False)
 ck("sweep_mirror_enabled 은 같은 답", m.sweep_mirror_enabled({}, 400) is False and m.sweep_mirror_enabled({"sweep_app_enabled": True}, 0) is True)
 ck("FEED_DEFAULTS 노출", m.FEED_DEFAULTS["feed_enabled"] is True and m.FEED_DEFAULTS["sweep_regions_app"] == ["역삼동-6035"])
+cfg_app = m.headless_sweep_cfg({"sweep_app_enabled": True}, [{"keyword": "샤넬"}], {}, proxies=[], token_provider=lambda: "t")
+ck("앱 스윕은 sweep_regions_app 만 훑는다", cfg_app["scope"] == "regions" and cfg_app["regions"] == ["역삼동-6035"], str(cfg_app.get("regions"))[:60])
+cfg_app2 = m.headless_sweep_cfg({"sweep_app_enabled": True, "sweep_regions_app": ["역삼동-6035", "부산진구-1"]}, [{"keyword": "샤넬"}], {}, proxies=[], token_provider=lambda: "t")
+ck("설정 지역 반영", cfg_app2["regions"] == ["역삼동-6035", "부산진구-1"])
 n_ok = sum(1 for _, c in R if c); print(f"\n{n_ok}/{len(R)} PASS"); sys.exit(0 if n_ok == len(R) else 1)
