@@ -2033,6 +2033,8 @@ class MainWindow(QMainWindow):
         self._emul_thumb_cursor = 0
         self._emul_rescued = False
         self._emul_closing = False
+        self._emul_seen = set()          # 감시가 이미 치운 창(hwnd)
+        self._emul_rescan = False        # 스캔 도중 새 창이 떴다 → 끝나면 바로 한 번 더
         self._emul_console = ldwin.find_console()
 
         w = QtWidgets.QWidget()
@@ -2107,6 +2109,11 @@ class MainWindow(QMainWindow):
         self._emul_timer = QtCore.QTimer(self)
         self._emul_timer.setInterval(8000)
         self._emul_timer.timeout.connect(lambda: self._emul_scan())
+        # 새 창 감시 — list2 스캔(8s)만으로는 launch 뒤 창이 몇 초씩 바탕화면에
+        # 보인다. EnumWindows 는 싸므로 자주 돌려 뜨자마자 치우고 스캔을 앞당긴다.
+        self._emul_watch_timer = QtCore.QTimer(self)
+        self._emul_watch_timer.setInterval(150)
+        self._emul_watch_timer.timeout.connect(self._emul_watch_tick)
         # 썸네일은 이 탭을 보고 있을 때만.
         self._emul_thumb_timer = QtCore.QTimer(self)
         self._emul_thumb_timer.setInterval(3000)
@@ -2119,6 +2126,7 @@ class MainWindow(QMainWindow):
             self.emulStatus.setText("ldconsole.exe 를 못 찾음 — LDPlayer 설치경로 확인")
         else:
             self._emul_timer.start()
+            self._emul_watch_timer.start()
             QtCore.QTimer.singleShot(0, lambda: self._emul_scan())
         return w
 
@@ -2187,7 +2195,38 @@ class MainWindow(QMainWindow):
             if idx not in self._emul_hosts:
                 self._emul.stow(r["top_hwnd"])
         self._emul.prune()
+        self._emul_seen = {h for h in self._emul_seen if ld.is_window(h)}
         self._emul_sync_states()
+        if self._emul_rescan:            # 스캔 도중 뜬 창 — 8초 기다리지 않는다
+            self._emul_rescan = False
+            QtCore.QTimer.singleShot(0, lambda: self._emul_scan())
+
+    def _emul_watch_tick(self):
+        """새 LDPlayer 창 감시 — 뜨자마자 화면 밖으로 치우고 스캔을 앞당긴다.
+
+        부팅 중인 창은 list2 가 아직 index 를 못 주므로 hwnd 만으로 치운다.
+        LDPlayer 가 부팅 중 창 위치를 제자리로 되돌리는 경우도 다시 치운다.
+        첫 스캔의 잔재 복구(rescue)보다 먼저 돌면 우리가 치운 창을 되살려
+        버리므로 복구가 끝난 뒤에만 일한다.
+        """
+        if self._emul_closing or not self._emul_rescued:
+            return
+        attached = {h.child_hwnd for h in self._emul_hosts.values()}
+        fresh = False
+        for win in self._ldwin.player_windows():
+            hw = win["hwnd"]
+            if hw in attached:
+                continue
+            if hw not in self._emul_seen:
+                fresh = True
+                self._emul_seen.add(hw)
+            self._emul.stow(hw)
+        if not fresh:
+            return
+        if self._emul_thread is not None and self._emul_thread.isRunning():
+            self._emul_rescan = True
+        else:
+            self._emul_scan()
 
     def _emul_relayout(self):
         """카드 그리드 재배치 — 2열 고정(카드 폭이 고정이라 열 수도 고정)."""
@@ -2304,7 +2343,7 @@ class MainWindow(QMainWindow):
         """붙여둔 창은 원래대로, 치워둔 창은 화면으로. 안 하면 부모와 함께
         파괴되거나 화면 밖에 남아 사용자가 찾을 수 없게 된다."""
         self._emul_closing = True        # 늦게 도착하는 워커 신호를 전부 무시
-        for name in ("_emul_timer", "_emul_thumb_timer"):
+        for name in ("_emul_timer", "_emul_watch_timer", "_emul_thumb_timer"):
             t = getattr(self, name, None)
             if t is not None:
                 t.stop()

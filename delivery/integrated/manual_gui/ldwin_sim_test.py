@@ -203,6 +203,22 @@ def test_stow_then_unstow_restores_position_and_taskbar():
     assert fake.snapshot(1) == before, fake.snapshot(1)
 
 
+def test_stow_reapplies_when_window_drifts_back_on_screen():
+    """부팅 중 LDPlayer 가 창 위치를 제자리로 되돌리면 다시 치워야 한다.
+    이때 원본 exstyle 은 처음 기록한 값을 유지해야 unstow 가 정확히 복원한다."""
+    fake, emb = setup()
+    fake.add(1, x=300, y=200)
+    before = fake.snapshot(1)
+
+    assert emb.stow(1) is True
+    fake.windows[1]["x"], fake.windows[1]["y"] = 300, 200     # LDPlayer 가 되돌림
+    assert not ldwin.is_stowed(1)
+    assert emb.stow(1) is True
+    assert fake.windows[1]["x"] == ldwin.STOW_POS, "다시 치워져야 한다"
+    assert emb.unstow(1) is True
+    assert fake.snapshot(1) == before, fake.snapshot(1)
+
+
 def test_stowed_window_attached_then_released_comes_back_on_screen():
     """회귀: 치워둔 창을 부착하면 -32000 이 '원위치'로 굳어 복원 때 화면 밖으로
     사라지던 버그. 원위치는 최초 1회만 기록해야 한다."""

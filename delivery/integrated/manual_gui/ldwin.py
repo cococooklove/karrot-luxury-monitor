@@ -580,12 +580,17 @@ class Embedder:
         """인스턴스 창을 화면 밖 + 작업표시줄 밖으로 치운다(프로세스는 그대로)."""
         if not IS_WINDOWS or not is_window(hwnd) or hwnd in self._saved:
             return False
-        if hwnd in self._stowed:
-            return True
         h = wintypes.HWND(hwnd)
-        self._remember_home(hwnd)
-        exstyle = _get_long(h, GWL_EXSTYLE)
-        self._stowed[hwnd] = exstyle
+        if hwnd in self._stowed:
+            if is_stowed(hwnd):
+                return True
+            # 치워둔 뒤 창이 스스로 제자리로 돌아왔다(부팅 중 위치 복원) → 다시 치운다.
+            # 원본 exstyle 은 처음 기록한 값을 유지한다.
+            exstyle = self._stowed[hwnd]
+        else:
+            self._remember_home(hwnd)
+            exstyle = _get_long(h, GWL_EXSTYLE)
+            self._stowed[hwnd] = exstyle
 
         # 작업표시줄 항목 제거는 창을 잠깐 숨겼다 다시 띄워야 반영된다.
         _u32.ShowWindow(h, SW_HIDE)
