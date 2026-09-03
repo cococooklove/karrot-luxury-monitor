@@ -6,7 +6,7 @@ R = []
 def ck(name, cond, extra=""):
     R.append((name, bool(cond))); print(f"  [{'PASS' if cond else 'FAIL'}] {name}  {extra}")
 
-from daangn.feed_sweep import FeedSweep
+from daangn.feed_sweep import PROXY_DEAD_STATUS, FeedSweep
 from daangn_ext import web_feed as W
 
 d = tempfile.mkdtemp()
@@ -73,8 +73,32 @@ ck("레인 수 = 프록시 수(직결이면 1)", FeedSweep(dict(cfg, proxies=[])
 
 print("=== D. 전멸·중단 ===")
 dead = dict(cfg, proxies=["http://x"], fetch=lambda *a, **k: (None, "BLOCK"))
-e2 = FeedSweep(dead, on_log=logs.append); s3 = e2.cycle_once()
+stats2 = []
+e2 = FeedSweep(dead, on_log=logs.append, on_status=stats2.append); s3 = e2.cycle_once()
 ck("전 프록시 차단 → 사이클 중단 + 로그", s3["blocked"] >= 1 and any("프록시" in m and "정지" in m for m in logs))
+# 왜 멈췄는지를 남긴다 — 호출자(GUI·헤드리스)가 곧바로 되살리면 죽은 프록시로
+# 틱마다 재시작만 반복한다. 프록시 사망은 30분 물러섰다 다시 본다.
+ck("정지 사유 기록", e2.stop_reason == "proxies", str(e2.stop_reason))
+ck("정지 시각 기록", e2.stopped_at > 0, str(e2.stopped_at))
+ck("상태줄에 프록시 사망을 알린다",
+   PROXY_DEAD_STATUS in stats2, str(stats2[-3:]))
+ck("백오프 상수 30분", FeedSweep.PROXY_BACKOFF_SEC == 1800)
+e_ok = FeedSweep(dict(cfg, proxies=[], fetch=lambda *a, **k: ([], "EMPTY")), on_log=logs.append)
+e_ok.cycle_once()
+ck("멀쩡히 돈 엔진은 사유가 없다", e_ok.stop_reason is None, str(e_ok.stop_reason))
+e_ok.stop()
+ck("손으로 세우면 stopped", e_ok.stop_reason == "stopped", str(e_ok.stop_reason))
+ck("사유는 덮어쓰지 않는다(프록시 사망이 먼저다)",
+   (lambda: (e2.stop(), e2.stop_reason)[1])() == "proxies")
+slept.clear()
+FeedSweep(dict(cfg, rps=-5, proxies=["http://p1"], fetch=lambda *a, **k: ([], "EMPTY"),
+               sleep=lambda s: slept.append(s)), on_log=logs.append).cycle_once()
+ck("음수 rps 는 하한 0.01 로 — 나눗셈이 뒤집히지 않는다",
+   slept and abs(max(slept) - 100.0) < 0.01, str(slept[:2]))
+slept.clear()
+FeedSweep(dict(cfg, rps=0, proxies=["http://p1"], fetch=lambda *a, **k: ([], "EMPTY"),
+               sleep=lambda s: slept.append(s)), on_log=logs.append).cycle_once()
+ck("rps 0 은 기본값 1.0", slept and abs(max(slept) - 1.0) < 0.01, str(slept[:2]))
 e3 = FeedSweep(dict(cfg, rest_min=0.001), on_log=logs.append)
 th = threading.Thread(target=e3.run, daemon=True); th.start(); time.sleep(0.3); e3.stop(); th.join(3)
 ck("run/stop 수명", not th.is_alive())

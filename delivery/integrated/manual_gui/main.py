@@ -1417,6 +1417,24 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
     return cfg
 
 
+def feed_proxies(settings, proxies_file="./proxies.txt") -> list[str]:
+    """웹 프록시 목록 — 설정(조건 탭 '지역 선택' 카드의 웹 프록시 칸)이 비면 proxies.txt.
+
+    피드 엔진과 가격추적(ProxyBudget)이 같은 풀을 쓴다. 계정용 프록시
+    (settings.txt·accounts.json)와는 섞이지 않는다 — 저쪽은 계정에 묶인 IP 고
+    이쪽은 계정 없는 공개 웹 경로다."""
+    s = settings or {}
+    v = s.get("feed_proxies")
+    out = [p for p in (FEED_DEFAULTS["feed_proxies"] if v is None else v) if p]
+    if out:
+        return out
+    try:
+        with open(proxies_file, encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        return []
+
+
 def feed_cfg(settings, notify, proxies_file="./proxies.txt", out_json="./OUT.json",
              already_notified=None, log=None) -> dict:
     """웹 동 피드 엔진 cfg — GUI·헤드리스 공용. 지역은 스윕 지역 설정을 그대로 쓴다."""
@@ -1433,13 +1451,7 @@ def feed_cfg(settings, notify, proxies_file="./proxies.txt", out_json="./OUT.jso
         regions = [r["in"] for r in load_dong_regions(out_json)]
     else:
         regions = list(scope.get("regions") or [])
-    proxies = [p for p in (_get("feed_proxies") or []) if p]
-    if not proxies:
-        try:
-            with open(proxies_file, encoding="utf-8") as f:
-                proxies = [ln.strip() for ln in f if ln.strip()]
-        except OSError:
-            proxies = []
+    proxies = feed_proxies(s, proxies_file)
     cfg = {
         "regions": regions,
         "categories": [int(c) for c in _get("feed_categories")],
@@ -1570,6 +1582,35 @@ class HeadlessSweepRunner:
             self.start()
 
 
+# --once 가 도는 동 수. --once 는 배포 직후 '살아 있나'를 보는 스모크다 —
+# 서울·경기 1,857동 × 카테고리 2 를 다 돌면 한 시간을 넘겨 배포 스크립트가 멎는다.
+FEED_ONCE_REGION_CAP = 10
+
+
+def feed_once_cfg(cfg, log=None) -> dict:
+    """--once 용 cfg — 앞 10동만 남긴다. 원본은 건드리지 않는다."""
+    regions = list((cfg or {}).get("regions") or [])
+    if len(regions) > FEED_ONCE_REGION_CAP:
+        cfg = dict(cfg)
+        cfg["regions"] = regions[:FEED_ONCE_REGION_CAP]
+        if log:
+            log(f"[피드] --once: 앞 {FEED_ONCE_REGION_CAP}동만 확인")
+    return cfg
+
+
+def feed_proxy_backoff_left(engine) -> float:
+    """프록시 전멸로 죽은 엔진이면 남은 대기 초, 아니면 0.
+
+    GUI(_start_feed)와 헤드리스(HeadlessFeedRunner.start)가 같은 함수를 본다 —
+    따로 두면 한쪽만 죽은 프록시로 틱마다 재시작을 반복한다."""
+    if engine is None or getattr(engine, "stop_reason", None) != "proxies":
+        return 0.0
+    import time as _t
+    from daangn.feed_sweep import FeedSweep as _FS
+    elapsed = _t.monotonic() - float(getattr(engine, "stopped_at", 0.0) or 0.0)
+    return max(0.0, _FS.PROXY_BACKOFF_SEC - elapsed)
+
+
 class HeadlessFeedRunner:
     """헤드리스 런타임의 동 피드 수명 — HeadlessSweepRunner 와 같은 모양."""
 
@@ -1581,6 +1622,7 @@ class HeadlessFeedRunner:
         self._thread_factory = thread_factory
         self.engine = None
         self.thread = None
+        self._backoff_logged = False    # 백오프 안내는 한 번만(틱마다 아니고)
 
     def _make_engine(self, cfg):
         if self._engine_factory is not None:
@@ -1602,6 +1644,13 @@ class HeadlessFeedRunner:
         if self.running():
             self.log("[피드] 이미 돌고 있음 — 시작 요청 건너뜀")
             return False
+        left = feed_proxy_backoff_left(self.engine)
+        if left > 0:
+            if not self._backoff_logged:
+                self.log(f"[피드] 프록시 전멸 뒤 대기 — {int(left // 60) + 1}분 후 재시도")
+                self._backoff_logged = True
+            return False
+        self._backoff_logged = False
         try:
             cfg = self.cfg_builder()
             if not cfg.get("regions"):
@@ -2628,6 +2677,9 @@ class MainWindow(QMainWindow):
         # 검색 스윕 스레드 핸들 — 탭은 없어졌지만 엔진은 라우터가 부린다.
         self.auto_monitor = None
         self.feed_monitor = None
+        # 마지막 피드 엔진 — 모니터를 버려도 '왜 멈췄나'는 남아야 백오프가 선다.
+        self._feed_last_engine = None
+        self._app_sweep_off_logged = False
         # 매물 감시는 조건·결과·설정 세 탭으로 나뉜다. 한 탭에 접이식 네 개로
         # 쌓았던 동안 설정은 고급 패널·알림 창·계정 창 세 곳에 흩어졌고,
         # 클라는 어디를 펴야 하는지 몰랐다. 위젯은 한 함수가 다 만든다.
@@ -3621,8 +3673,11 @@ class MainWindow(QMainWindow):
             from daangn_ext import article_watch as _aw
             self._watch_store = _aw.WatchStore("./data/watch.db")
             self._watch_tracker = _aw.WatchTracker(self._watch_store)
+            # 프록시 목록은 회차마다 다시 읽는다(reload) — 설정에서 웹 프록시를
+            # 고쳐도 앱을 껐다 켜지 않고 다음 회차부터 반영된다.
             self._watch_budget = _aw.ProxyBudget(
-                feed_cfg(self._load_alert_settings(), {}).get("proxies"))
+                feed_proxies(self._load_alert_settings()),
+                provider=lambda: feed_proxies(self._load_alert_settings()))
             self._watch_timer = QtCore.QTimer(self)
             self._watch_timer.timeout.connect(self._watch_sweep_tick)
         except Exception as e:
@@ -4578,6 +4633,7 @@ class MainWindow(QMainWindow):
         # 스윕 재동기화만 GUI 스레드에 남는다 — QThread 를 만들고 세우는 일이라
         # 워커로 못 옮긴다. 대신 네트워크를 타지 않는다.
         self._resync_search_sweep()
+        self._resync_feed()
         if self._alert_worker and self._alert_worker.isRunning():
             self._alog("[자동폴링] 이전 폴링 진행 중 — 이번 틱 스킵")
             return
@@ -5599,12 +5655,17 @@ class MainWindow(QMainWindow):
         return cfg
 
     def _already_notified(self, article_id) -> bool:
-        """앱 알림 경로가 이미 본 매물인가. 워치리스트가 그 사실의 주인이다."""
+        """이미 본 매물인가. 워치리스트가 그 사실의 주인이다.
+
+        키가 둘이다 — 앱은 숫자 id, 피드는 슬러그 href. href 행은 첫 상세
+        조회에서 숫자 id 로 옮겨 가지만(WatchTracker.check_one 재키잉) url 은
+        href 그대로 남으므로, id 로 못 찾으면 url 로 한 번 더 본다."""
         store = getattr(self, "_watch_store", None)
         if store is None:
             return False
         try:
-            return bool(store.get(str(article_id)))
+            key = str(article_id)
+            return bool(store.get(key) or store.get_by_url(key))
         except Exception:
             return False
 
@@ -5628,9 +5689,26 @@ class MainWindow(QMainWindow):
             pass
         return True
 
-    def _start_search_sweep(self):
-        if not sweep_app_enabled(self._load_alert_settings()):
+    def _app_sweep_gate(self, settings=None) -> bool:
+        """앱 키워드 스윕이 켜져 있는가. 꺼져 있으면 도는 스윕을 세우고 False.
+
+        헤드리스 폴링 루프의 같은 자리와 같은 규칙이다 — 안내는 켜짐→꺼짐
+        전이마다 한 번만 남긴다. 틱마다 찍으면(폴링 30~90초) 하루치 로그가
+        같은 줄로 덮인다."""
+        s = self._load_alert_settings() if settings is None else settings
+        if sweep_app_enabled(s):
+            self._app_sweep_off_logged = False
+            return True
+        if not getattr(self, "_app_sweep_off_logged", False):
             self._alog("[검색스윕] 앱 스윕 꺼짐(설정) — 피드가 발굴합니다")
+            self._app_sweep_off_logged = True
+        am = self.auto_monitor
+        if am is not None and am.isRunning():
+            self._stop_search_sweep()
+        return False
+
+    def _start_search_sweep(self):
+        if not self._app_sweep_gate():
             return
         if self.auto_monitor is not None and self.auto_monitor.isRunning():
             # stop() 은 비동기다(최대 8초). 그 안에 다시 켜면 여기서 조용히 막혔다 —
@@ -5699,14 +5777,38 @@ class MainWindow(QMainWindow):
             pass
         return True
 
+    def _feed_log_once(self, key, msg):
+        """같은 사유로는 한 번만 말한다. 시작에 성공하면 래치가 풀린다.
+
+        _start_feed 는 폴링 틱마다 불린다(_resync_feed) — 안 걸어 두면 '설정에서
+        꺼져 있음' 한 줄이 하루에 수백 번 쌓여 로그가 못 쓰게 된다."""
+        seen = self.__dict__.setdefault("_feed_logged", set())
+        if key in seen:
+            return
+        seen.add(key)
+        self._alog(msg)
+
+    def _on_feed_status(self, text):
+        """피드 상태 한 줄. 프록시 사망만 경고색으로 — 나머지는 진행 표시다."""
+        from daangn.feed_sweep import PROXY_DEAD_STATUS
+        self._set_status("feed", text,
+                         "warn" if text == PROXY_DEAD_STATUS else "ok")
+
     def _start_feed(self):
         s = self._load_alert_settings()
         if not s.get("feed_enabled", FEED_DEFAULTS["feed_enabled"]):
-            self._alog("[피드] 설정에서 꺼져 있음"); return
+            self._feed_log_once("off", "[피드] 설정에서 꺼져 있음"); return
         if len(self._alert_rules.get().rules) == 0:
-            self._alog("[피드] 조건표가 비어 있어 시작하지 않습니다"); return
+            self._feed_log_once("rules", "[피드] 조건표가 비어 있어 시작하지 않습니다"); return
         fm = self.feed_monitor
         if fm is not None and fm.isRunning():
+            return
+        # 프록시가 전멸해 죽은 엔진이면 물러선다 — 헤드리스와 같은 함수를 본다.
+        # 죽은 프록시로는 다시 띄워도 첫 요청에서 같은 자리에 눕는다.
+        left = feed_proxy_backoff_left(getattr(self, "_feed_last_engine", None))
+        if left > 0:
+            self._feed_log_once(
+                "backoff", f"[피드] 프록시 전멸 뒤 대기 — {int(left // 60) + 1}분 후 재시도")
             return
         try:
             self._dispose_feed_monitor()
@@ -5715,8 +5817,12 @@ class MainWindow(QMainWindow):
             self.feed_monitor = FeedMonitor(self, cfg)
             self.feed_monitor.log.connect(self._alog)
             self.feed_monitor.found.connect(self._on_feed_found)
-            self.feed_monitor.status.connect(lambda t: self._set_status("feed", t, "ok"))
+            self.feed_monitor.status.connect(self._on_feed_status)
             self.feed_monitor.start()
+            # 엔진은 모니터를 버린 뒤에도 정지 사유를 들고 있어야 한다 — 다음 틱의
+            # 백오프 판정이 이걸 본다.
+            self._feed_last_engine = self.feed_monitor.engine
+            self.__dict__["_feed_logged"] = set()
             self._set_status("feed", f"피드 {len(cfg['regions'])}동 · 레인 {max(1, len(cfg['proxies']))}", "ok")
         except Exception as e:
             self._alog(f"[피드] 시작 실패: {str(e)[:120]}")
@@ -5726,6 +5832,18 @@ class MainWindow(QMainWindow):
         if fm is not None and fm.isRunning():
             fm.stop()
         self._set_status("feed", "", "off")
+
+    def _resync_feed(self):
+        """감시 중인데 피드가 죽어 있으면 다시 띄운다 — 헤드리스 폴링 루프와 같은 자리.
+
+        엔진은 프록시 전멸·예외로 조용히 죽는다. 되살리는 손이 없으면 발굴
+        주경로가 통째로 멈춘 채 앱 알림만 남는다(클라 눈에는 '알림이 준다')."""
+        if not (self._supervisor and self._supervisor.is_running()):
+            return
+        fm = self.feed_monitor
+        if fm is not None and fm.isRunning():
+            return
+        self._start_feed()
 
     def _on_feed_found(self, payload):
         """피드가 찾은 매물 → 워치리스트(추적) + 결과 표. GUI 스레드에서 불린다.
@@ -5750,6 +5868,10 @@ class MainWindow(QMainWindow):
 
         폴링 틱에서만 부른다 — 등록이 몰아쳐도 재시작은 폴링 주기당 한 번을 넘지 않는다."""
         if not (self._supervisor and self._supervisor.is_running()):
+            return
+        # 스위치 검사가 먼저다 — 뒤에 두면 꺼져 있어도 'start' 판정까지 가서
+        # _start_search_sweep 이 틱마다 거절 로그를 찍는다.
+        if not self._app_sweep_gate():
             return
         if self._sweep_queue is None:
             return
@@ -6381,10 +6503,14 @@ class MainWindow(QMainWindow):
             r = store.rows[i]
             key = r.get("code") or r.get("label") or r.get("refresh")
             val = proxyEdit.text().strip()
-            if store.set_proxy(key, val):
+            # 역할과 프록시는 다른 필드다 — 프록시 저장이 실패했다고 역할까지
+            # 버리면, 클라가 역할을 고치고 [저장]을 눌러도 조용히 사라진다.
+            ok = store.set_proxy(key, val)
+            if ok:
                 self._alog(f"[프록시] {_name(r)} → {val or '직결'}")
-                store.set_role(key, roleBox.currentData())
+            if store.set_role(key, roleBox.currentData()):
                 self._alog(f"[계정] {_name(r)} 역할 → {roleBox.currentText()}")
+            if ok:
                 reload_list()
                 QtWidgets.QMessageBox.information(
                     dlg, "저장됨",
@@ -6830,6 +6956,13 @@ class MainWindow(QMainWindow):
             if not self.auto_monitor.wait(3000):
                 self.auto_monitor.terminate()
                 self.auto_monitor.wait(2000)
+        # 피드도 QThread 다 — 안 세우면 종료 때 SIGABRT 로 떨어진다. 사이클 안의
+        # 요청 하나(최대 25초 타임아웃)를 기다려야 해서 auto_monitor 보다 넉넉하다.
+        if self.feed_monitor is not None and self.feed_monitor.isRunning():
+            self.feed_monitor.stop()
+            if not self.feed_monitor.wait(8000):
+                self.feed_monitor.terminate()
+                self.feed_monitor.wait(2000)
         if self.worker_thread is not None and self.worker_thread.isRunning():
             self.worker_thread.cancel()
             self.worker_thread.wait(3000)
@@ -7216,7 +7349,9 @@ def _run_headless():
         from daangn_ext import article_watch
         watch_store = article_watch.WatchStore("./data/watch.db")
         watch_tracker = article_watch.WatchTracker(watch_store)
-        watch_budget = article_watch.ProxyBudget(feed_cfg(_settings(), {}).get("proxies"))
+        # GUI(_watch_budget)와 같은 풀·같은 재조회 규칙.
+        watch_budget = article_watch.ProxyBudget(
+            feed_proxies(_settings()), provider=lambda: feed_proxies(_settings()))
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
     # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).
@@ -7298,9 +7433,22 @@ def _run_headless():
             f"{str(e)[:120]}")
 
     # ── 동 피드 — 앱 슬롯·조건표 무관, 웹 동 피드로 넓게 훑는다 ──
+    def _feed_already_notified(href) -> bool:
+        """피드가 낸 href 를 이미 봤는가 — GUI _already_notified 와 같은 규칙.
+
+        href 행은 첫 상세 조회에서 숫자 id 로 옮겨 가지만 url 은 href 그대로라,
+        커서를 잃고 같은 href 가 다시 올라와도 url 로 잡힌다."""
+        if watch_store is None:
+            return False
+        try:
+            key = str(href)
+            return bool(watch_store.get(key) or watch_store.get_by_url(key))
+        except Exception:
+            return False
+
     feed_runner = HeadlessFeedRunner(
         lambda: feed_cfg(_settings(), _notify_cfg(), log=log,
-                         already_notified=lambda h: bool(watch_store.get(str(h))) if watch_store else False),
+                         already_notified=_feed_already_notified),
         log, _sweep_found)
 
     # 관측 상한 되돌리기 — 등록 엔드포인트의 일시적 오류 하나로 유효 상한이
@@ -7411,7 +7559,7 @@ def _run_headless():
                     # --once 는 스레드를 띄우지 않고 한 회차만 동기로 돈다 —
                     # 안 그러면 스레드가 뜨자마자 프로세스가 끝나 아무것도 못 본다.
                     try:
-                        _fcfg = feed_runner.cfg_builder()
+                        _fcfg = feed_once_cfg(feed_runner.cfg_builder(), log)
                         _fresult = _FeedSweepOnce(
                             _fcfg, on_log=log, on_found=_sweep_found).cycle_once()
                         log(f"[피드] 1회 결과: {_fresult}")

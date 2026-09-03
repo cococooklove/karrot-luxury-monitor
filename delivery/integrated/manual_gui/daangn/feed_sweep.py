@@ -22,6 +22,11 @@ def _noop(*a, **k):
     pass
 
 
+# 프록시가 전멸해 엔진이 멈췄을 때 상태줄에 뜨는 한 줄. GUI 가 이 문자열을
+# 보고 색(warn)을 정하므로 양쪽이 같은 상수를 봐야 한다.
+PROXY_DEAD_STATUS = "피드 정지 — 프록시 확인"
+
+
 def _region_pair(code: str):
     """'역삼동-6035' → ('역삼동', '6035'). 이름에 '-' 가 있어도 마지막 것만 자른다."""
     name, _, rid = str(code).rpartition("-")
@@ -29,12 +34,20 @@ def _region_pair(code: str):
 
 
 class FeedSweep:
+    # 프록시 전멸 뒤 다시 띄우기까지 물러서는 시간. 죽은 프록시로는 몇 번을
+    # 다시 띄워도 첫 요청에서 같은 자리에 눕는다 — 그 사이 로그만 쌓인다.
+    PROXY_BACKOFF_SEC = 1800
+
     def __init__(self, cfg: dict, on_log=None, on_found=None, on_status=None):
         self.cfg = cfg
         self.on_log = on_log or _noop
         self.on_found = on_found or _noop
         self.on_status = on_status or _noop
         self._stop = False
+        # 왜 멈췄는지 — "proxies"(전멸) / "stopped"(호출자가 세움) / None(돌고 있음).
+        # 호출자가 되살릴지 물러설지 이걸로 정한다.
+        self.stop_reason = None
+        self.stopped_at = 0.0
         self._fetch = cfg.get("fetch") or W.fetch_feed
         self._sleep = cfg.get("sleep") or time.sleep
         self._rules_path = cfg.get("rules_path", "./data/alert_rules.json")
@@ -50,8 +63,16 @@ class FeedSweep:
     def _log(self, m):
         self.on_log(m)
 
-    def stop(self):
+    def _mark_stop(self, reason):
+        """정지 사유를 처음 것만 남긴다 — 프록시 전멸 뒤 호출자가 stop() 을
+        불러도 사유가 'stopped' 로 덮이면 백오프가 사라진다."""
+        if self.stop_reason is None:
+            self.stop_reason = reason
+            self.stopped_at = time.monotonic()
         self._stop = True
+
+    def stop(self):
+        self._mark_stop("stopped")
 
     def _lanes(self) -> int:
         return max(1, len(self.cfg.get("proxies") or []))
@@ -80,8 +101,9 @@ class FeedSweep:
         for p in self._pairs():
             q.put(p)
         total = q.qsize()
-        rps = float(self.cfg.get("rps") or 1.0)
-        gap = 1.0 / rps if rps > 0 else 0.0
+        # 0·음수는 '제한 없음'이 아니라 설정 실수다 — 하한을 두고 나눗셈을 지킨다.
+        rps = max(0.01, float(self.cfg.get("rps") or 1.0))
+        gap = 1.0 / rps
         already = self.cfg.get("already_notified") or (lambda _h: False)
         rules = self._rules_now()
         now = int(time.time())
@@ -100,7 +122,8 @@ class FeedSweep:
                         with self._lock:
                             stat["blocked"] += 1
                         self._log("[피드] 프록시 전멸 — 피드 정지, 프록시를 확인하세요")
-                        self._stop = True
+                        self._mark_stop("proxies")
+                        self.on_status(PROXY_DEAD_STATUS)
                         return
                     with self._lock:
                         stat["requests"] += 1

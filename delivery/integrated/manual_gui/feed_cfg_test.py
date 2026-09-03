@@ -15,6 +15,15 @@ ck("기본: 서울·경기 동 1857", len(cfg["regions"]) == 1857, str(len(cfg["
 ck("지역 코드 모양 '이름-id'", all("-" in r for r in cfg["regions"][:5]), str(cfg["regions"][:2]))
 ck("기본 카테고리 31·14", cfg["categories"] == [31, 14])
 ck("feed_proxies 비면 proxies.txt", cfg["proxies"] == ["http://f1", "http://f2"])
+# 프록시 목록은 따로 뽑아 쓴다 — 가격추적(ProxyBudget)이 같은 풀을 봐야 한다.
+ck("feed_proxies(): 설정값", m.feed_proxies({"feed_proxies": ["http://a"]}, pf) == ["http://a"])
+ck("feed_proxies(): 비면 파일", m.feed_proxies({}, pf) == ["http://f1", "http://f2"])
+ck("feed_proxies(): 파일도 없으면 빈 목록",
+   m.feed_proxies({}, os.path.join(d, "없는파일.txt")) == [])
+ck("feed_proxies(): 빈 줄·None 은 버린다",
+   m.feed_proxies({"feed_proxies": ["http://a", "", None]}, pf) == ["http://a"])
+ck("feed_cfg 는 feed_proxies 를 쓴다",
+   "feed_proxies" in m.feed_cfg.__code__.co_names)
 ck("rps·휴식 기본", cfg["rps"] == 1.0 and cfg["rest_min"] == 2)
 ck("텔레그램 전달", cfg["tg_token"] == "t" and cfg["tg_chat"] == "c")
 ck("rules_path·cursor_fp", cfg["rules_path"] == "./data/alert_rules.json" and cfg["cursor_fp"] == "./data/feed_cursor.json")

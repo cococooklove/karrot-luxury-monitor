@@ -301,6 +301,11 @@ class _Tick:
     def _resync_search_sweep(self):
         self.calls.append(("resync", threading.get_ident()))
 
+    def _resync_feed(self):
+        # 피드 되살리기도 GUI 스레드에 남는다(QThread 를 만드는 일이라).
+        # 여기서는 '틱이 네트워크를 안 탄다'만 재므로 아무것도 안 센다.
+        pass
+
     def _core_only(self):
         return False
 

@@ -354,6 +354,10 @@ if _win is not None:
         """_resync_search_sweep 만 떼어 본다 — 진짜 스레드도 네트워크도 안 쓴다."""
         calls = []
         _win.alertLog.clear()
+        # 앱 스윕은 기본 꺼짐(설정)이고 꺼지면 재동기화가 앞에서 끝난다.
+        # 이 리그가 재는 것은 그 뒤의 판정이므로 스위치는 켜 놓는다.
+        _win._load_alert_settings = lambda: {"sweep_app_enabled": True}
+        _win._app_sweep_off_logged = False
         _win._sweep_queue = _FakeQueue(queue_kws)
         _win._supervisor = _FakeSupervisor(running_supervisor)
         _win._sweep_kws = have
@@ -386,8 +390,22 @@ if _win is not None:
     ck("빈 집합끼리 같으면 죽었어도 무동작", _rig([], set()) == [])
     ck("감시 꺼져 있으면 무동작",
        _rig(["샤넬"], {"구찌"}, running_supervisor=False) == [])
+    # 앱 스윕이 꺼져 있으면 재동기화는 스위치 검사에서 끝난다(헤드리스와 같다).
+    _off_calls = []
+    _win._sweep_queue = _FakeQueue(["샤넬"])
+    _win._supervisor = _FakeSupervisor(True)
+    _win._sweep_kws = None
+    _win.auto_monitor = None
+    _win._start_search_sweep = lambda: _off_calls.append("start")
+    _win._stop_search_sweep = lambda: _off_calls.append("stop")
+    _win._load_alert_settings = lambda: {"sweep_app_enabled": False}
+    _win._app_sweep_off_logged = False
+    _win._resync_search_sweep()
+    ck("앱 스윕 꺼짐이면 재동기화는 시작도 정지도 안 한다",
+       _off_calls == [], str(_off_calls))
     # 인스턴스 속성으로 덮어쓴 메서드는 지워서 클래스 구현으로 되돌린다.
-    for _n in ("_start_search_sweep", "_stop_search_sweep"):
+    for _n in ("_start_search_sweep", "_stop_search_sweep",
+               "_load_alert_settings"):
         _win.__dict__.pop(_n, None)
     (_win._sweep_queue, _win._supervisor, _win._sweep_kws,
      _win.auto_monitor) = _saved
@@ -986,6 +1004,118 @@ if _win is not None:
         _fdm_ok = False
     ck("피드 모니터 폐기(빈 상태에서도 안 죽는다)",
        callable(getattr(_win, "_dispose_feed_monitor", None)) and _fdm_ok)
+
+    # ── 피드·앱스윕 수명: 로그 래치·백오프·종료 ──
+    # 폴링 틱마다 같은 안내가 쌓이면 로그를 못 읽는다. 죽은 프록시로 틱마다
+    # 재시작하면 로그만 쌓이고 아무것도 안 산다.
+    print("=== 피드·앱스윕 수명 ===")
+    import inspect as _insp
+    import time as _time2
+    import types as _types2
+
+    ck("closeEvent 가 피드 스레드도 세운다",
+       "feed_monitor" in _insp.getsource(m.MainWindow.closeEvent))
+
+    def _rules_of(n):
+        return type("_RC", (), {"get": staticmethod(
+            lambda: type("_RT", (), {"rules": [1] * n})())})()
+
+    _sv6 = (_win._alog, _win._alert_rules, _win.feed_monitor,
+            _win._supervisor, _win.auto_monitor,
+            _win.__dict__.get("_load_alert_settings"))
+    _flogs = []
+    _win._alog = _flogs.append
+    _win._alert_rules = _rules_of(0)
+    _win._load_alert_settings = lambda: {}
+    _win.feed_monitor = None
+    _win._start_feed(); _win._start_feed()
+    ck("조건표 비었다는 안내는 한 번만",
+       sum(1 for x in _flogs if "조건표" in x) == 1, str(_flogs))
+    ck("조건표가 비면 모니터를 안 만든다", _win.feed_monitor is None)
+    _flogs.clear()
+    _win._load_alert_settings = lambda: {"feed_enabled": False}
+    _win._start_feed(); _win._start_feed()
+    ck("설정에서 꺼졌다는 안내도 한 번만",
+       sum(1 for x in _flogs if "꺼져" in x) == 1, str(_flogs))
+
+    # 프록시 전멸 백오프 — 죽은 엔진을 기억하고 30분 물러선다.
+    _flogs.clear()
+    _win._load_alert_settings = lambda: {}
+    _win._alert_rules = _rules_of(2)
+    _win._feed_last_engine = _types2.SimpleNamespace(
+        stop_reason="proxies", stopped_at=_time2.monotonic())
+    _win._start_feed(); _win._start_feed(); _win._start_feed()
+    ck("프록시 전멸 뒤에는 피드를 다시 띄우지 않는다", _win.feed_monitor is None)
+    ck("백오프 안내도 한 번만",
+       sum(1 for x in _flogs if "프록시" in x) == 1, str(_flogs))
+    ck("백오프 판정은 헤드리스와 같은 함수",
+       "feed_proxy_backoff_left" in m.MainWindow._start_feed.__code__.co_names)
+    _win._feed_last_engine = None
+
+    # 프록시 사망 상태줄은 경고색으로 — 상태 문자열 하나가 두 런타임의 계약이다.
+    from daangn.feed_sweep import PROXY_DEAD_STATUS as _PDS
+    _win._on_feed_status(_PDS)
+    ck("프록시 사망은 warn", _win._status["feed"] == (_PDS, "warn"),
+       str(_win._status["feed"]))
+    _win._on_feed_status("피드 3/10 · 역삼동")
+    ck("보통 진행은 ok", _win._status["feed"][1] == "ok", str(_win._status["feed"]))
+
+    # 앱 스윕이 꺼져 있으면: 전이마다 한 번만 말하고, 시작 판정까지 가지 않는다.
+    class _RunAM:
+        def __init__(self):
+            self.stopped = 0
+
+        def isRunning(self):
+            return True
+
+        def stop(self):
+            self.stopped += 1
+
+    _flogs.clear()
+    _win._supervisor = _FakeSup()
+    _win._sweep_queue = _FakeQ2(["샤넬"])
+    _win.auto_monitor = None
+    _win._sweep_kws = None
+    _win._app_sweep_off_logged = False
+    _win._load_alert_settings = lambda: {"sweep_app_enabled": False}
+    for _ in range(3):
+        _win._resync_search_sweep()
+    ck("앱 스윕 꺼짐 안내는 한 번만",
+       sum(1 for x in _flogs if "앱 스윕 꺼짐" in x) == 1, str(_flogs))
+    ck("꺼져 있으면 시작 판정까지 가지 않는다",
+       _win.auto_monitor is None and not any("시작" in x for x in _flogs), str(_flogs))
+    _win.auto_monitor = _RunAM()
+    _win._resync_search_sweep()
+    ck("꺼졌는데 돌고 있으면 세운다(헤드리스와 같은 규칙)",
+       _win.auto_monitor.stopped == 1, str(_win.auto_monitor.stopped))
+    _win.auto_monitor = None
+    _flogs.clear()
+    ck("다시 켜지면 게이트가 열린다", _win._app_sweep_gate({"sweep_app_enabled": True}) is True)
+    ck("켜짐→꺼짐 전이면 다시 한 번 말한다",
+       _win._app_sweep_gate({}) is False
+       and sum(1 for x in _flogs if "앱 스윕 꺼짐" in x) == 1, str(_flogs))
+
+    # 폴링 틱이 죽은 피드를 되살린다(백오프·래치는 _start_feed 가 본다).
+    _tick_src = _insp.getsource(m.MainWindow._auto_poll_tick)
+    ck("폴링 틱이 피드도 재동기화한다", "_resync_feed" in _tick_src)
+    _flogs.clear()
+    _win._alert_rules = _rules_of(0)
+    _win.feed_monitor = None
+    _win.__dict__["_feed_logged"] = set()
+    _win._resync_feed()
+    ck("감시 중 피드가 죽어 있으면 다시 띄운다(조건표가 비어 여기서 멈춘다)",
+       any("조건표" in x for x in _flogs), str(_flogs))
+    _win._supervisor = None
+    _flogs.clear()
+    _win._resync_feed()
+    ck("감시가 꺼져 있으면 손대지 않는다", _flogs == [], str(_flogs))
+
+    (_win._alog, _win._alert_rules, _win.feed_monitor,
+     _win._supervisor, _win.auto_monitor, _sv6_ls) = _sv6
+    if _sv6_ls is None:
+        _win.__dict__.pop("_load_alert_settings", None)
+    else:
+        _win._load_alert_settings = _sv6_ls
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
