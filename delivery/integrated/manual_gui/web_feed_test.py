@@ -73,4 +73,33 @@ degraded_cur = W.FeedCursor(degraded_cp)
 degraded_result = degraded_cur.new_articles("6035:31", arts[:3], now)
 ck("손상된 커서(missing seen)는 안전하게 처리", degraded_result == [x for x in arts[:3] if x["status"] == "ongoing" and now - x["boosted_at"] <= W.FIRST_VISIT_WINDOW_SEC])
 
+print("=== E. 요청 계층 ===")
+calls = []
+loader_txt = json.dumps(j, ensure_ascii=False)
+def fake_get(url, proxy, timeout):
+    calls.append((url, proxy))
+    if "_data=" in url: return 200, loader_txt
+    return 200, html
+arts2, kind = W.fetch_feed("역삼동", 6035, 31, proxy="http://p1", get=fake_get)
+ck("JSON OK", kind == "OK" and len(arts2) == 40 and calls[-1][1] == "http://p1")
+def bad_loader(url, proxy, timeout):
+    if "_data=" in url: return 403, '{"message":"Unexpected Server Error"}'
+    return 200, html
+arts3, kind = W.fetch_feed("역삼동", 6035, 31, get=bad_loader)
+ck("로더 403 → HTML 폴백", kind == "FALLBACK" and len(arts3) > 100, kind)
+ck("429/403 양쪽 → BLOCK", W.fetch_feed("x", 1, 31, get=lambda u, p, t: (429, ""))[1] == "BLOCK"
+   and W.fetch_feed("x", 1, 31, get=lambda u, p, t: (403, "<html>"))[1] == "BLOCK")
+ck("200 인데 매물 0 → EMPTY", W.fetch_feed("x", 1, 31, get=lambda u, p, t: (200, '{"allPage":{"fleamarketArticles":[]}}'))[1] == "EMPTY")
+def boom(u, p, t): raise RuntimeError("net")
+ck("예외 → ERR·None", W.fetch_feed("x", 1, 31, get=boom) == (None, "ERR"))
+ck("기본 헤더에 토큰 없음", "authorization" not in {k.lower() for k in W.DEFAULT_HEADERS})
+
+pool = W.ProxyPool(["http://a", "http://b"], cooldown_sec=60)
+ck("라운드로빈", [pool.pick(), pool.pick(), pool.pick()] == ["http://a", "http://b", "http://a"])
+pool.block("http://a")
+ck("차단 프록시 제외", pool.pick() == "http://b" and pool.alive_count() == 1)
+pool.block("http://b")
+ck("전멸 판정", pool.all_blocked() and pool.pick() is None)
+ck("빈 풀 = 직결 None, 전멸 아님", W.ProxyPool([]).pick() is None and not W.ProxyPool([]).all_blocked())
+
 n_ok = sum(1 for _, c in R if c); print(f"\n{n_ok}/{len(R)} PASS"); sys.exit(0 if n_ok == len(R) else 1)

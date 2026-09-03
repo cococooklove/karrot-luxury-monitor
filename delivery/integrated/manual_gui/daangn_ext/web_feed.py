@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime
 from urllib.parse import quote
 
@@ -182,3 +183,78 @@ class FeedCursor:
             json.dump(self._d, f, ensure_ascii=False)
         os.replace(tmp, self.path)
         self._dirty = False
+
+
+DEFAULT_HEADERS = {
+    "accept": "application/json, text/html;q=0.9,*/*;q=0.8",
+    "accept-language": "ko-KR,ko;q=0.9",
+    "accept-encoding": "gzip, deflate, br",
+}
+
+
+def _default_get(url, proxy, timeout):
+    """curl_cffi GET. 토큰·쿠키 없음 — 계정이 여기 얽히면 안 된다."""
+    from curl_cffi import requests
+    r = requests.get(url, headers=DEFAULT_HEADERS, impersonate="safari_ios",
+                     timeout=timeout, proxy=proxy)
+    return r.status_code, r.text
+
+
+def fetch_feed(name, region_id, category, proxy=None, get=None, timeout=25):
+    """(매물 목록|None, 종류). 로더가 막히면 같은 페이지 HTML 로 폴백한다."""
+    get = get or _default_get
+    try:
+        status, text = get(feed_url(name, region_id, category, data=True), proxy, timeout)
+    except Exception:
+        return None, "ERR"
+    if status in (403, 429):
+        # 로더 경로 변경(403)과 IP 차단(403/429)을 한 번에 가를 수 없다 —
+        # HTML 로 한 번 더 물어 본다. HTML 도 막히면 차단이다.
+        try:
+            status2, text2 = get(feed_url(name, region_id, category, data=False), proxy, timeout)
+        except Exception:
+            return None, "ERR"
+        if status2 == 200:
+            arts = parse_feed_html(text2)
+            return (arts, "FALLBACK") if arts else ([], "EMPTY")
+        return None, "BLOCK"
+    if status != 200:
+        return None, "ERR"
+    try:
+        arts = parse_feed_json(json.loads(text))
+    except ValueError:
+        arts = parse_feed_html(text)
+        return (arts, "FALLBACK") if arts else (None, "ERR")
+    return (arts, "OK") if arts else ([], "EMPTY")
+
+
+class ProxyPool:
+    """웹 전용 프록시 순환 + 차단 쿨다운. 비어 있으면 직결(None) 하나로 돈다."""
+
+    def __init__(self, proxies, cooldown_sec=1800):
+        self.proxies = [p for p in dict.fromkeys(proxies or []) if p]
+        self.cooldown_sec = cooldown_sec
+        self._until: dict[str, float] = {}
+        self._i = 0
+
+    def _alive(self):
+        now = time.monotonic()
+        return [p for p in self.proxies if self._until.get(p, 0) <= now]
+
+    def pick(self):
+        alive = self._alive()
+        if not alive:
+            return None
+        p = alive[self._i % len(alive)]
+        self._i += 1
+        return p
+
+    def block(self, proxy):
+        if proxy:
+            self._until[proxy] = time.monotonic() + self.cooldown_sec
+
+    def alive_count(self) -> int:
+        return len(self._alive())
+
+    def all_blocked(self) -> bool:
+        return bool(self.proxies) and not self._alive()
