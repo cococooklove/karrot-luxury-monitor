@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -154,8 +155,9 @@ def brand_register_groups(brand_list, rules):
 class AlertRulesCache:
     """룰 파일이 바뀌면 다시 읽는다 — 엑셀을 새로 넣어도 재시작이 필요 없다."""
 
-    def __init__(self, path=ALERT_RULES_FILE):
-        self.path = path
+    def __init__(self, path=None):
+        # 경로는 만들 때 푼다 — 테스트가 모듈 상수를 바꿔 끼울 수 있게.
+        self.path = path or ALERT_RULES_FILE
         self._mtime = None
         self._table = None
 
@@ -167,6 +169,11 @@ class AlertRulesCache:
         if self._table is None or mt != self._mtime:
             self._mtime, self._table = mt, load_alert_rules(self.path)
         return self._table
+
+    def stamp(self):
+        """마지막으로 읽은 파일의 mtime — 화면이 '이미 본 파일인지' 비교하는 값."""
+        self.get()
+        return self._mtime
 
 
 _WATCH_LABELS = {
@@ -343,6 +350,218 @@ def row_lines(table):
     """모든 QTableWidget 에 붙인다 — 안 붙이면 그 표만 줄 구분선이 없다."""
     table.setItemDelegate(RowLineDelegate(table))
     return table
+
+
+class RuleGrid(QtWidgets.QTableWidget):
+    """조건표 — 엑셀 파일 대신 화면에서 바로 적는 표.
+
+    엑셀이 원본이던 동안 조건 다섯 줄을 고치려면 파일을 열고, 고치고,
+    저장하고, [다시 읽기]를 눌러야 했다. 파일을 옮기면 [열기]가 죽었다.
+    이 표가 엑셀처럼 굴면 그 네 단계가 사라진다: 엑셀에서 복사한 것을
+    Ctrl+V 로 붙이고, Delete 로 비우고, 끝 줄에 적으면 새 줄이 생긴다.
+    행 번호는 엑셀과 같이 머리글이 1행이라 파서 오류의 "5행"이 표의 5다.
+
+    값은 문자열 그대로 둔다 — 해석(가격 쉼표·브랜드 이어받기·제외 쉼표)은
+    parse_rule_rows 한 곳이 엑셀과 똑같이 한다."""
+    MIN_ROWS = 8
+    ERR_ROW_BG = "#FCEBE8"          # 계정표 '점검필요' 와 같은 붉은 바탕
+    edited = QtCore.pyqtSignal()    # 사용자가 셀을 바꿨다 — 적용 전 '수정됨'
+
+    def __init__(self, parent=None):
+        from daangn_ext.rule_grid import RULE_COLS
+        super().__init__(0, len(RULE_COLS), parent)
+        self.setObjectName("rulesGrid")
+        row_lines(self)
+        self.setHorizontalHeaderLabels(RULE_COLS)
+        self.horizontalHeader().setStretchLastSection(True)
+        # 행 번호 열 — 공용 헤더 QSS 의 세로 패딩(12px)이 30px 줄에서 숫자를
+        # 짓눌러 깨뜨린다. 세로 헤더만 따로 폭·줄높이를 잡는다.
+        vh = self.verticalHeader()
+        vh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+        vh.setDefaultSectionSize(30)
+        vh.setFixedWidth(40)
+        vh.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        T = QtWidgets.QAbstractItemView.EditTrigger
+        self.setEditTriggers(T.DoubleClicked | T.EditKeyPressed | T.AnyKeyPressed
+                             | T.SelectedClicked)
+        self._errors: set[int] = set()
+        self._quiet = 0                 # >0 이면 프로그램이 채우는 중 — edited 안 냄
+        self.set_cells([])
+        self.itemChanged.connect(self._on_item_changed)
+
+    # ── 채우기·읽기 ──
+    def _new_item(self, text=""):
+        it = QtWidgets.QTableWidgetItem(str(text or ""))
+        it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsEditable)
+        return it
+
+    def _fill_row(self, r, vals=()):
+        for c in range(self.columnCount()):
+            v = vals[c] if c < len(vals) else ""
+            self.setItem(r, c, self._new_item(v))
+
+    def _ensure_rows(self, n):
+        while self.rowCount() < n:
+            self.insertRow(self.rowCount())
+            self._fill_row(self.rowCount() - 1)
+
+    def _relabel(self):
+        from daangn_ext.rule_grid import grid_row_label
+        self.setVerticalHeaderLabels([grid_row_label(i) for i in range(self.rowCount())])
+
+    def _row_vals(self, r):
+        return [(self.item(r, c).text() if self.item(r, c) else "").strip()
+                for c in range(self.columnCount())]
+
+    def _pad_tail(self):
+        """끝에 빈 줄 하나는 늘 있다 — 다음 조건을 적을 자리다."""
+        last = self.rowCount() - 1
+        if last < 0 or any(self._row_vals(last)):
+            self._ensure_rows(self.rowCount() + 1)
+        self._ensure_rows(self.MIN_ROWS)
+        self._relabel()
+
+    def set_cells(self, cells):
+        self._quiet += 1
+        try:
+            self.setRowCount(0)
+            for row in cells or []:
+                self.insertRow(self.rowCount())
+                self._fill_row(self.rowCount() - 1, ["" if v is None else str(v) for v in row])
+            self._pad_tail()
+            self.mark_errors([])
+        finally:
+            self._quiet -= 1
+
+    def cells(self):
+        """표 → 문자열 셀. 끝의 빈 줄은 뺀다(가운데 빈 줄은 행 번호를 지키려 남긴다)."""
+        rows = [self._row_vals(r) for r in range(self.rowCount())]
+        while rows and not any(rows[-1]):
+            rows.pop()
+        return rows
+
+    # ── 편집 ──
+    def _on_item_changed(self, item):
+        if self._quiet:
+            return
+        if item.row() == self.rowCount() - 1 and any(self._row_vals(item.row())):
+            self._quiet += 1
+            try:
+                self._pad_tail()
+            finally:
+                self._quiet -= 1
+        self.edited.emit()
+
+    def paste_text(self, text):
+        """현재 칸에서 시작해 탭·줄바꿈으로 나눈 값을 채운다 — 엑셀 복사 그대로."""
+        from daangn_ext.rule_grid import paste_cells
+        rows = paste_cells(text)
+        if not rows:
+            return
+        r0 = max(self.currentRow(), 0)
+        c0 = max(self.currentColumn(), 0)
+        self._quiet += 1
+        try:
+            self._ensure_rows(r0 + len(rows))
+            for i, vals in enumerate(rows):
+                for j, v in enumerate(vals):
+                    c = c0 + j
+                    if c < self.columnCount():
+                        self.item(r0 + i, c).setText(v)
+            self._pad_tail()
+        finally:
+            self._quiet -= 1
+        self.edited.emit()
+
+    def copy_selected(self):
+        idx = sorted((i.row(), i.column()) for i in self.selectedIndexes())
+        if not idx:
+            return
+        lines, cur, cur_r = [], [], idx[0][0]
+        for r, c in idx:
+            if r != cur_r:
+                lines.append("\t".join(cur)); cur, cur_r = [], r
+            cur.append(self.item(r, c).text() if self.item(r, c) else "")
+        lines.append("\t".join(cur))
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+    def clear_selected(self):
+        idx = self.selectedIndexes()
+        if not idx:
+            return
+        self._quiet += 1
+        try:
+            for i in idx:
+                it = self.item(i.row(), i.column())
+                if it:
+                    it.setText("")
+        finally:
+            self._quiet -= 1
+        self.edited.emit()
+
+    def add_row(self):
+        r = self.currentRow() + 1 if self.currentRow() >= 0 else self.rowCount()
+        self._quiet += 1
+        try:
+            self.insertRow(r)
+            self._fill_row(r)
+            self._relabel()
+        finally:
+            self._quiet -= 1
+        self.setCurrentCell(r, 0)
+
+    def remove_selected_rows(self):
+        rows = {i.row() for i in self.selectedIndexes()}
+        if self.currentRow() >= 0:
+            rows.add(self.currentRow())
+        if not rows:
+            return
+        had = any(any(self._row_vals(r)) for r in rows)
+        self._quiet += 1
+        try:
+            for r in sorted(rows, reverse=True):
+                self.removeRow(r)
+            self._pad_tail()
+        finally:
+            self._quiet -= 1
+        if had:
+            self.edited.emit()
+
+    def keyPressEvent(self, e):
+        K = QtGui.QKeySequence.StandardKey
+        editing = self.state() == QtWidgets.QAbstractItemView.State.EditingState
+        if e.matches(K.Paste):
+            self.paste_text(QtWidgets.QApplication.clipboard().text()); return
+        if e.matches(K.Copy):
+            self.copy_selected(); return
+        if not editing and e.key() in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):
+            self.clear_selected(); return
+        super().keyPressEvent(e)
+
+    # ── 오류 표시 ──
+    def mark_errors(self, errors):
+        """파서 메시지의 "N행" 을 표의 같은 번호 줄에 붉게 칠한다."""
+        rows = set()
+        for msg in errors or []:
+            m = re.match(r"\s*(?:\[[^\]]*\]\s*)?(\d+)행", str(msg))
+            if m:
+                rows.add(int(m.group(1)) - 2)
+        self._quiet += 1
+        try:
+            for r in range(self.rowCount()):
+                brush = (QtGui.QBrush(QtGui.QColor(self.ERR_ROW_BG)) if r in rows
+                         else QtGui.QBrush())
+                for c in range(self.columnCount()):
+                    it = self.item(r, c)
+                    if it:
+                        it.setBackground(brush)
+        finally:
+            self._quiet -= 1
+        self._errors = {r for r in rows if 0 <= r < self.rowCount()}
+
+    def error_rows(self):
+        return set(self._errors)
 
 
 # 지역 트리 — 행에는 짧은 이름(부암동)만 보이고, 검색·표시용 전체 경로
@@ -567,7 +786,7 @@ REG_STATUS_NAMES = {REG_SERVER: "서버 등록", REG_SWEEP: "스윕 대기",
 REG_STATUS_TIPS = {
     REG_SERVER: "당근 앱 알림 서버에 실제 등록돼 있습니다",
     REG_SWEEP: "앱 슬롯이 차서 검색 스윕이 대신 훑습니다 (서버 등록 아님)",
-    REG_MISSING: ("엑셀 조건은 있지만 당근 서버에 아직 안 올라갔습니다."
+    REG_MISSING: ("조건표에는 있지만 당근 서버에 아직 안 올라갔습니다."
                   " 감시를 시작하면 등록을 시도합니다 — 계속 미등록이면"
                   " 계정 토큰·앱 슬롯(30개)을 확인하세요"),
     REG_UNKNOWN: "서버 목록을 못 읽어 등록 여부를 알 수 없습니다 (토큰 확인)",
@@ -1286,7 +1505,7 @@ def filter_by_conditions(matches, router, log=None, rules=None):
 
     조건표가 없으면 **아무것도 알리지 않는다.** 예전에는 '조건 없음 = 전부
     알림'이었는데, 그 상태에서 서버에 남은 브랜드 등록이 시간당 수백 건을
-    쏟아냈다. 브랜드 등록 자체가 조건표에서만 나오므로(엑셀로 조건 넣기),
+    쏟아냈다. 브랜드 등록 자체가 조건표에서만 나오므로(조건 탭 표 → 조건 적용),
     조건표가 없는데 매칭이 온다는 것은 서버에 낡은 등록이 남았다는 뜻이다 —
     그건 prune_to_rules 가 지운다.
 
@@ -1303,7 +1522,7 @@ def filter_by_conditions(matches, router, log=None, rules=None):
     if rules is None or not len(rules):
         if log:
             log(f"[조건표] 조건이 없어 매칭 {len(items)}건을 알리지 않습니다 — "
-                "[엑셀로 조건 넣기]로 조건표를 넣으세요")
+                "조건 탭 표에 적고 [조건 적용]을 누르세요")
         return [], [], len(items)
     from daangn_ext.alert_rules import HIT, WATCH
     from daangn_ext.search_filters import looks_wanted_ad
@@ -2020,6 +2239,8 @@ QTableWidget::item { padding: 11px 6px; }
 QTableWidget::item:selected { background: #F5EFDD; color: #1F1B16; }
 QTableWidget { selection-background-color: #F5EFDD; }
 QHeaderView::section { background: #FFFFFF; color: #8B857A; padding: 12px 8px; border: none; border-bottom: 1px solid #EAE6DE; font-weight: 700; font-size: 12px; letter-spacing: 0.3px; }
+/* 조건 표의 행 번호 — 엑셀처럼 옆에 붙는 숫자. 세로 패딩이 있으면 30px 줄에서 깨진다. */
+QTableWidget#rulesGrid QHeaderView::section:vertical { padding: 0 4px; border-bottom: 1px solid #F1EEE8; border-right: 1px solid #EAE6DE; font-weight: 500; color: #B0A99C; }
 QTableCornerButton::section { background: #F7F5F1; border: none; }
 
 QProgressBar { background: #EDE9E0; border: 1px solid #DDD6C9; border-radius: 7px; min-height: 24px; max-height: 24px; color: #1F1B16; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; text-align: center; }
@@ -2797,35 +3018,27 @@ class MainWindow(QMainWindow):
                 "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국.")
 
     def _refresh_rules_view(self):
-        """조건표 요약을 파일 상태에 맞춘다.
+        """조건표 요약과 표를 파일 상태에 맞춘다.
 
-        조건 수백 줄을 화면에 표로 그리지 않는다 — 보기도 고치기도 엑셀이
-        낫다. 화면은 '무엇이 언제 어느 파일에서 들어갔는지'만 말하고,
-        내용은 [엑셀 열기]로 그 파일을 띄워 본다.
-
-        파일이 밖에서 바뀌어도(엑셀을 새로 넣거나 서버에서 교체) 캐시가
-        mtime 으로 잡는다. 화면 숫자는 그 뒤에 따라와야 하므로 폴링 틱마다
-        한 번 부른다."""
+        파일이 밖에서 바뀌어도(서버에서 교체, 전체 삭제) 캐시가 mtime 으로
+        잡는다. 화면은 그 뒤에 따라와야 하므로 폴링 틱마다 한 번 부른다.
+        표는 파일이 바뀐 뒤 한 번만 다시 채우고, 사용자가 고치는 중이면
+        절대 덮지 않는다 — 적고 있는 줄이 사라지는 것이 최악이다."""
         from daangn_ext.alert_rules import brands
         table = self._alert_rules.get()
         rules = table.rules
-        src = table.source or ""
+        stamp = self._alert_rules.stamp()
+        if not self._rules_dirty and stamp != self._grid_seen_stamp:
+            from daangn_ext.rule_grid import rules_to_grid
+            self.rulesGrid.set_cells(rules_to_grid(rules))
+            self._grid_seen_stamp = stamp
         # 섹션 제목이 '조건 없음'을 이미 말한다 — 본문은 다음 할 일을 말한다.
         text = (table.detail() if rules
-                else "아직 넣은 엑셀이 없습니다. [엑셀로 조건 넣기]로 시작하세요.")
-        if rules and src:
-            text += f"    ·    파일: {os.path.basename(src)}"
+                else "아직 조건이 없습니다. 표에 적고 [조건 적용]을 누르세요.")
+        if self._rules_dirty:
+            text += "    ·    표를 고쳤습니다 — 미적용, [조건 적용]을 누르세요"
         self.rulesSummary.setText(text)
-        # 원본 엑셀이 있어야 열고 다시 읽을 수 있다. 옛 조건표(경로 없음)나
-        # 파일을 옮긴 뒤에는 버튼을 꺼서 '눌렀는데 아무 일도 없음'을 막는다.
-        have = bool(src) and os.path.exists(src)
-        self.rulesOpenBtn.setEnabled(have)
-        self.rulesReloadBtn.setEnabled(have)
-        tip = (src if have else
-               ("원본 엑셀을 찾을 수 없습니다 — [엑셀로 조건 넣기]로 다시 넣으세요"
-                if src else "아직 넣은 엑셀이 없습니다"))
-        self.rulesOpenBtn.setToolTip(tip)
-        self.rulesReloadBtn.setToolTip(tip)
+        self.rulesApplyBtn.setText("조건 적용 (수정됨)" if self._rules_dirty else "조건 적용")
         self._set_status("rules",
                        f"조건 {len(rules)}" if rules else "조건 없음",
                        "ok" if rules else "off")
@@ -2978,38 +3191,47 @@ class MainWindow(QMainWindow):
         top.addSpacing(8)
         top.addWidget(self._watch_label, 1)
 
-        # 등록 경로는 엑셀 하나다. 예전에는 '명품20 전계정등록' 버튼과 수동
+        # ── 감시 조건: 표에 바로 적는다 ──
+        # 등록 경로는 이 표 하나다. 예전에는 '명품20 전계정등록' 버튼과 수동
         # 키워드 폼이 따로 있어 브랜드만 등록해 놓고 조건표를 안 넣는 상태가
         # 만들어졌다 — 그러면 모델·가격대와 무관하게 브랜드 전 매물이 알림으로
         # 쏟아진다. 조건표와 어긋나는 뒷문은 두지 않는다.
-        self.alertRulesBtn = QtWidgets.QPushButton("엑셀로 조건 넣기")
-        self.alertRulesBtn.setObjectName("startBtn")
-        self.alertRulesBtn.setToolTip(
-            "엑셀 한 장으로 브랜드 등록과 알림 조건을 함께 넣습니다")
-
-        # ── 감시 조건: 조건표는 엑셀이 원본이다 ──
-        # 예전에는 여기 조건 수백 줄을 표로 그렸다. 스크롤 상자 안에서 7줄씩
-        # 보이는 표는 읽을 수도 고칠 수도 없다 — 엑셀이 둘 다 낫다. 화면은
-        # 무엇이 언제 어느 파일에서 들어갔는지만 말하고, 내용은 그 파일을 연다.
-        # 주 동작(엑셀 넣기)은 금색 하나, 열기·다시 읽기는 글자 버튼이다 —
-        # 셋이 같은 무게로 나란히 있던 동안 무엇을 먼저 눌러야 하는지 몰랐다.
-        self.rulesOpenBtn = QtWidgets.QPushButton("엑셀 열기")
-        self.rulesOpenBtn.setObjectName("linkBtn")
-        self.rulesOpenBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.rulesOpenBtn.setToolTip("넣은 조건표 엑셀을 엑셀 프로그램으로 엽니다")
-        self.rulesOpenBtn.clicked.connect(self.on_rules_open_excel)
-        self.rulesReloadBtn = QtWidgets.QPushButton("다시 읽기")
-        self.rulesReloadBtn.setObjectName("linkBtn")
-        self.rulesReloadBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.rulesReloadBtn.setToolTip(
-            "엑셀에서 고쳐 저장한 뒤 누르면 같은 파일을 다시 읽어 적용합니다")
-        self.rulesReloadBtn.clicked.connect(self.on_rules_reload_excel)
+        # 그 다음엔 엑셀 파일이 원본이었다. 다섯 줄 고치는 데 파일 열기·고치기·
+        # 저장·[다시 읽기] 네 단계였고, 파일을 옮기면 [열기]가 죽었다. 표를
+        # 여기 두고 엑셀처럼 굴게 한다 — 엑셀은 표를 채우는 보조 경로로 남는다.
+        self.rulesHint = QtWidgets.QLabel(
+            "브랜드만 필수. 제품명을 비우면 그 브랜드 전체, 띄어쓰기는 무시합니다"
+            " — '오버 더 문'은 '오버더문'도 잡습니다. 제외는 쉼표로 구분."
+            " 엑셀에서 복사해 Ctrl+V 로 붙여 넣어도 됩니다.")
+        self.rulesHint.setObjectName("mutedNote")
+        self.rulesHint.setWordWrap(True)
+        cond_v.addWidget(self.rulesHint)
+        self.rulesGrid = RuleGrid(w)
+        self.rulesGrid.setMinimumHeight(240)
+        cond_v.addWidget(self.rulesGrid)
+        self.rulesApplyBtn = QtWidgets.QPushButton("조건 적용")
+        self.rulesApplyBtn.setObjectName("startBtn")
+        self.rulesApplyBtn.setToolTip(
+            "표의 조건을 저장하고 브랜드를 등록합니다 — 표에 없는 브랜드는 해제됩니다")
+        self.rulesAddRowBtn = QtWidgets.QPushButton("줄 추가")
+        self.rulesAddRowBtn.setObjectName("linkBtn")
+        self.rulesAddRowBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.rulesDelRowBtn = QtWidgets.QPushButton("선택 줄 삭제")
+        self.rulesDelRowBtn.setObjectName("linkBtn")
+        self.rulesDelRowBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.rulesImportBtn = QtWidgets.QPushButton("엑셀 불러오기")
+        self.rulesImportBtn.setObjectName("linkBtn")
+        self.rulesImportBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.rulesImportBtn.setToolTip(
+            "엑셀 파일(브랜드·제품명·최소가격·최대가격·제외)을 읽어 표를 채웁니다."
+            " 적용은 [조건 적용]을 눌러야 됩니다")
         _rb = QtWidgets.QHBoxLayout(); _rb.setSpacing(4)
-        _rb.addWidget(self.alertRulesBtn)
+        _rb.addWidget(self.rulesApplyBtn)
         _rb.addSpacing(6)
-        _rb.addWidget(self.rulesOpenBtn)
-        _rb.addWidget(self.rulesReloadBtn)
+        _rb.addWidget(self.rulesAddRowBtn)
+        _rb.addWidget(self.rulesDelRowBtn)
         _rb.addStretch(1)
+        _rb.addWidget(self.rulesImportBtn)
         cond_v.addLayout(_rb)
         self.rulesSummary = QtWidgets.QLabel("조건 없음")
         self.rulesSummary.setObjectName("mutedNote")
@@ -3081,7 +3303,7 @@ class MainWindow(QMainWindow):
         # ── 조건 페이지: 조건표 → 훑을 지역 → 등록 상태 ──
         # 등록 상태는 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
         # 조건과 같은 상자에 두면 둘을 같은 것으로 읽는다 — 상자를 가른다.
-        # 두 단계 카드다: ① 조건(엑셀 넣기 → 등록된 조건 표) ② 지역. 접이식
+        # 두 단계 카드다: ① 조건(조건 표 → 등록된 조건 표) ② 지역. 접이식
         # 줄 세 개가 한 면에 늘어서 있던 동안 무엇이 먼저고 무엇이 필수인지
         # 안 보였다. 카드가 순서를, 배지가 단계를 말한다.
         rules_w = QtWidgets.QWidget()
@@ -3089,14 +3311,14 @@ class MainWindow(QMainWindow):
         rv = QtWidgets.QVBoxLayout(rules_w); rv.setContentsMargins(20, 18, 20, 18); rv.setSpacing(12)
         card1, c1 = self._step_card(
             1, "감시 조건",
-            "엑셀 한 장으로 브랜드와 조건을 넣습니다. 엑셀에서 고친 뒤에는 [다시 읽기]를 누르세요.")
+            "표에 브랜드·제품명·가격대를 적고 [조건 적용]을 누르세요. 엑셀에서 복사해 붙여 넣어도 됩니다.")
         self.condBox = self._collapsible("감시 조건", cond_v, checked=True, first=True)
         c1.addWidget(self.condBox)
         reg_v = QtWidgets.QVBoxLayout()
         # 이 표는 조건표의 복사본이 아니라 '서버에 실제 걸렸나'를 보는 창이다.
         # 이름·설명이 그걸 말하지 않으면 엑셀이 있는데 왜 또 있냐는 질문이 온다.
         _rh = QtWidgets.QLabel(
-            "엑셀 조건 ≠ 서버 등록. 빨간 <b>미등록</b>은 조건은 있지만 당근에 아직"
+            "조건표 ≠ 서버 등록. 빨간 <b>미등록</b>은 조건은 있지만 당근에 아직"
             " 안 올라간 키워드 — 앱 알림이 안 오는 첫 번째 이유입니다.")
         _rh.setObjectName("mutedNote")
         _rh.setWordWrap(True)
@@ -3159,7 +3381,7 @@ class MainWindow(QMainWindow):
         adv_v = QtWidgets.QVBoxLayout()
         _dr = QtWidgets.QHBoxLayout(); _dr.setSpacing(10)
         _dl = QtWidgets.QLabel("당근에 등록된 키워드를 전부 지웁니다. "
-                               "조건표 엑셀을 다시 넣으면 다시 등록됩니다.")
+                               "조건을 다시 적용하면 다시 등록됩니다.")
         _dl.setObjectName("mutedNote"); _dl.setWordWrap(True)
         _dr.addWidget(_dl, 1)
         self.alertDelAllBtn.setObjectName("dangerBtn")
@@ -3230,7 +3452,13 @@ class MainWindow(QMainWindow):
         v.addWidget(self.logBox)
 
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
-        self.alertRulesBtn.clicked.connect(self.on_alert_rules_excel)
+        self.rulesApplyBtn.clicked.connect(self.on_rules_apply)
+        self.rulesImportBtn.clicked.connect(self.on_rules_import_excel)
+        self.rulesAddRowBtn.clicked.connect(self.rulesGrid.add_row)
+        self.rulesDelRowBtn.clicked.connect(self.rulesGrid.remove_selected_rows)
+        self.rulesGrid.edited.connect(self._on_rules_edited)
+        self._rules_dirty = False        # 표를 고쳤는데 아직 적용 안 함
+        self._grid_seen_stamp = object() # 표에 마지막으로 채운 파일의 mtime
         self._alert_worker = None
         self._alert_rules = AlertRulesCache()
         self._match_links = {}
@@ -3796,7 +4024,7 @@ class MainWindow(QMainWindow):
                 self, "전체 삭제", "감시를 처음 상태로 되돌릴까요?",
                 f"· 조건 {n_rules}줄이 지워집니다\n"
                 f"· 당근에 등록된 키워드 {n_reg}개가 해제됩니다\n"
-                "· 되돌릴 수 없습니다 — 엑셀을 다시 넣어야 합니다",
+                "· 되돌릴 수 없습니다 — 조건을 다시 적어야 합니다",
                 danger=True):
             return
         try:
@@ -4552,7 +4780,7 @@ class MainWindow(QMainWindow):
         gv.addWidget(self._sweepLegacy)
 
         # 시작 버튼은 없다 — 스윕은 감시 토글이 켜고 끈다. 알림·계정 설정은
-        # 설정 탭에 있다. 엑셀은 조건 탭의 [엑셀로 조건 넣기] 하나로 모았다.
+        # 설정 탭에 있다. 조건은 조건 탭의 표 하나로 모았다.
         # 여기에도 엑셀 버튼이 있던 동안, 등록용과 알림용이 따로 있는 줄
         # 알고 클라가 같은 시트를 양쪽에 넣었다.
 
@@ -4952,151 +5180,60 @@ class MainWindow(QMainWindow):
     def _wrap(self, layout):
         c = QtWidgets.QWidget(self); c.setLayout(layout); return c
 
-    RULE_COLS = ["브랜드", "제품명", "최소가격", "최대가격", "제외"]
-    RULE_SAMPLE = [
-        ["루이비통", "오버 더 문", 500000, 1500000, ""],
-        ["루이비통", "반둘리에 50", 600000, 2000000, "레플리카, 부속품"],
-        ["루이비통", "", 3000000, "", ""],
-        ["보테가베네타", "카세트백", 1000000, 2500000, ""],
-    ]
+    def _on_rules_edited(self):
+        """표가 바뀌었다 — 적용 전까지 '수정됨' 으로 보인다."""
+        self._rules_dirty = True
+        self._refresh_rules_view()
 
-    def on_alert_rules_excel(self):
-        """엑셀 한 장으로 수집 등록과 알림 조건을 함께 넣는다.
+    def on_rules_apply(self):
+        """표의 조건을 읽어 확인받고 조건표로 저장하고 브랜드를 등록한다.
 
-        예전에는 등록용 엑셀과 알림용 엑셀이 버튼도 시트도 따로였다. 둘의
-        차이가 코드에는 분명해도 쓰는 쪽에는 아니어서, 같은 시트를 양쪽에
-        넣거나 수백 줄을 등록용에 넣어 상한에 걸리는 일이 반복됐다.
-
-        이제 한 버튼이다. 키워드 첫 어절을 브랜드로 보고 그것만 등록해
-        넓게 받아 놓고(가격 제한 없이 — 당근 서버가 먼저 자르면 조건표까지
-        오지 않는다), 시트 전체를 알림 필터로 건다. 등록 상한은 브랜드
-        수에만 걸리므로 조건은 수백 줄이어도 된다.
-        """
-        dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("엑셀로 조건 넣기"); dlg.resize(660, 460)
-        v = QtWidgets.QVBoxLayout(dlg); v.setSpacing(10)
-        v.addWidget(QtWidgets.QLabel(
-            "엑셀 한 장이면 됩니다. 브랜드로 넓게 수집하고, 시트 전체를 알림"
-            " 조건으로 겁니다.\n"
-            "브랜드만 필수. 띄어쓰기는 무시합니다"
-            " — '오버 더 문'은 '오버더문'도 잡습니다."))
-        cap = QtWidgets.QLabel(dlg)
-        v.addWidget(cap)
-        tbl = row_lines(QtWidgets.QTableWidget(0, len(self.RULE_COLS), dlg))
-        tbl.setHorizontalHeaderLabels(self.RULE_COLS)
-        tbl.verticalHeader().setVisible(False)
-        tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        v.addWidget(tbl, 1)
-
-        PREVIEW = 50            # 수백 줄을 다 그리면 창이 뜨는 데만 오래 걸린다
-
-        def fill_table():
-            """적용 중인 조건이 있으면 그걸 보여준다 — 샘플을 현재 조건으로
-            착각하는 일을 막는다."""
-            rules = self._alert_rules.get().rules
-            if rules:
-                shown = rules[:PREVIEW]
-                cap.setText(f"적용 중인 조건 {len(rules)}줄"
-                            + (f" (앞 {PREVIEW}줄만 표시)" if len(rules) > PREVIEW else ""))
-                # 제품명이 비면 빈칸이 맞다 — '그 브랜드 전체'라는 뜻이다.
-                # 브랜드 열이 없던 옛 시트만 키워드를 대신 보여 준다.
-                rows = [[r.brand_name(),
-                         r.product or ("" if r.keyword.strip() == r.brand_name()
-                                       else r.keyword),
-                         r.min_price or "", r.max_price or "",
-                         ", ".join(r.exclude)] for r in shown]
-            else:
-                cap.setText("적용 중인 조건 없음 — 아래는 엑셀 형식 예시입니다")
-                rows = self.RULE_SAMPLE
-            tbl.setRowCount(len(rows))
-            for r, row in enumerate(rows):
-                for c, val in enumerate(row):
-                    tbl.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
-            tbl.resizeColumnsToContents()
-
-        v.addWidget(QtWidgets.QLabel(
-            "· 제품명을 비우면 그 브랜드 전체가 그 가격대로 걸립니다\n"
-            "· 최대가격을 넘긴 매물은 알리지 않고 추적하다가, 값이 내려와"
-            " 범위에 들어오면 그때 알립니다\n"
-            "· '삽니다/구합니다' 글은 자동으로 걸러집니다\n"
-            "· 제외는 쉼표로 구분합니다 — 'A급 레플리카, 부속품'은 두 구절입니다\n"
-            "· 모르는 열은 무시하니 메모 열을 자유롭게 더 두어도 됩니다"))
-        def show_stat():
-            fill_table()
-        show_stat()
-
-        bb = QtWidgets.QHBoxLayout()
-        sampleBtn = QtWidgets.QPushButton("샘플 엑셀 저장", dlg)
-        loadBtn = QtWidgets.QPushButton("파일 선택해서 불러오기", dlg)
-        loadBtn.setObjectName("startBtn")
-        closeBtn = QtWidgets.QPushButton("닫기", dlg)
-        bb.addWidget(sampleBtn); bb.addStretch(1)
-        bb.addWidget(closeBtn); bb.addWidget(loadBtn)
-        v.addLayout(bb)
-
-        def do_sample():
-            p, _ = QtWidgets.QFileDialog.getSaveFileName(
-                dlg, "샘플 저장", "조건표_샘플.xlsx", "Excel (*.xlsx)")
-            if not p:
-                return
-            from openpyxl import Workbook
-            wb = Workbook(); ws = wb.active; ws.title = "조건"
-            ws.append(self.RULE_COLS)
-            for row in self.RULE_SAMPLE:
-                ws.append(row)
-            wb.save(p)
-            QtWidgets.QMessageBox.information(dlg, "저장됨", f"샘플 저장:\n{p}")
-
-        def do_load():
-            p, _ = QtWidgets.QFileDialog.getOpenFileName(
-                dlg, "조건 엑셀 선택", "", "Excel (*.xlsx *.xlsm)")
-            if not p:
-                return
-            if self._apply_rules_file(p, dlg):
-                show_stat()
-
-        sampleBtn.clicked.connect(do_sample)
-        loadBtn.clicked.connect(do_load)
-        closeBtn.clicked.connect(dlg.reject)
-        dlg.exec()
-
-    def _rules_source(self) -> str:
-        """넣은 조건표 엑셀의 경로. 없거나 파일이 사라졌으면 ''."""
-        src = self._alert_rules.get().source or ""
-        return src if src and os.path.exists(src) else ""
-
-    def on_rules_open_excel(self):
-        """조건표 엑셀을 엑셀 프로그램으로 연다 — 보고 고치는 자리는 거기다."""
-        src = self._rules_source()
-        if not src:
+        오류 줄은 붉게 칠하고 건너뛴다 — 나머지는 들어간다. 빈 표는 조건
+        삭제가 아니라 거절이다. 지우는 길은 [전체 삭제] 하나여야 등록 해제까지
+        같이 간다."""
+        from daangn_ext.alert_rules import parse_rule_rows
+        from daangn_ext.rule_grid import grid_to_rows
+        cells = self.rulesGrid.cells()
+        if not cells:
             QtWidgets.QMessageBox.information(
-                self, "엑셀 없음",
-                "넣은 조건표 엑셀을 찾을 수 없습니다.\n[엑셀로 조건 넣기]로 다시 넣으세요.")
+                self, "빈 조건표",
+                "적은 조건이 없습니다. 표에 브랜드부터 적으세요.\n"
+                "조건을 모두 지우려면 [전체 삭제]를 쓰세요.")
             return
-        QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(os.path.abspath(src)))
+        rules, errors = parse_rule_rows(grid_to_rows(cells))
+        self.rulesGrid.mark_errors(errors)
+        self._apply_rules(rules, errors, self)
 
-    def on_rules_reload_excel(self):
-        """엑셀에서 고쳐 저장한 것을 같은 파일에서 다시 읽어 적용한다."""
-        src = self._rules_source()
-        if not src:
-            QtWidgets.QMessageBox.information(
-                self, "엑셀 없음",
-                "넣은 조건표 엑셀을 찾을 수 없습니다.\n[엑셀로 조건 넣기]로 다시 넣으세요.")
+    def on_rules_import_excel(self):
+        """엑셀 파일을 읽어 표를 채운다 — 적용은 [조건 적용]이 한다.
+
+        수백 줄을 옮길 때는 붙여넣기보다 파일이 안전하다. 표를 통째로 바꾸고
+        '수정됨' 으로 두어, 무엇이 들어왔는지 보고 나서 적용하게 한다."""
+        from daangn_ext.alert_rules import load_rules_from_excel
+        from daangn_ext.rule_grid import rules_to_grid
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "조건 엑셀 선택", "", "Excel (*.xlsx *.xlsm)")
+        if not p:
             return
-        self._apply_rules_file(src, self)
-
-    def _apply_rules_file(self, p, parent) -> bool:
-        """엑셀 한 파일을 읽어 확인받고 조건표로 저장하고 브랜드를 등록한다.
-
-        [엑셀로 조건 넣기] 다이얼로그와 [엑셀 다시 읽기]가 같은 길을 탄다 —
-        두 경로가 갈라지면 한쪽만 고쳐지고 다른 쪽은 옛 동작으로 남는다.
-        경로는 조건표에 같이 저장한다(source). 그래야 다음에 열고 다시 읽는다."""
-        from daangn_ext.alert_rules import RuleTable, brands, load_rules_from_excel
         try:
             rules, errors = load_rules_from_excel(p)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(parent, "오류", f"엑셀 로드 오류:\n{e}")
-            return False
+            QtWidgets.QMessageBox.warning(self, "오류", f"엑셀 로드 오류:\n{e}")
+            return
+        if not rules:
+            QtWidgets.QMessageBox.warning(
+                self, "실패", "읽은 조건이 없습니다.\n" + "\n".join(errors[:3]))
+            return
+        self.rulesGrid.set_cells(rules_to_grid(rules))
+        for msg in errors[:8]:
+            self._alog(f"[조건표] {msg}")
+        self._alog(f"[조건표] 엑셀 {os.path.basename(p)} → 표에 {len(rules)}줄"
+                   " 불러옴 — [조건 적용]을 누르면 반영됩니다")
+        self._on_rules_edited()
+
+    def _apply_rules(self, rules, errors, parent) -> bool:
+        """읽은 룰을 확인받고 조건표로 저장하고 브랜드를 등록한다."""
+        from daangn_ext.alert_rules import RuleTable, brands
         if not rules:
             QtWidgets.QMessageBox.warning(
                 parent, "실패", "읽은 조건이 없습니다.\n" + "\n".join(errors[:3]))
@@ -5107,8 +5244,10 @@ class MainWindow(QMainWindow):
         for msg in errors[:8]:
             self._alog(f"[조건표] {msg}")
         os.makedirs(os.path.dirname(ALERT_RULES_FILE), exist_ok=True)
-        RuleTable(rules, source=os.path.abspath(p)).save(ALERT_RULES_FILE)
-        self._alert_rules.get()          # mtime 캐시 갱신
+        RuleTable(rules).save(ALERT_RULES_FILE)
+        # 방금 저장한 것은 표에서 나온 것이다 — 다시 채워 오류 줄을 지우지 않는다.
+        self._grid_seen_stamp = self._alert_rules.stamp()
+        self._rules_dirty = False
         self._refresh_rules_view()
         self._alog(f"[조건표] {len(rules)}줄 적용 · 브랜드 {len(bs)}개 등록"
                    f" ({', '.join(bs[:8])}{' …' if len(bs) > 8 else ''})")
@@ -6909,7 +7048,7 @@ def _run_headless():
             log("[등록] 라우터가 없어 등록을 건너뜁니다 — 초기화 실패 로그를 확인하세요")
         elif not _brands:
             log(f"[등록] 조건표가 비어 있습니다({ALERT_RULES_FILE}) —"
-                " GUI [엑셀로 조건 넣기]로 조건 엑셀을 먼저 넣으세요")
+                " GUI 조건 탭 표에 적고 [조건 적용]을 먼저 누르세요")
         else:
             log(f"[등록] 조건표 {len(_rules)}줄 · 브랜드 {len(_brands)}개 등록"
                 f" (커버 {'핵심' if co else '전국'})")

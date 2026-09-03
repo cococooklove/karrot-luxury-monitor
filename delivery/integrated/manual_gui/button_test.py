@@ -58,7 +58,7 @@ w.alert = lambda *a, **k: None          # 알림 무음
 
 print("=== 버튼 → 핸들러 연결 ===")
 # receivers() 가 0 이면 눌러도 아무 일이 없다 — 런타임에만 드러나는 고장이다.
-for attr in ("alertDelAllBtn", "watchToggleBtn", "alertRulesBtn", "notifySaveBtn",
+for attr in ("alertDelAllBtn", "watchToggleBtn", "rulesApplyBtn", "notifySaveBtn",
              "notifyTestBtn", "autoAccountsBtn"):
     b = getattr(w, attr, None)
     ck(f"{attr} 연결됨", b is not None and b.receivers(b.clicked) > 0)
@@ -96,9 +96,9 @@ for d in _opened:
     except Exception:
         pass
 
-print("\n=== 조건표 엑셀 로드: 취소해도 안 죽는다 ===")
+print("\n=== 조건표 엑셀 불러오기: 취소해도 안 죽는다 ===")
 try:
-    w.on_alert_rules_excel()           # getOpenFileName 이 "" → 취소 경로
+    w.on_rules_import_excel()          # getOpenFileName 이 "" → 취소 경로
     ck("조건표 엑셀 취소 처리", True)
 except Exception as e:
     ck("조건표 엑셀 취소 처리", False, f"{type(e).__name__}: {str(e)[:60]}")

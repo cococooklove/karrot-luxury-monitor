@@ -45,8 +45,10 @@ ck("자동 모니터 탭 위젯 제거",
 # 스윕 설정은 조건 탭(지역)·설정 탭(알림)으로 이사했다.
 ck("스윕 설정 위젯 존재",
    all(hasattr(w, x) for x in ("notifyToken", "autoAreaTree", "autoRestMin")))
-# 엑셀은 '매물 감시' 탭 [엑셀로 조건 넣기] 하나로 모았다.
-ck("조건표 엑셀 핸들러 배선", callable(getattr(w, "on_alert_rules_excel", None)))
+# 조건은 '매물 감시' 탭의 표에 바로 적는다. 엑셀은 표를 채우는 보조 버튼 하나.
+ck("조건 적용·엑셀 불러오기 배선",
+   callable(getattr(w, "on_rules_apply", None))
+   and callable(getattr(w, "on_rules_import_excel", None)))
 ck("고급 패널에 엑셀 버튼 없음", not hasattr(w, "autoExcelBtn"))
 ck("프록시 수집 배선", callable(getattr(w, "_collect_proxies", None)))
 ck("스윕 cfg 조립 배선",

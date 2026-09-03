@@ -95,7 +95,7 @@ print("\n=== 화면에서 부르는 것들이 실제로 있다 ===")
 # 버튼이 없는 메서드를 가리키면 클릭하는 순간 죽는다. 연결 대상이 있는지만 본다.
 w0 = wins[0] if wins else None
 for attr in ("on_emul_add_clicked", "on_accounts_btn_clicked",
-             "on_alert_rules_excel", "_alog"):
+             "on_rules_apply", "on_rules_import_excel", "_alog"):
     ck(f"{attr} 있음", callable(getattr(w0, attr, None)))
 ck("계정 추가 버튼 있음", getattr(w0, "emulAddBtn", None) is not None)
 

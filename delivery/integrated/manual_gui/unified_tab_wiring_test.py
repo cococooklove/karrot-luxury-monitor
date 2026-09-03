@@ -258,8 +258,8 @@ if _win is not None:
     # 알고 같은 시트를 양쪽에 넣는 일이 반복됐다.
     ck("지역 상자 엑셀 버튼 제거", not hasattr(_win, "autoExcelBtn")
        and not hasattr(_win, "on_auto_excel_clicked"))
-    ck("조건표 엑셀 버튼은 조건 탭에", hasattr(_win, "alertRulesBtn")
-       and callable(getattr(_win, "on_alert_rules_excel", None)))
+    ck("조건표 엑셀 버튼은 조건 탭에", hasattr(_win, "rulesImportBtn")
+       and callable(getattr(_win, "on_rules_import_excel", None)))
 
     # ── 조건표 엑셀 → 브랜드 등록 (워크북 안 연다) ──
     class _FakeRouter:
@@ -439,7 +439,7 @@ if _win is not None:
     ck("매물 표는 결과 탭", _tab_of(_win.listingTable) == "결과")
     ck("조건표·지역·등록 표는 조건 탭",
        all(_tab_of(x) == "조건" for x in (
-           _win.alertRulesBtn, _win.autoAreaTree, _win.alertTable)))
+           _win.rulesApplyBtn, _win.autoAreaTree, _win.alertTable)))
     ck("알림 폼·계정 버튼·전체 삭제는 설정 탭",
        all(_tab_of(x) == "설정" for x in (
            _win.notifyToken, _win.autoAccountsBtn, _win.alertDelAllBtn)))
@@ -475,15 +475,16 @@ if _win is not None:
     ck("낱개 삭제·수동 등록 폼 제거",
        not hasattr(_win, "alertDelBtn") and not hasattr(_win, "alertAddBtn")
        and not hasattr(_win, "alertKeyword"))
-    # 조건 수백 줄을 화면에 표로 그리지 않는다 — 엑셀이 원본이고 화면은
-    # 요약 + [엑셀 넣기/열기/다시 읽기]다. 표가 다시 생기면 여기서 잡는다.
-    ck("감시 조건 안에는 요약과 엑셀 버튼만",
-       not hasattr(_win, "rulesTable")
+    # 조건은 화면 표에 바로 적는다 — 엑셀은 표를 채우는 보조 경로다.
+    # 열기·다시 읽기(파일 원본 전제)가 되살아나면 여기서 잡는다.
+    ck("감시 조건 안에는 표·적용·요약·엑셀 불러오기",
+       isinstance(getattr(_win, "rulesGrid", None), m.RuleGrid)
+       and _win.rulesGrid in _win.condBox.findChildren(_QtW.QWidget)
        and _win.rulesSummary in _win.condBox.findChildren(_QtW.QLabel)
        and all(b in _win.condBox.findChildren(_QtW.QPushButton)
-               for b in (_win.alertRulesBtn, _win.rulesOpenBtn, _win.rulesReloadBtn)))
-    ck("넣은 엑셀이 없으면 열기·다시 읽기는 꺼진다",
-       not _win.rulesOpenBtn.isEnabled() and not _win.rulesReloadBtn.isEnabled())
+               for b in (_win.rulesApplyBtn, _win.rulesImportBtn)))
+    ck("엑셀 열기·다시 읽기 없음",
+       not hasattr(_win, "rulesOpenBtn") and not hasattr(_win, "rulesReloadBtn"))
     # 우측 상단 판 표시 — 판·설치 시각만. '최신' 표시는 없다(틀릴 수 있어서).
     ck("헤더 우측에 판 라벨", _win.versionLabel.text().startswith(("v ", "판 미상")),
        _win.versionLabel.text())
@@ -509,8 +510,9 @@ if _win is not None:
     # 모델·가격대와 무관하게 브랜드 전 매물이 알림으로 쏟아진다.
     ck("일괄등록 버튼 제거", not hasattr(_win, "alertBulkAllBtn")
        and not hasattr(_win, "on_alert_bulk_all"))
-    ck("등록은 엑셀 버튼 하나", callable(getattr(_win, "on_alert_rules_excel", None))
-       and _win.alertRulesBtn.text() == "엑셀로 조건 넣기")
+    ck("등록은 [조건 적용] 하나", callable(getattr(_win, "on_rules_apply", None))
+       and _win.rulesApplyBtn.text().startswith("조건 적용")
+       and not hasattr(_win, "on_alert_rules_excel"))
 
     # ── 첫 실행에서 서버에 이미 있는 키워드를 앱 슬롯으로 인정한다 ──
     # routes 파일이 없으면 라우터는 used=0 으로 본다. 그대로 두면 이미 꽉 찬
