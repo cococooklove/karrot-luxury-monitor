@@ -828,7 +828,7 @@ def alert_row_cells(keyword, route, price, exclude, uid, status=None):
 
 # 어느 경로로 들어온 매물인지. 저장소에는 기록돼 있었는데 화면에 없어서
 # 클라는 스윕을 켜도 무엇이 늘었는지 알 수 없었다.
-SOURCE_NAMES = {"app": "앱 알림", "sweep": "지역 훑기"}
+SOURCE_NAMES = {"app": "앱 알림", "sweep": "지역 훑기", "feed": "동 피드"}
 
 LISTING_COLS = ["상태", "수집", "키워드", "제목", "지역", "현재가", "Δ최초가",
                 "마지막변동", "최초감지"]
@@ -1166,7 +1166,13 @@ def drain_sweep_finds(q, tracker, keywords_fn, log, limit=SWEEP_FIND_QUEUE_MAX):
     한 순간도 붙잡히지 않는다.
 
     payload 정규화까지 여기서 한다 — sweep_queue 파일 읽기(keywords_fn)도
-    스윕 스레드에 남기지 않기 위해서다."""
+    스윕 스레드에 남기지 않기 위해서다.
+
+    큐는 스윕·피드 두 스레드가 같이 쓴다(둘 다 sqlite 를 직접 만지면 안
+    되는 이유는 위와 같다) — 하지만 라벨과 source 는 다르다. 피드는 이미
+    payload["keyword"] 에 조건표가 매칭한 라벨을 실어 보내므로(FeedSweep
+    만 payload 에 "verdict" 를 싣는다) 대기열 키워드로 다시 찾으면 안 되고,
+    표에도 "동 피드"로 갈라 보여야 한다(GUI _on_feed_found 와 같은 규칙)."""
     import queue as _q
     # 추적기가 없으면(watch.db 열기 실패) 큐를 비우지 않는다 — 꺼내고 버리면
     # 저장소가 살아난 뒤에도 그 사이 찾은 매물이 조용히 사라진다.
@@ -1184,15 +1190,24 @@ def drain_sweep_finds(q, tracker, keywords_fn, log, limit=SWEEP_FIND_QUEUE_MAX):
         kws = list(keywords_fn() or [])
     except Exception:
         kws = []
-    norms = []
+    feed_norms, sweep_norms = [], []
     for p in payloads:
-        norm = sweep_found_to_match(p, sweep_keyword_for(p, kws))
-        if norm:
-            norms.append(norm)
-    if not norms:
+        if "verdict" in p:
+            norm = sweep_found_to_match(p, p.get("keyword") or "")
+            if norm:
+                feed_norms.append(norm)
+        else:
+            norm = sweep_found_to_match(p, sweep_keyword_for(p, kws))
+            if norm:
+                sweep_norms.append(norm)
+    if not feed_norms and not sweep_norms:
         return 0
+    added = 0
     try:
-        added = tracker.add_from_matches(norms, source="sweep")
+        if feed_norms:
+            added += tracker.add_from_matches(feed_norms, source="feed")
+        if sweep_norms:
+            added += tracker.add_from_matches(sweep_norms, source="sweep")
     except Exception as e:
         log(f"[검색스윕] 추적 등록 실패: {str(e)[:80]}")
         return 0
@@ -7055,6 +7070,7 @@ def _run_headless():
     _chdir_app_dir()
     from daangn_ext.keyword_alert_api import MultiAccountAlerts, token_remaining
     from daangn_ext.supervisor import SupervisorPolicy
+    from daangn.feed_sweep import FeedSweep as _FeedSweepOnce
 
     def log(m):
         print(f"[{_time.strftime('%H:%M:%S')}] {m}", flush=True)
@@ -7361,7 +7377,6 @@ def _run_headless():
                     # --once 는 스레드를 띄우지 않고 한 회차만 동기로 돈다 —
                     # 안 그러면 스레드가 뜨자마자 프로세스가 끝나 아무것도 못 본다.
                     try:
-                        from daangn.feed_sweep import FeedSweep as _FeedSweepOnce
                         _fcfg = feed_runner.cfg_builder()
                         _fresult = _FeedSweepOnce(
                             _fcfg, on_log=log, on_found=_sweep_found).cycle_once()

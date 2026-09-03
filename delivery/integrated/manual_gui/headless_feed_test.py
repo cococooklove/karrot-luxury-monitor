@@ -27,4 +27,23 @@ ck("정지 → 엔진 stop + 스레드 종료", r.engine.stopped and not r.runni
 r2 = m.HeadlessFeedRunner(lambda: {"regions": [], "categories": [31]}, logs.append, found.append,
                           engine_factory=lambda *a: FakeEngine(*a), thread_factory=lambda t: FakeThread(t))
 ck("지역 없으면 시작 안 함", r2.start() is False)
+
+# drain_sweep_finds — 피드/스윕 payload 를 라벨·source 로 갈라 넣는다.
+import queue as _queue
+class FakeTracker:
+    def __init__(self): self.calls = []
+    def add_from_matches(self, norms, source="app"):
+        self.calls.append((source, [n["keyword"] for n in norms]))
+        return len(norms)
+q = _queue.Queue()
+q.put({"id": "https://d/x", "title": "t", "price": 1000, "region": "r", "url": "https://d/x",
+       "boostedAt": "", "keyword": "루이비통 오버 더 문", "verdict": "hit", "status": "신규"})
+q.put({"id": "123", "title": "샤넬 백", "price": 1, "region": "r", "url": "u", "boostedAt": ""})
+tracker = FakeTracker()
+n_added = m.drain_sweep_finds(q, tracker, lambda: ["샤넬"], logs.append)
+ck("드레인 합계 2건", n_added == 2)
+ck("피드 호출 — 라벨 그대로", ("feed", ["루이비통 오버 더 문"]) in tracker.calls)
+ck("스윕 호출 — 대기열 키워드로 라벨링", ("sweep", ["샤넬"]) in tracker.calls)
+ck("SOURCE_NAMES 에 feed 있음", m.SOURCE_NAMES.get("feed"))
+
 n_ok = sum(1 for _, c in R if c); print(f"\n{n_ok}/{len(R)} PASS"); sys.exit(0 if n_ok == len(R) else 1)
