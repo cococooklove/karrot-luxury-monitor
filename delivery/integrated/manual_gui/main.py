@@ -3616,7 +3616,8 @@ class MainWindow(QMainWindow):
             from daangn_ext import article_watch as _aw
             self._watch_store = _aw.WatchStore("./data/watch.db")
             self._watch_tracker = _aw.WatchTracker(self._watch_store)
-            self._watch_budget = _aw.AccountBudget("./accounts.json")
+            self._watch_budget = _aw.ProxyBudget(
+                feed_cfg(self._load_alert_settings(), {}).get("proxies"))
             self._watch_timer = QtCore.QTimer(self)
             self._watch_timer.timeout.connect(self._watch_sweep_tick)
         except Exception as e:
@@ -7200,7 +7201,7 @@ def _run_headless():
         from daangn_ext import article_watch
         watch_store = article_watch.WatchStore("./data/watch.db")
         watch_tracker = article_watch.WatchTracker(watch_store)
-        watch_budget = article_watch.AccountBudget("./accounts.json")
+        watch_budget = article_watch.ProxyBudget(feed_cfg(_settings(), {}).get("proxies"))
     except Exception as e:
         log(f"[가격추적] 초기화 실패 — 가격추적 없이 계속: {str(e)[:120]}")
     # 중복 판정은 watch 테이블이 한다(dead 행을 남기므로 '본 매물'의 진실이다).

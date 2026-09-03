@@ -2,11 +2,14 @@
 
     python article_watch_test.py
 """
+import json
 import os
 import sys
 import tempfile
+import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+app_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, app_dir)
 
 import httpx
 
@@ -46,12 +49,6 @@ ARTICLE_OK = {
 }
 
 
-def fake_client(status_code, payload=None):
-    def handler(request):
-        return httpx.Response(status_code, json=payload if payload is not None else {})
-    return httpx.Client(transport=httpx.MockTransport(handler))
-
-
 print("=== A. parse_iso ===")
 ck("+09:00 파싱", aw.parse_iso(PUBLISHED_ISO) == PUBLISHED_EPOCH, aw.parse_iso(PUBLISHED_ISO))
 ck("빈 문자열 → 0", aw.parse_iso("") == 0)
@@ -70,49 +67,51 @@ ck("published_at epoch", n["published_at"] == PUBLISHED_EPOCH, n["published_at"]
 ck("republish_count", n["republish_count"] == 0)
 ck("gone 아님", n["gone"] is False)
 
-print("=== C. ArticleDetailAPI.fetch ===")
-api = aw.ArticleDetailAPI("tok", client=fake_client(200, ARTICLE_OK))
+print("=== C. PublicArticleAPI.fetch (공개 웹 상세, 토큰 없음) ===")
+_LOADER_OK = {"articleId": "1236138291", "product": {
+    "dbId": "1236138291", "title": "디올 오블리크 카드지갑", "price": 410000.0,
+    "status": "Ongoing", "boostedAt": PUBLISHED_ISO, "createdAt": PUBLISHED_ISO,
+    "region": {"name3": "평택시 용이동"}, "favoriteCount": 3, "chatCount": 1,
+    "viewCount": 40}}
+
+
+def fake_public_get(status_code, payload=None):
+    def get(url, proxy, timeout):
+        return status_code, json.dumps(payload if payload is not None else {})
+    return get
+
+
+api = aw.PublicArticleAPI(get=fake_public_get(200, _LOADER_OK))
 got = api.fetch("1236138291")
 ck("200 → 정규화 dict", got["price"] == 410000 and got["gone"] is False)
 api.close()
 
-api = aw.ArticleDetailAPI("tok", client=fake_client(404))
+api = aw.PublicArticleAPI(get=fake_public_get(404))
 ck("404 → gone", api.fetch("999") == {"id": "999", "gone": True})
 api.close()
 
-api = aw.ArticleDetailAPI("tok", client=fake_client(410))
+api = aw.PublicArticleAPI(get=fake_public_get(410))
 ck("410 → gone", api.fetch("999")["gone"] is True)
 api.close()
 
-api = aw.ArticleDetailAPI("tok", client=fake_client(429))
+api = aw.PublicArticleAPI(get=fake_public_get(429))
 try:
     api.fetch("1")
-    ck("429 → 예외", False)
-except httpx.HTTPStatusError as e:
-    ck("429 → 예외", e.response.status_code == 429)
+    ck("429 → AccountUnavailable", False)
+except aw.AccountUnavailable as e:
+    ck("429 → AccountUnavailable", str(e) == "429", str(e))
 api.close()
 
-api = aw.ArticleDetailAPI("tok", client=fake_client(401))
+api = aw.PublicArticleAPI(get=fake_public_get(403))
 try:
     api.fetch("1")
-    ck("401 → 예외", False)
-except httpx.HTTPStatusError as e:
-    ck("401 → 예외", e.response.status_code == 401)
+    ck("403 → AccountUnavailable", False)
+except aw.AccountUnavailable:
+    ck("403 → AccountUnavailable", True)
 api.close()
 
-api = aw.ArticleDetailAPI("tok", client=fake_client(200, {
-    "article": dict(ARTICLE_OK["article"], destroyed_at="2026-08-29T22:00:00+09:00")}))
-ck("destroyed_at 있으면 gone", api.fetch("1")["gone"] is True)
-api.close()
-
-api = aw.ArticleDetailAPI("tok", client=fake_client(200, {
-    "article": dict(ARTICLE_OK["article"], is_unpublished=True)}))
-ck("is_unpublished 면 gone", api.fetch("1")["gone"] is True)
-api.close()
-
-api = aw.ArticleDetailAPI("tok", client=fake_client(200, {
-    "article": dict(ARTICLE_OK["article"], visible=False)}))
-ck("visible False 면 gone", api.fetch("1")["gone"] is True)
+api = aw.PublicArticleAPI(get=fake_public_get(200, {"articleId": "1"}))
+ck("product 없으면 gone(비공개 전환 등)", api.fetch("1")["gone"] is True)
 api.close()
 
 print("=== D. WatchStore ===")
@@ -178,7 +177,7 @@ ck("49시간 전 → aged", aw.tier_for(NOW - 49 * 3600, NOW) == "aged")
 ck("13일 전 → aged", aw.tier_for(NOW - 13 * 86400, NOW) == "aged")
 ck("15일 전 → dead", aw.tier_for(NOW - 15 * 86400, NOW) == "dead")
 ck("published_at 0 → fresh", aw.tier_for(0, NOW) == "fresh")
-ck("fresh 주기 4시간", aw.interval_for("fresh") == 4 * 3600)
+ck("fresh 주기 1시간(공개 페이지, 계정 예산 없음)", aw.interval_for("fresh") == 3600)
 ck("aged 주기 24시간", aw.interval_for("aged") == 24 * 3600)
 ck("dead 주기 0", aw.interval_for("dead") == 0)
 
@@ -680,6 +679,54 @@ ck("기본 상한은 옛 파일과 같다", aw.SEEN_KEY_CAP == 5000)
 sk2.close()
 
 ck("백필 묘비 출처 상수", aw.SOURCE_MATCH_SEEN == "match_seen")
+
+print("=== F. 공개 웹 상세 추적 ===")
+FX = os.path.join(app_dir, "tests", "fixtures")
+lj = json.load(open(os.path.join(FX, "web_detail_loader.json"), encoding="utf-8"))
+n = aw.normalize_public(lj, "0")
+ck("숫자 id = dbId", n["id"] == "1239148676", n["id"])
+ck("가격 int·상태·본문 없이도 키 모양", n["price"] == 15000 and n["status"] == aw.STATUS_ONGOING and n["gone"] is False)
+ck("published_at = boostedAt", n["published_at"] > 1_700_000_000)
+ck("url 숫자 id 경로", n["url"] == "https://www.daangn.com/kr/buy-sell/-1239148676/")
+ck("republish_count 는 None(공개 페이지엔 없다)", n["republish_count"] is None)
+
+
+def fake_get(url, proxy, timeout):
+    if "-100000001" in url: return 404, ""
+    if "-429" in url: return 429, ""
+    return 200, json.dumps(lj)
+
+
+api = aw.PublicArticleAPI(proxy="http://p", get=fake_get)
+ck("fetch 숫자 id", api.fetch("1239148676")["id"] == "1239148676")
+ck("fetch href(슬러그)", api.fetch("https://www.daangn.com/kr/buy-sell/x-abc123/")["price"] == 15000)
+ck("404 → gone", api.fetch("100000001") == {"id": "100000001", "gone": True})
+try:
+    api.fetch("429"); ck("429 → AccountUnavailable", False)
+except aw.AccountUnavailable: ck("429 → AccountUnavailable", True)
+ck("요청 헤더에 토큰 없음", "authorization" not in {k.lower() for k in aw.PUBLIC_HEADERS})
+b = aw.ProxyBudget(["http://p1", "http://p2"], api_factory=lambda proxy: ("API", proxy))
+b.reload()
+ck("프록시 순환 next", [b.next()[1] for _ in range(3)] == ["http://p1", "http://p2", "http://p1"])
+ck("빈 풀 = 직결", aw.ProxyBudget([]).next()[1] == "direct")
+ck("remaining 은 예산 무제한", b.remaining() >= 10_000)
+ck("FRESH 1시간", aw.FRESH_INTERVAL == 3600)
+# check_one: republish 는 published_at 상승으로 판정
+d2 = tempfile.mkdtemp(); st2 = aw.WatchStore(os.path.join(d2, "w.db")); tr2 = aw.WatchTracker(st2)
+now0 = int(time.time())
+tr2.add_from_matches([{"article_id": "1239148676", "title": "t", "price": "15,000원", "time": now0 - 100, "url": "u"}], now=now0)
+
+
+class _Api:
+    def __init__(self, pub): self.pub = pub
+    def fetch(self, aid):
+        r = aw.normalize_public(lj, aid); r["published_at"] = self.pub; return r
+
+
+tr2.check_one("1239148676", _Api(now0 - 100), now=now0 + 1)         # 씨앗 → 기준선
+ev = tr2.check_one("1239148676", _Api(now0 + 500), now=now0 + 2)     # boostedAt 상승 = 끌올
+ck("boostedAt 상승 → republished", [e["kind"] for e in ev] == ["republished"], str(ev))
+ck("republish_count 가 1 올라감", st2.get("1239148676")["republish_count"] == 1)
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

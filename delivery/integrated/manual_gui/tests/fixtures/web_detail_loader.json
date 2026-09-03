@@ -1,0 +1,73 @@
+{
+ "origin": "https://www.daangn.com",
+ "karrotLocalCountryCode": "kr",
+ "karrotLang": "ko-KR",
+ "stage": "prod",
+ "articleId": "1239148676",
+ "product": {
+  "id": "/kr/buy-sell/%EB%9D%BC%ED%93%A8%EB%A7%88-%EC%8A%A4%ED%8C%90-%EB%93%B1%EC%82%B0-%EB%B0%94%EC%A7%80-%EC%98%88%EB%BB%90%EC%9A%94-hxu5o63mwas7/",
+  "dbId": "1239148676",
+  "nodeId": "hxu5o63mwas7",
+  "href": "https://www.daangn.com/kr/buy-sell/%EB%9D%BC%ED%93%A8%EB%A7%88-%EC%8A%A4%ED%8C%90-%EB%93%B1%EC%82%B0-%EB%B0%94%EC%A7%80-%EC%98%88%EB%BB%90%EC%9A%94-hxu5o63mwas7/",
+  "adultContent": false,
+  "title": "라퓨마 스판 등산 바지 예뻐요",
+  "images": [
+   "https://img.kr.gcp-karroter.net/origin/article/202609/3d2e90ea-4b39-45c0-8296-1de1c310d688.webp?f=webp&q=95&s=1440x1440&service=webapp&t=inside",
+   "https://img.kr.gcp-karroter.net/origin/article/202609/eb67b25c-6800-4990-9043-4de84ebb58d8.webp?f=webp&q=95&s=1440x1440&service=webapp&t=inside",
+   "https://img.kr.gcp-karroter.net/origin/article/202609/374ceb82-b94b-4d9a-a58a-f5c22db66e0d.webp?f=webp&q=95&s=1440x1440&service=webapp&t=inside"
+  ],
+  "locationName": null,
+  "region": {
+   "name": "역삼동",
+   "name1": "서울특별시",
+   "name2": "강남구",
+   "name3": "역삼동",
+   "dbId": "6035",
+   "nodeId": "xttzvwsawokw",
+   "countryCode": "KR",
+   "__typename": "Region"
+  },
+  "user": {
+   "id": "/kr/users/%EB%A1%9C%EC%A6%88-hcpjocue7kja/",
+   "dbId": "31830345",
+   "href": "https://www.daangn.com/kr/users/%EB%A1%9C%EC%A6%88-hcpjocue7kja/",
+   "nickname": "로즈",
+   "profileImage": "https://assetstorage.krrt.io/1404718620223529089/5e6a8a2e-9f1d-49fe-a088-215becea1dc0/width_640_height_640.png",
+   "score": 26.3,
+   "scoreSymbol": "https://d3pl61q8x5fmnh.cloudfront.net/origin/etc/202306/75c4cb8540b5464f5a4143f5038cbb963eb60d814a4a9055f95a02a04cffad55.png",
+   "reviewCount": 12,
+   "locationName": null,
+   "region": {
+    "dbId": "6035",
+    "name": "역삼동",
+    "name1": "서울특별시",
+    "name2": "강남구",
+    "name3": "역삼동",
+    "__typename": "Region"
+   },
+   "webCrawlNotAllowed": false,
+   "__typename": "KarrotUser"
+  },
+  "category": {
+   "id": "/kr/buy-sell/?category_id=5",
+   "dbId": "5",
+   "href": "https://www.daangn.com/kr/buy-sell/?category_id=5",
+   "name": "여성의류",
+   "thumbnail": "https://dnvefa72aowie.cloudfront.net/origin/brand/202402/b99fb12bcc754a08e5a6f359861bafd80d38678a0c58521abdf314949f9c5e58.png?service=webapp&f=webp",
+   "__typename": "FleamarketCategory"
+  },
+  "createdAt": "2026-09-03T12:37:17.100+09:00",
+  "boostedAt": "2026-09-03T12:37:17.099+09:00",
+  "price": "15000.0",
+  "status": "Ongoing",
+  "content": "스판끼 좋아요.\n\n착용감이 편안해요.\n\n퀄리티상태 좋아요.\n\n모임에서 산행갈때 몇번 입었어요.\n\n브랜드라 디자인이 고급져요.\n\n허리단면38cm 총장100cm\n\n다른제품 구입하실때 합포 가능합니다. ",
+  "favoriteCount": 0,
+  "chatCount": 0,
+  "viewCount": 0,
+  "articlePropertyContents": [],
+  "comments": [],
+  "__typename": "FleamarketArticle"
+ },
+ "shouldBlock": false,
+ "isThirdPartyInAppBrowser": false
+}

@@ -37,7 +37,12 @@ tracker = aw.WatchTracker(store)
 print("added=%d active=%d" % (tracker.add_from_matches(matches[:3]),
                               store.active_count()))
 
-budget = aw.AccountBudget("./accounts.json", daily_cap=5)
+try:
+    with open("./proxies.txt", encoding="utf-8") as f:
+        proxies = [ln.strip() for ln in f if ln.strip()]
+except OSError:
+    proxies = []
+budget = aw.ProxyBudget(proxies)  # 추적은 계정 토큰이 아니라 공개 웹 상세를 본다
 print("budget_remaining=%d" % budget.remaining())
 
 future = int(time.time()) + aw.FRESH_INTERVAL + 1

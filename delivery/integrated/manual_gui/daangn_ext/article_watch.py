@@ -1,9 +1,10 @@
 """매물 단건 추적 — 가격변동·판매완료·삭제·끌올 감지.
 
-단건 조회: GET https://webapp.kr.karrotmarket.com/api/v24/articles/{id}.json
-Bearer 토큰만 필요(WAF 아님). 묶음 조회는 없다 — articles.json 은 어떤 파라미터
-조합이든 invalid_params 를 돌려준다. 따라서 1건 1요청이고, 요청량은 추적 대상 수와
-점검 주기로만 조절한다.
+단건 조회: 공개 웹 상세의 Remix 로더(`PublicArticleAPI`) — 계정 토큰 없이
+GET https://www.daangn.com/kr/buy-sell/-{id}/?_data=routes%2Fkr.buy-sell.%24buy_sell_id.
+2026-09-03 실측: 계정 토큰 방식(webapp API v24)은 토큰 없이는 401이라 뒷문이었고,
+공개 페이지는 프록시만으로 200을 돌려준다. 묶음 조회는 없다 — 1건 1요청이고,
+요청량은 추적 대상 수와 점검 주기로만 조절한다.
 """
 from __future__ import annotations
 
@@ -16,9 +17,7 @@ import time
 
 import httpx
 
-from .keyword_alert_api import WEBAPP, _headers, token_remaining
-
-WEBAPP_ARTICLE_PATH = "/api/v24/articles/{id}.json"
+from .keyword_alert_api import token_remaining
 
 STATUS_ONGOING = "ongoing"
 STATUS_RESERVED = "reserved"
@@ -40,7 +39,7 @@ _ACTIVE_SQL = "tier IN ('fresh','aged')"
 
 FRESH_AGE = 48 * 3600
 AGED_AGE = 14 * 24 * 3600
-FRESH_INTERVAL = 4 * 3600
+FRESH_INTERVAL = 3600           # 가격 인하 알림은 1시간 안에 — 공개 페이지라 계정 예산이 없다
 AGED_INTERVAL = 24 * 3600
 ACTIVE_CAP = 300
 DAILY_CAP_PER_ACCOUNT = 300
@@ -96,32 +95,101 @@ def normalize(payload: dict, article_id: str) -> dict:
     }
 
 
-class ArticleDetailAPI:
-    """계정 1개(access token)로 매물 단건을 조회한다."""
+DETAIL_ROUTE = "routes/kr.buy-sell.$buy_sell_id"
+PUBLIC_HEADERS = {"accept": "application/json, text/html;q=0.9",
+                  "accept-language": "ko-KR,ko;q=0.9"}
 
-    def __init__(self, access_token: str, config_path: str = "./data/config.json",
-                 proxy: str | None = None, client: httpx.Client | None = None):
-        self.token = access_token
-        self.headers = _headers(access_token, config_path)
-        self._own_client = client is None
-        self._client = client or httpx.Client(http2=True, timeout=20, proxy=proxy)
+
+def normalize_public(j: dict, fallback_id: str) -> dict:
+    """공개 웹 상세 Remix 로더 JSON → normalize() 와 같은 모양.
+
+    계정 토큰이 필요한 webapp API 대신 쓴다(2026-09-03 실측: 토큰 없이는 401,
+    공개 페이지는 200). republish_count 는 없다 — check_one 이 published_at
+    (boostedAt) 상승으로 끌올을 잰다."""
+    p = (j or {}).get("product") or {}
+    if not p:
+        return {"id": str(fallback_id), "gone": True}
+    aid = str(p.get("dbId") or (j or {}).get("articleId") or fallback_id)
+    region = p.get("region") or {}
+    return {
+        "id": aid,
+        "gone": False,
+        "title": p.get("title") or "",
+        "price": _int(p.get("price")),
+        "status": _status(p.get("status")),
+        "status_name": "",
+        "region": (region.get("name3") or region.get("name") or "") if isinstance(region, dict) else "",
+        "url": f"https://www.daangn.com/kr/buy-sell/-{aid}/",
+        "published_at": parse_iso(p.get("boostedAt") or p.get("createdAt")),
+        "updated_at": parse_iso(p.get("boostedAt")),
+        "republish_count": None,
+        "watches_count": _int(p.get("favoriteCount")),
+        "chat_rooms_count": _int(p.get("chatCount")),
+        "reads_count": _int(p.get("viewCount")),
+    }
+
+
+def _public_get(url, proxy, timeout):
+    from curl_cffi import requests
+    r = requests.get(url, headers=PUBLIC_HEADERS, impersonate="safari_ios",
+                     timeout=timeout, proxy=proxy)
+    return r.status_code, r.text
+
+
+class PublicArticleAPI:
+    """공개 웹 상세(토큰 없음) 로 매물 단건을 조회한다. 프록시 하나에 묶인다."""
+
+    def __init__(self, proxy: str | None = None, get=None, timeout: int = 20):
+        self.proxy = proxy
+        self._get = get or _public_get
+        self.timeout = timeout
+
+    @staticmethod
+    def _url(key: str) -> str:
+        k = str(key)
+        base = k if k.startswith("http") else f"https://www.daangn.com/kr/buy-sell/-{k}/"
+        sep = "&" if "?" in base else "?"
+        from urllib.parse import quote
+        return f"{base}{sep}_data={quote(DETAIL_ROUTE, safe='')}"
 
     def fetch(self, article_id: str) -> dict:
-        """정규화된 dict. 사라졌으면 {"id":..., "gone": True}.
-        401/429/5xx 는 httpx.HTTPStatusError 로 올린다."""
-        url = f"https://{WEBAPP}{WEBAPP_ARTICLE_PATH.format(id=article_id)}"
-        r = self._client.get(url, headers=self.headers)
-        if r.status_code in (404, 410):
+        status, text = self._get(self._url(article_id), self.proxy, self.timeout)
+        if status in (404, 410):
             return {"id": str(article_id), "gone": True}
-        r.raise_for_status()
-        return normalize(r.json() or {}, str(article_id))
+        if status in (401, 403, 429):
+            raise AccountUnavailable(str(status))
+        if status != 200:
+            raise RuntimeError(f"HTTP {status}")
+        try:
+            j = json.loads(text)
+        except ValueError:
+            raise RuntimeError("공개 상세 로더가 JSON 이 아님")
+        return normalize_public(j, str(article_id))
 
     def close(self) -> None:
-        if self._own_client:
-            try:
-                self._client.close()
-            except Exception:
-                pass
+        pass
+
+
+class ProxyBudget:
+    """AccountBudget 의 자리 — 계정 대신 웹 프록시를 돌린다. 예산 상한 없음."""
+
+    def __init__(self, proxies=None, api_factory=None):
+        self.proxies = [p for p in dict.fromkeys(proxies or []) if p]
+        self._factory = api_factory or (lambda proxy: PublicArticleAPI(proxy=proxy))
+        self._i = 0
+
+    def reload(self) -> None:
+        pass
+
+    def remaining(self) -> int:
+        return 1_000_000
+
+    def next(self):
+        if not self.proxies:
+            return self._factory(None), "direct"
+        p = self.proxies[self._i % len(self.proxies)]
+        self._i += 1
+        return self._factory(p), p
 
 
 _COLUMNS = ("id", "title", "region", "url", "price", "status", "republish_count",
@@ -507,6 +575,8 @@ class WatchTracker:
         seeding = old.get("last_check") == old.get("first_seen")
         try:
             new = api.fetch(str(article_id))
+        except AccountUnavailable:
+            raise
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
             if code in (401, 429):
@@ -523,6 +593,12 @@ class WatchTracker:
         if not new.get("gone") and (isinstance(np_, bool)
                                     or not isinstance(np_, int) or np_ <= 0):
             new["price"] = old.get("price")
+
+        # 공개 페이지에는 끌올 횟수가 없다 — 끌올 시각(published_at)이 올라가면 한 번으로 센다.
+        if new.get("republish_count") is None and not new.get("gone"):
+            op, npub = int(old.get("published_at") or 0), int(new.get("published_at") or 0)
+            base = int(old.get("republish_count") or 0)
+            new["republish_count"] = base + 1 if (op and npub > op + 60) else base
 
         events = [] if seeding else diff_events(old, new, now)
         if new.get("gone"):
@@ -634,7 +710,8 @@ def _today() -> str:
 
 
 class AccountBudget:
-    """유효 토큰 계정을 라운드로빈으로 내주고 하루 요청 수를 계정별로 제한한다.
+    """(더 이상 추적에 쓰지 않는다 — ProxyBudget) 유효 토큰 계정을 라운드로빈으로
+    내주고 하루 요청 수를 계정별로 제한한다.
 
     사용량은 파일에 남긴다 — 재시작(크래시·배포·--once)마다 '하루' 상한이
     0 으로 돌아가면 상한이 아니게 된다.
@@ -730,5 +807,7 @@ class AccountBudget:
 
 
 def _default_api_factory(token, config_path=None, proxy=None):
-    return ArticleDetailAPI(token, config_path=config_path or "./data/config.json",
-                            proxy=proxy)
+    # token 은 무시한다 — AccountBudget 은 더 이상 추적에 쓰이지 않지만
+    # (레거시 호출부 호환을 위해) import 는 계속 되게 남겨 둔다. 뒷문(토큰 경로)은
+    # 스펙 §7 이 금지하므로 실제 조회는 항상 공개 웹 상세로 나간다.
+    return PublicArticleAPI(proxy=proxy)
