@@ -265,42 +265,43 @@ with open(main.MainWindow.NOTIFY_FILE, "w") as f:
     json.dump({"tg_token": 12345, "tg_chat": None}, f)
 ck("타입 이상 → 기본값 폴백", w._load_notify()["tg_token"] == "")
 
-print("\n=== E. 알림 다이얼로그 UI (구멍 #4) ===")
+print("\n=== E. 알림 설정 폼 — 설정 탭 인라인 (구멍 #4) ===")
 
+from PyQt6 import QtWidgets
+# 다이얼로그가 아니다 — 설정 탭에 폼이 상주한다. self._notify 를 비춘다.
 w._notify = dict(main.MainWindow.NOTIFY_DEFAULT)
 w._notify.update(tg_token="TOK1", tg_chat="CHAT1")
-_dlgs.clear()
-w.on_auto_notify_clicked()
-ck("다이얼로그 생성", len(_dlgs) == 1)
-dlg = _dlgs[0]
-from PyQt6 import QtWidgets
-btns = {b.text(): b for b in dlg.findChildren(QtWidgets.QPushButton)}
-edits = dlg.findChildren(QtWidgets.QLineEdit)
-ck("테스트 발송 버튼 존재", "테스트 발송" in btns, str(list(btns)))
-ck("저장/취소 버튼 존재", "저장" in btns and "취소" in btns)
-ck("시트 인증파일 입력칸 존재", len(edits) == 4, f"{len(edits)}칸")
+w._refresh_notify_form()
+ck("알림 다이얼로그 핸들러 없음", not hasattr(w, "on_auto_notify_clicked")
+   and not hasattr(w, "autoNotifyBtn"))
+ck("폼이 설정 탭 안에", w.notifyToken in w.tabs.widget(
+    [w.tabs.tabText(i) for i in range(w.tabs.count())].index("설정")
+).findChildren(QtWidgets.QLineEdit))
+edits = [w.notifyToken, w.notifyChat, w.notifySheet, w.notifyCred]
+ck("테스트 발송 버튼 존재", w.notifyTestBtn.text() == "테스트 발송")
+ck("저장 버튼 존재·취소 없음", w.notifySaveBtn.text() == "저장"
+   and not any(b.text() == "취소" for b in w.notifyBox.findChildren(QtWidgets.QPushButton)))
 ck("기존 값 표시", edits[0].text() == "TOK1" and edits[1].text() == "CHAT1")
 
 # 저장 클릭 → 파일 기록 + 메모리 반영
 edits[0].setText("NEW:TOK"); edits[1].setText("-100999")
 edits[2].setText("http://sheet2"); edits[3].setText("/tmp/c2.json")
-btns["저장"].click()
+w.notifySaveBtn.click()
 ck("저장 클릭 → 메모리 반영", w._notify["tg_token"] == "NEW:TOK"
    and w._notify["sheet_cred"] == "/tmp/c2.json", str(w._notify))
 disk = json.load(open(main.MainWindow.NOTIFY_FILE, encoding="utf-8"))
 ck("저장 클릭 → 디스크 기록", disk["tg_token"] == "NEW:TOK" and disk["tg_chat"] == "-100999")
+ck("저장 결과가 폼에 보인다", "저장" in w.notifyResult.text(), w.notifyResult.text())
 
-# 재오픈 시 저장값 표시
-_dlgs.clear()
-w._notify = w._load_notify()
-w.on_auto_notify_clicked()
-e2 = _dlgs[0].findChildren(QtWidgets.QLineEdit)
-ck("재오픈 시 저장값 유지", e2[0].text() == "NEW:TOK" and e2[3].text() == "/tmp/c2.json")
+# 파일에서 다시 읽어도 폼이 따라온다
+w._notify = w._load_notify(); w._refresh_notify_form()
+ck("다시 읽은 값 표시", edits[0].text() == "NEW:TOK" and edits[3].text() == "/tmp/c2.json")
 
-# 인증파일 비우면 기본경로로 보정
-e2[3].setText("")
-{b.text(): b for b in _dlgs[0].findChildren(QtWidgets.QPushButton)}["저장"].click()
-ck("인증파일 공란 → 기본경로 보정", w._notify["sheet_cred"] == "./credentials.json")
+# 인증파일 비우면 기본경로로 보정 — 폼에도 되비친다
+edits[3].setText("")
+w.notifySaveBtn.click()
+ck("인증파일 공란 → 기본경로 보정", w._notify["sheet_cred"] == "./credentials.json"
+   and edits[3].text() == "./credentials.json", edits[3].text())
 
 # 테스트 발송 스레드
 res_holder = {}
@@ -318,27 +319,25 @@ ck("잘못된 토큰 → 실패로 보고", res_holder.get("tg_ok") is False
 ck("시트 미설정 → 선택기능 표시", res_holder.get("sheet_ok") is None)
 
 # 빈 입력 → 경고만, 스레드 안 뜸
-_dlgs.clear()
-w._notify = dict(main.MainWindow.NOTIFY_DEFAULT)
-w.on_auto_notify_clicked()
-d2 = _dlgs[0]
-b2 = {b.text(): b for b in d2.findChildren(QtWidgets.QPushButton)}
-lbls = [l for l in d2.findChildren(QtWidgets.QLabel) if l.wordWrap()]
-b2["테스트 발송"].click()
+w._notify = dict(main.MainWindow.NOTIFY_DEFAULT); w._refresh_notify_form()
+_before = getattr(w, "_notify_test", None)
+w.notifyTestBtn.click()
 ck("빈 입력 → 경고 표시(전송 시도 없음)",
-   any("입력하세요" in l.text() for l in lbls), [l.text()[:40] for l in lbls if l.text()][:1])
+   "입력하세요" in w.notifyResult.text() and getattr(w, "_notify_test", None) is _before,
+   w.notifyResult.text()[:40])
 
-# 테스트 도중 다이얼로그를 닫아도 크래시 없음
-e3 = d2.findChildren(QtWidgets.QLineEdit)
-e3[0].setText("111:BADTOKEN"); e3[1].setText("999")
-b2["테스트 발송"].click()
-d2.close(); d2.deleteLater(); app.processEvents()
+# 폼 값(저장 전)으로 시험 발송 — 결과가 폼 아래 줄에 온다
+edits[0].setText("111:BADTOKEN"); edits[1].setText("999")
+w.notifyTestBtn.click()
+ck("보내는 중엔 버튼 잠금", not w.notifyTestBtn.isEnabled())
 t0 = time.time()
 while w._notify_test.isRunning() and time.time() - t0 < 30:
     app.processEvents(); time.sleep(0.05)
 w._notify_test.wait(5000)
 app.processEvents()
-ck("테스트 중 다이얼로그 닫아도 무크래시", not w._notify_test.isRunning())
+ck("실패 결과가 폼에 보인다", "❌ 텔레그램" in w.notifyResult.text()
+   and w.notifyTestBtn.isEnabled(), w.notifyResult.text()[:60])
+ck("시험 발송은 저장하지 않는다", w._notify["tg_token"] == "")
 
 print("\n=== F. AutoMonitor 통합 ===")
 

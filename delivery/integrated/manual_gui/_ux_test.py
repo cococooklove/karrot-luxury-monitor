@@ -22,7 +22,12 @@ assert all("강남" in v for v in visible) and len(visible) >= 1
 [b for b in btns if b.text() == "전체 선택"][0].click()
 sel = w._selected_auto_regions()
 print("전체선택(강남 필터) → 선택:", sel)
-assert all("강남" in s for s in sel)
+# 선택값은 '동-id' 꼴이라 구 이름이 없다 — 필터에 보이던 동만 골랐는지 본다.
+# (지역 트리가 접힌 고급 패널 뒤에 있던 동안은 전체 선택이 0건이라 이 검사가
+# 비어 있는 채로 통과했다. 조건 탭에 펼쳐 놓은 뒤로 실제로 고른다.)
+_dongs = [v.split()[-1] for v in visible]
+assert len(sel) == len(visible) >= 1, (len(sel), len(visible))
+assert all(any(s.startswith(d) for d in _dongs) for s in sel)
 # 해제
 [b for b in btns if b.text() == "전체 해제"][0].click()
 print("전체해제 후 선택:", len(w._selected_auto_regions()))
