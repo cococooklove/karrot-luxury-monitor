@@ -7,6 +7,7 @@ GUI 는 QThread 어댑터, 헤드리스는 plain Thread 로 같은 cfg 를 돌�
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -56,7 +57,6 @@ class FeedSweep:
         return max(1, len(self.cfg.get("proxies") or []))
 
     def _rules_now(self) -> RuleTable:
-        import os
         try:
             mt = os.path.getmtime(self._rules_path)
         except OSError:
@@ -93,6 +93,7 @@ class FeedSweep:
                     name, rid, cat = q.get_nowait()
                 except queue.Empty:
                     return
+                kind = None
                 for attempt in range(2):
                     proxy = self._pool.pick()
                     if proxy is None and self._pool.all_blocked():
@@ -114,9 +115,10 @@ class FeedSweep:
                 if gap:
                     self._sleep(gap)
                 if arts is None:
-                    with self._lock:
-                        stat["err"] += 1
-                    continue                     # ERR: 워터마크 안 올림, 다음 사이클
+                    if kind == "ERR":
+                        with self._lock:
+                            stat["err"] += 1
+                    continue                     # ERR·이중 차단: 워터마크 안 올림, 다음 사이클
                 key = W.cursor_key(rid, cat)
                 with self._lock:
                     fresh = self._cursor.new_articles(key, arts, now)
@@ -134,7 +136,8 @@ class FeedSweep:
                     self._emit(a, name, rule, verdict)
                 with self._lock:
                     done[0] += 1
-                    self.on_status(f"피드 {done[0]}/{total} · {name}")
+                    msg = f"피드 {done[0]}/{total} · {name}"
+                self.on_status(msg)
 
         threads = [threading.Thread(target=lane, name=f"feed-{i}", daemon=True)
                    for i in range(self._lanes())]

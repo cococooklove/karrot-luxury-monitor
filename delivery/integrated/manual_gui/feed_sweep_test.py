@@ -87,4 +87,11 @@ s4 = e4.cycle_once()
 ck("요청 에러 전량 err 로 집계 + 로더 경로 변경 의심 로그",
    s4["err"] == s4["requests"] and any("로더 경로 변경 의심" in m for m in logs), str(s4))
 
+logs.clear()
+block_cfg = dict(cfg, proxies=["http://a", "http://b"], fetch=lambda *a, **k: (None, "BLOCK"))
+e5 = FeedSweep(block_cfg, on_log=logs.append)
+s5 = e5.cycle_once()
+ck("이중 차단은 err 아님 — 로더 이상으로 오판하지 않는다",
+   s5["err"] == 0 and s5["blocked"] >= 2 and not any("로더 경로 변경 의심" in m for m in logs), str(s5))
+
 n_ok = sum(1 for _, c in R if c); print(f"\n{n_ok}/{len(R)} PASS"); sys.exit(0 if n_ok == len(R) else 1)
