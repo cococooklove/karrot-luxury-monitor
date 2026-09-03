@@ -475,7 +475,7 @@ if _win is not None:
     # 제 탭이 생긴 상자는 펴 두고, 칩이 요약하는 현황과 되돌리기(고급)만 접는다.
     for _n, _title, _open in (("dashBox", "현황", False), ("condBox", "감시 조건", True),
                               ("areaBox", "훑을 지역", True),
-                              ("regBox", "당근에 등록된 키워드", True),
+                              ("regBox", "당근 서버 등록 상태", True),
                               ("advancedBox", "고급", False), ("logBox", "로그", True)):
         _b = getattr(_win, _n, None)
         ck(f"접이식 {_title} ({'펼침' if _open else '접힘'})",
@@ -565,8 +565,8 @@ if _win is not None:
        "앱 슬롯으로 인식" in _win.alertLog.toPlainText(),
        _win.alertLog.toPlainText().strip()[:100])
     ck("표의 경로가 '-' 가 아니다",
-       _win.alertTable.item(0, 1).text() != "-",
-       _win.alertTable.item(0, 1).text())
+       _win.alertTable.item(0, m.ALERT_COL_ROUTE).text() != "-",
+       _win.alertTable.item(0, m.ALERT_COL_ROUTE).text())
     # 두 번째 그리기는 씨딩하지 않는다
     _win.alertLog.clear()
     _win._alert_populate({"user_keywords": [{"keyword": "에르메스", "id": 3}]})

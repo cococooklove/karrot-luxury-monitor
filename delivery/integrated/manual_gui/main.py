@@ -330,8 +330,9 @@ ROUTE_NAMES = {"app": "앱 알림", "sweep": "검색 스윕"}
 
 # 등록 표의 열. 인덱스를 손으로 세면 열이 하나 끼는 순간 조용히 어긋난다
 # (실제로 삭제가 id 대신 다른 열을 읽을 뻔했다). 이름으로만 참조한다.
-ALERT_COLS = ["키워드", "수집 방식", "가격범위", "제외", "추가", "끌올 기간", "id"]
+ALERT_COLS = ["키워드", "상태", "수집 방식", "가격범위", "제외", "추가", "끌올 기간", "id"]
 ALERT_COL_KEYWORD = ALERT_COLS.index("키워드")
+ALERT_COL_STATUS = ALERT_COLS.index("상태")
 ALERT_COL_ROUTE = ALERT_COLS.index("수집 방식")
 ALERT_COL_DAYS = ALERT_COLS.index("끌올 기간")
 ALERT_COL_ID = ALERT_COLS.index("id")
@@ -342,9 +343,29 @@ ALERT_COL_ID = ALERT_COLS.index("id")
 DAYS_APP_TIP = ("끌올일수는 앱 알림 경로에서는 적용되지 않습니다"
                 " — 검색 스윕으로 배정된 키워드에만 걸립니다")
 
+# 등록 표의 존재 이유는 '엑셀에 넣은 조건'과 '당근 서버에 실제 걸린 키워드'의
+# 차이를 보여 주는 것이다. 이 열이 없으면 표는 조건표의 복사본으로 읽히고,
+# 앱 알림이 안 올 때 서버 등록이 빠졌는지 확인할 길이 없다.
+REG_SERVER, REG_SWEEP, REG_MISSING, REG_UNKNOWN = "server", "sweep", "missing", "unknown"
+# 미등록만 기호를 단다 — 이 표의 색은 QTableWidget::item 스타일시트가 전부
+# 덮어 버려(글자색·바탕 모두) 색으로는 구분할 수 없다. 글자로 튀게 한다.
+REG_STATUS_NAMES = {REG_SERVER: "서버 등록", REG_SWEEP: "스윕 대기",
+                    REG_MISSING: "⚠ 미등록", REG_UNKNOWN: "확인 불가"}
+REG_STATUS_TIPS = {
+    REG_SERVER: "당근 앱 알림 서버에 실제 등록돼 있습니다",
+    REG_SWEEP: "앱 슬롯이 차서 검색 스윕이 대신 훑습니다 (서버 등록 아님)",
+    REG_MISSING: ("엑셀 조건은 있지만 당근 서버에 아직 안 올라갔습니다."
+                  " 감시를 시작하면 등록을 시도합니다 — 계속 미등록이면"
+                  " 계정 토큰·앱 슬롯(30개)을 확인하세요"),
+    REG_UNKNOWN: "서버 목록을 못 읽어 등록 여부를 알 수 없습니다 (토큰 확인)",
+}
 
-def alert_row_cells(keyword, route, price, exclude, uid):
-    """등록 표 한 줄 → (셀 값 7개, {열 인덱스: 툴팁}). 위젯을 모르는 순수 함수.
+
+def alert_row_cells(keyword, route, price, exclude, uid, status=None):
+    """등록 표 한 줄 → (셀 값 8개, {열 인덱스: 툴팁}). 위젯을 모르는 순수 함수.
+
+    status 는 REG_* 중 하나(또는 None) — 이 줄이 서버에 실제 등록됐는지,
+    스윕이 대신 훑는지, 조건만 있고 서버엔 없는지.
 
     추가키워드·끌올일수는 엑셀 조건으로만 들어오고 라우터가 `cond` 에 넣어
     둔다. 표에 안 그리면 사용자는 자기가 건 조건을 확인할 방법이 없다.
@@ -357,9 +378,12 @@ def alert_row_cells(keyword, route, price, exclude, uid):
     extra = ",".join(cond.get("extra") or []) or "-"
     days_n = cond.get("days")
     days = f"{days_n}일" if days_n else "-"
-    vals = [str(keyword or ""), ROUTE_NAMES.get((route or {}).get("route"), "-"),
+    vals = [str(keyword or ""), REG_STATUS_NAMES.get(status, "-"),
+            ROUTE_NAMES.get((route or {}).get("route"), "-"),
             str(price or ""), str(exclude or ""), extra, days, str(uid or "")]
     tips = {}
+    if status in REG_STATUS_TIPS:
+        tips[ALERT_COL_STATUS] = REG_STATUS_TIPS[status]
     if route:
         tips[ALERT_COL_ROUTE] = str(route.get("reason") or "")
     if days_n and (route or {}).get("route") == "app":
@@ -2655,9 +2679,17 @@ class MainWindow(QMainWindow):
         self.areaBox = self._collapsible("훑을 지역", sweep, checked=True)
         rv.addWidget(self.areaBox)
         reg_v = QtWidgets.QVBoxLayout()
+        # 이 표는 조건표의 복사본이 아니라 '서버에 실제 걸렸나'를 보는 창이다.
+        # 이름·설명이 그걸 말하지 않으면 엑셀이 있는데 왜 또 있냐는 질문이 온다.
+        _rh = QtWidgets.QLabel(
+            "엑셀 조건 ≠ 서버 등록. <b>⚠ 미등록</b>은 조건은 있지만 당근에 아직"
+            " 안 올라간 키워드 — 앱 알림이 안 오는 첫 번째 이유입니다.")
+        _rh.setWordWrap(True)
+        _rh.setStyleSheet("color: #555;")
+        reg_v.addWidget(_rh)
         reg_v.addWidget(self.alertSubLabel)
         reg_v.addWidget(self.alertTable, 1)
-        self.regBox = self._collapsible("당근에 등록된 키워드", reg_v, checked=True)
+        self.regBox = self._collapsible("당근 서버 등록 상태", reg_v, checked=True)
         rv.addWidget(self.regBox, 1)
 
         # ── 설정 페이지: 알림(인라인) → 계정·프록시(창) → 고급(접힘) ──
@@ -3435,13 +3467,18 @@ class MainWindow(QMainWindow):
         except Exception:
             return {}
 
-    def _alert_row(self, r, keyword, route, price, exclude, uid):
-        """표 한 줄. 값 구성은 alert_row_cells(순수 함수)가 한다."""
-        vals, tips = alert_row_cells(keyword, route, price, exclude, uid)
+    def _alert_row(self, r, keyword, route, price, exclude, uid, status=None):
+        """표 한 줄. 값 구성은 alert_row_cells(순수 함수)가 한다.
+        미등록 줄은 키워드·상태를 굵게 — 표에서 눈에 띄어야 할 유일한 줄이다.
+        (색은 QTableWidget::item 스타일시트가 덮어 setForeground/Background
+        둘 다 안 먹는다. 글꼴은 덮지 않는다.)"""
+        vals, tips = alert_row_cells(keyword, route, price, exclude, uid, status)
         for c, val in enumerate(vals):
             cell = QtWidgets.QTableWidgetItem(val)
             if c in tips:
                 cell.setToolTip(tips[c])
+            if status == REG_MISSING and c in (ALERT_COL_KEYWORD, ALERT_COL_STATUS):
+                f = cell.font(); f.setBold(True); cell.setFont(f)
             self.alertTable.setItem(r, c, cell)
 
     def _queue_entries(self):
@@ -3498,7 +3535,7 @@ class MainWindow(QMainWindow):
             shown.add(kw)
             self._alert_row(r, kw, routes.get(kw), price,
                             ",".join(k.get("exclude_keywords") or []),
-                            str(k.get("id", "")))
+                            str(k.get("id", "")), REG_SERVER)
         # 스윕으로 밀린 키워드는 앱 목록에 없다 — 여기 안 보이면 사용자는
         # 등록이 삼켜진 줄 안다. 대기열에서 끌어와 함께 그린다.
         for e in entries:
@@ -3509,9 +3546,13 @@ class MainWindow(QMainWindow):
             if e.get("min") or e.get("max"):
                 price = f"{e.get('min') or ''}~{e.get('max') or ''}"
             self._alert_row(r, e["keyword"], routes.get(e["keyword"]), price,
-                            ",".join(e.get("exclude") or []), "")
+                            ",".join(e.get("exclude") or []), "", REG_SWEEP)
+            shown.add(e["keyword"])
         # 서버 목록에도 대기열에도 없지만 라우터가 아는 키워드 — 엑셀로 방금 넣은
         # 것들이 여기 해당한다. 조건은 라우터의 cond 가 갖고 있다.
+        # 앱 경로인데 서버 목록에 없으면 '미등록'(빨강). 단 서버 목록 자체를 못
+        # 읽었으면(data 없음) 등록됐는지 모르는 것이지 안 된 게 아니다 — 그때
+        # 빨갛게 칠하면 멀쩡한 등록을 지우러 가게 만든다. '확인 불가'로 둔다.
         for kw, route in (routes or {}).items():
             if kw in shown:
                 continue
@@ -3520,8 +3561,14 @@ class MainWindow(QMainWindow):
             price = ""
             if cond.get("min") or cond.get("max"):
                 price = f"{cond.get('min') or ''}~{cond.get('max') or ''}"
+            if (route or {}).get("route") == "sweep":
+                status = REG_SWEEP
+            elif not data:
+                status = REG_UNKNOWN
+            else:
+                status = REG_MISSING
             self._alert_row(r, kw, route, price,
-                            ",".join(cond.get("exclude") or []), "")
+                            ",".join(cond.get("exclude") or []), "", status)
             shown.add(kw)
         subs = (data or {}).get("subscription_infos") or []
         if subs:

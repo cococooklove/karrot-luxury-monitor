@@ -81,6 +81,7 @@ def rows_of(f):
 
 
 populate = m.MainWindow._alert_populate
+S, RT, ID = m.ALERT_COL_STATUS, m.ALERT_COL_ROUTE, m.ALERT_COL_ID
 
 EXCEL_ROUTES = {
     "샤넬": {"keyword": "샤넬", "route": "app",
@@ -97,11 +98,15 @@ ck("표가 비어 있지 않다", len(rows) == 2, f"{len(rows)}행")
 kw = [r[0] for r in rows]
 ck("엑셀로 넣은 키워드가 보인다", set(kw) == {"샤넬", "구찌"}, str(kw))
 sh = [r for r in rows if r[0] == "샤넬"][0]
-ck("가격범위가 보인다", sh[2] == "500000~3000000", sh[2])
-ck("제외어가 보인다", sh[3] == "레플,미러", sh[3])
-ck("추가어가 보인다", sh[4] == "정품", sh[4])
-ck("끌올일수가 보인다", sh[5] == "7일", sh[5])
+ck("가격범위가 보인다", sh[RT + 1] == "500000~3000000", sh[RT + 1])
+ck("제외어가 보인다", sh[RT + 2] == "레플,미러", sh[RT + 2])
+ck("추가어가 보인다", sh[RT + 3] == "정품", sh[RT + 3])
+ck("끌올일수가 보인다", sh[RT + 4] == "7일", sh[RT + 4])
 ck("못 읽었다는 사실을 남긴다", any("목록" in x for x in f.logs), str(f.logs))
+# 서버 목록을 못 읽은 것은 '등록 안 됨'이 아니다 — 빨간 미등록으로 칠하면
+# 멀쩡한 등록을 지우러 간다.
+ck("목록 못 읽으면 상태 = 확인 불가", all(r[S] == "확인 불가" for r in rows),
+   str([r[S] for r in rows]))
 
 print("\n=== 2. 서버 목록이 있으면 그쪽 값이 우선 ===")
 data = {"user_keywords": [
@@ -111,11 +116,18 @@ f = _Fake(EXCEL_ROUTES, [])
 populate(f, data)
 rows = rows_of(f)
 sh = [r for r in rows if r[0] == "샤넬"][0]
-ck("서버 가격이 쓰인다", sh[2] == "700000~", sh[2])
-ck("id 가 채워진다", sh[6] == "u1", sh[6])
+ck("서버 가격이 쓰인다", sh[RT + 1] == "700000~", sh[RT + 1])
+ck("id 가 채워진다", sh[ID] == "u1", sh[ID])
 ck("서버에 없는 키워드도 함께 보인다", any(r[0] == "구찌" for r in rows),
    str([r[0] for r in rows]))
 ck("중복 줄이 없다", len(rows) == 2, f"{len(rows)}행")
+ck("서버에 있는 줄 = 서버 등록", sh[S] == "서버 등록", sh[S])
+gu = [r for r in rows if r[0] == "구찌"][0]
+ck("앱 경로인데 서버에 없으면 = ⚠ 미등록", gu[S] == "⚠ 미등록", gu[S])
+_gi = f.alertTable.item([r[0] for r in rows].index("구찌"), S)
+ck("미등록은 굵게", _gi.font().bold())
+_si = f.alertTable.item([r[0] for r in rows].index("샤넬"), S)
+ck("서버 등록은 보통 굵기", not _si.font().bold())
 
 print("\n=== 3. 스윕 대기열도 함께 ===")
 f = _Fake(EXCEL_ROUTES, [{"keyword": "롤렉스", "min": 1000000, "max": None,
@@ -124,6 +136,13 @@ populate(f, None)
 kw = [r[0] for r in rows_of(f)]
 ck("대기열 키워드가 보인다", "롤렉스" in kw, str(kw))
 ck("셋이 다 보인다", len(kw) == 3, str(kw))
+rl = [r for r in rows_of(f) if r[0] == "롤렉스"][0]
+ck("대기열 줄 = 스윕 대기", rl[S] == "스윕 대기", rl[S])
+# 라우터가 스윕으로 배정한 키워드는 대기열에 없어도 미등록이 아니다
+f = _Fake({"롤렉스": {"keyword": "롤렉스", "route": "sweep", "cond": {}}}, [])
+populate(f, {"user_keywords": []})
+rl = rows_of(f)[0]
+ck("스윕 배정 키워드 = 스윕 대기(미등록 아님)", rl[S] == "스윕 대기", rl[S])
 
 print("\n=== 4. 아무것도 없으면 그대로 둔다 ===")
 f = _Fake({}, [])
