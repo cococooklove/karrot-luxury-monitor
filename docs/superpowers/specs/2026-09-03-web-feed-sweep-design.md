@@ -67,7 +67,7 @@
 - `RuleTable.verdict(title, price, content)` — 조건표 400줄, 본문 포함. `drop_wanted` 그대로.
 - HIT → 텔레그램 알림(기존 `notify.match_line`, 시간당 상한 공유) + watch DB `add_from_matches(source="feed")`.
 - WATCH(상한 초과) → 알림 없이 watch DB 에만(값이 내려오면 `entered_range` 로 알림 — 기존 `mark_range_entries` 흐름).
-- CUT → 버림. seen 에도 안 남긴다(값이 내려와 조건 안에 들어오면 그때 처음 알린다 — 앱 스윕과 동일).
+- CUT → 버림. 워터마크·seen 에는 남긴다 — CUT 사유(브랜드·제외어·최소가 미달)는 가격 인하로 되살아나지 않는다.
 - 중복: watch DB 의 url(href) 기준. 앱 알림·앱 스윕과 같은 매물이면 한 번만 알린다(`already_notified`).
 
 ### 3.5 속도·프록시·부하

@@ -54,10 +54,20 @@ ap.add_argument("--proxy")
 ap.add_argument("--minutes", type=int, default=60)
 ap.add_argument("--rps", type=float, default=1.0)
 a = ap.parse_args()
+# 0·음수를 그대로 나누면 즉시 죽거나(ZeroDivision) 음수 sleep 로 터진다.
+rps = max(0.01, a.rps)
 regions = load_sweep_regions("./OUT.json")
 stat = {"ok": 0, "empty": 0, "block": 0, "err": 0, "fallback": 0, "bytes": 0, "sec": []}
 t_end = time.time() + a.minutes * 60
 i = 0
+
+
+def save():
+    """중간 결과를 파일에 남긴다 — 한 시간짜리 실측이 Ctrl-C 나 끊긴 RDP 로
+    통째로 날아가면 다시 한 시간을 태워야 한다."""
+    os.makedirs("./data", exist_ok=True)
+    with open("./data/feed_smoke.json", "w", encoding="utf-8") as f:
+        json.dump(stat, f, ensure_ascii=False)
 
 
 def timed_get(url, proxy, timeout):
@@ -80,10 +90,13 @@ while time.time() < t_end:
     arts, kind = W.fetch_feed(name, rid, 31, proxy=a.proxy, get=timed_get)
     stat[kind.lower()] = stat.get(kind.lower(), 0) + 1
     if i % 50 == 0:
+        # 전부 예외로 떨어지면 sec 이 비어 있다 — 요약을 찍다가 죽으면
+        # 실측이 거기서 끝난다(그게 알고 싶던 사실인데도).
+        avg = (sum(stat["sec"]) / len(stat["sec"])) if stat["sec"] else 0.0
         print(f"{i}회 ok={stat['ok']} empty={stat['empty']} block={stat['block']} err={stat['err']} "
-              f"평균 {sum(stat['sec'])/len(stat['sec']):.2f}s 평균크기 {stat['bytes']//max(1,i)//1024}KB", flush=True)
-    time.sleep(1.0 / a.rps)
+              f"평균 {avg:.2f}s 평균크기 {stat['bytes']//max(1,i)//1024}KB", flush=True)
+        save()
+    time.sleep(1.0 / rps)
 
-os.makedirs("./data", exist_ok=True)
-json.dump(stat, open("./data/feed_smoke.json", "w"), ensure_ascii=False)
+save()
 print("done", {k: v for k, v in stat.items() if k != "sec"})

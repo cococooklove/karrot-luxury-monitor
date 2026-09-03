@@ -367,6 +367,7 @@ command="powershell -NoProfile -ExecutionPolicy Bypass -File C:\karrot_deploy.ps
 ## 6. 테스트 순서
 0. `python tools/feed_smoke.py --minutes 60` → ok 비율 95% 이상이면 피드 켜 둔다
 1. `python main.py --headless --once` → 유효계정 수·매칭 확인
+   (`--once` 는 피드를 앞 10동만 돈다 — 살아 있는지 보는 스모크다. 전 지역은 상시 실행이 돈다)
 2. 키워드 등록(계정당 최대 30개): GUI 조건 탭 표에 적고 [조건 적용] 1회 — 조건표의 브랜드만 등록되고, 조건표에 없는 등록은 자동 삭제된다
 3. 텔레그램 수신 확인
 4. 서버 재부팅 1회 → RDP 접속 → `powershell -ExecutionPolicy Bypass -File C:\karrot\ldboot.ps1`
