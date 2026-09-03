@@ -728,6 +728,65 @@ ev = tr2.check_one("1239148676", _Api(now0 + 500), now=now0 + 2)     # boostedAt
 ck("boostedAt 상승 → republished", [e["kind"] for e in ev] == ["republished"], str(ev))
 ck("republish_count 가 1 올라감", st2.get("1239148676")["republish_count"] == 1)
 
+# ── 슬러그 href → 숫자 id 재키잉(스펙 §7) ──
+# 피드는 슬러그 href 로, 앱 알림은 숫자 id 로 같은 매물을 본다. 첫 상세 조회에서
+# 숫자 id 를 얻으면 그때 행을 옮겨야 두 경로가 한 행으로 합쳐진다.
+HREF = "https://www.daangn.com/kr/buy-sell/%EB%9D%BC%ED%93%A8%EB%A7%88-hxu5o63mwas7/"
+NUM = "1239148676"
+
+
+class _PubApi:
+    """공개 상세는 어떤 키로 물어도 숫자 id(dbId)를 돌려준다."""
+
+    def fetch(self, key):
+        return aw.normalize_public(lj, key)
+
+
+d3 = tempfile.mkdtemp(); st3 = aw.WatchStore(os.path.join(d3, "w.db")); tr3 = aw.WatchTracker(st3)
+now3 = int(time.time())
+tr3.add_from_matches([{"article_id": HREF, "title": "라퓨마", "price": "15,000원",
+                       "time": now3 - 100, "url": HREF, "keyword": "라퓨마"}],
+                     now=now3, source="feed")
+ck("피드 행은 다음 틱에 곧바로 조회한다(next_check == now)",
+   st3.get(HREF)["next_check"] == now3, str(st3.get(HREF)["next_check"] - now3))
+ck("피드 행에도 가격 이력이 남는다", len(st3.price_history(HREF)) == 1)
+ev3 = tr3.check_one(HREF, _PubApi(), now=now3 + 1)
+ck("첫 조회는 기준선 — 이벤트 없음", ev3 == [], str(ev3))
+ck("숫자 id 행이 생긴다", st3.get(NUM) is not None)
+ck("href 행은 사라진다", st3.get(HREF) is None)
+ck("가격 이력도 따라 옮긴다",
+   len(st3.price_history(NUM)) == 1 and st3.price_history(HREF) == [],
+   str(st3.price_history(NUM)))
+ck("url 은 슬러그 href 를 지킨다(피드 재방출 중복 판정용)",
+   st3.get(NUM)["url"] == HREF, str(st3.get(NUM)["url"]))
+ck("first_seen·키워드·출처는 그대로 따라온다",
+   st3.get(NUM)["first_seen"] == now3 and st3.get(NUM)["keyword"] == "라퓨마"
+   and st3.get(NUM)["source"] == "feed", str(st3.get(NUM)))
+ck("get_by_url 로 href 를 다시 찾는다", (st3.get_by_url(HREF) or {}).get("id") == NUM)
+ck("모르는 url 은 None", st3.get_by_url("https://d/none") is None)
+
+# 앱이 먼저 본 매물을 피드가 다시 들고 오면: 합치되 알리지 않는다.
+d4 = tempfile.mkdtemp(); st4 = aw.WatchStore(os.path.join(d4, "w.db")); tr4 = aw.WatchTracker(st4)
+now4 = int(time.time())
+tr4.add_from_matches([{"article_id": NUM, "title": "앱이 먼저", "price": "15,000원",
+                       "time": now4 - 100, "url": "u"}], now=now4)
+tr4.check_one(NUM, _PubApi(), now=now4 + 1)          # 앱 행은 기준선까지 잡았다
+_app_row = dict(st4.get(NUM))
+tr4.add_from_matches([{"article_id": HREF, "title": "피드도 봤다", "price": "15,000원",
+                       "time": now4 - 100, "url": HREF}], now=now4 + 2, source="feed")
+ev4 = tr4.check_one(HREF, _PubApi(), now=now4 + 3)
+ck("중복은 이벤트가 아니다", ev4 == [], str(ev4))
+ck("중복 href 행은 지운다", st4.get(HREF) is None)
+ck("먼저 있던 숫자 행은 건드리지 않는다", st4.get(NUM) == _app_row, str(st4.get(NUM)))
+
+# 프록시 예산은 provider 로 목록을 다시 읽는다(설정·proxies.txt 변경 반영).
+pb = aw.ProxyBudget(provider=lambda: ["http://z"])
+ck("provider 전이면 직결", pb.next()[1] == "direct")
+pb.reload()
+ck("reload 가 provider 목록을 읽는다", pb.next()[1] == "http://z")
+ck("provider 없으면 reload 는 아무 일도 안 한다",
+   (lambda p: (p.reload(), p.next()[1])[1])(aw.ProxyBudget(["http://p9"])) == "http://p9")
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

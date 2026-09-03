@@ -173,13 +173,24 @@ class PublicArticleAPI:
 class ProxyBudget:
     """AccountBudget 의 자리 — 계정 대신 웹 프록시를 돌린다. 예산 상한 없음."""
 
-    def __init__(self, proxies=None, api_factory=None):
+    def __init__(self, proxies=None, api_factory=None, provider=None):
         self.proxies = [p for p in dict.fromkeys(proxies or []) if p]
         self._factory = api_factory or (lambda proxy: PublicArticleAPI(proxy=proxy))
+        self._provider = provider
         self._i = 0
 
     def reload(self) -> None:
-        pass
+        """프록시 목록을 다시 읽는다. provider 가 없으면 아무 일도 안 한다.
+
+        스윕 회차마다 불린다 — 설정 탭에서 웹 프록시를 고치거나 proxies.txt 를
+        갈아끼워도 프로세스를 재시작하지 않고 다음 회차부터 반영되라고 있다."""
+        if self._provider is None:
+            return
+        try:
+            got = self._provider()
+        except Exception:
+            return
+        self.proxies = [p for p in dict.fromkeys(got or []) if p]
 
     def remaining(self) -> int:
         return 1_000_000
@@ -351,6 +362,34 @@ class WatchStore:
                              (str(article_id),)).fetchone()
         return dict(r) if r else None
 
+    def get_by_url(self, url: str) -> dict | None:
+        """url 로 행을 찾는다 — 피드는 슬러그 href 로 같은 매물을 다시 낸다.
+
+        재키잉(rekey) 뒤 행의 id 는 숫자지만 url 은 href 그대로다. 커서를
+        잃어 같은 href 가 다시 올라와도 이걸로 '이미 본 매물'이 된다."""
+        u = str(url or "")
+        if not u:
+            return None
+        r = self._db.execute("SELECT * FROM watch WHERE url=? LIMIT 1",
+                             (u,)).fetchone()
+        return dict(r) if r else None
+
+    def rekey(self, old_id: str, new_id: str) -> None:
+        """href 로 들어온 행의 부속물을 숫자 id 로 옮기고 옛 행을 지운다.
+
+        watch 행 자체는 호출자가 새 id 로 upsert 한 뒤에 부른다 — 여기서
+        옮기는 건 가격 이력이고, 지우는 건 껍데기만 남은 옛 행이다.
+        UPDATE OR REPLACE 인 이유: 두 경로가 같은 초에 같은 값을 적어 뒀으면
+        (article_id, ts) 가 겹친다. 겹치면 새 쪽을 남긴다."""
+        old_id, new_id = str(old_id), str(new_id)
+        if not old_id or not new_id or old_id == new_id:
+            return
+        self._db.execute(
+            "UPDATE OR REPLACE price_history SET article_id=? WHERE article_id=?",
+            (new_id, old_id))
+        self._db.execute("DELETE FROM watch WHERE id=?", (old_id,))
+        self._db.commit()
+
     def due(self, now: int, limit: int) -> list[str]:
         rows = self._db.execute(
             f"SELECT id FROM watch WHERE {_ACTIVE_SQL} AND next_check<=? "
@@ -519,6 +558,11 @@ class WatchTracker:
                 published = 0
             tier = tier_for(published, now)
             price = parse_price_text(m.get("price"))
+            # 피드 행의 id 는 슬러그 href 다 — 숫자 id 는 첫 상세 조회에서만 나온다.
+            # FRESH_INTERVAL(1시간)을 기다리면 그 한 시간 동안 앱 경로가 같은
+            # 매물을 숫자 id 로 또 잡아 두 번 알린다. 다음 워치 스윕 틱(10분)이
+            # 곧바로 조회해 재키잉하도록 지금으로 당긴다.
+            first_check = now if source == "feed" else now + interval_for(tier)
             self.store.upsert({
                 "id": aid,
                 "title": m.get("title") or "",
@@ -530,7 +574,7 @@ class WatchTracker:
                 "published_at": published,
                 "first_seen": now,
                 "last_check": now,
-                "next_check": now + interval_for(tier),
+                "next_check": first_check,
                 "tier": tier,
                 "fail": 0,
                 "keyword": m.get("keyword") or "",
@@ -605,6 +649,21 @@ class WatchTracker:
             self.store.mark(article_id, tier=TIER_DEAD, fail=0, last_check=now)
             return events
 
+        # ── 슬러그 href 행을 숫자 id 로 옮긴다(스펙 §7) ──
+        # 피드는 href 로, 앱 알림은 숫자 id 로 같은 매물을 본다. 두 키가 각각
+        # 행을 만들면 같은 매물을 두 번 알린다. 숫자 id 는 첫 상세 조회에서만
+        # 나오므로(product.dbId) 그때 행을 옮겨 하나로 합친다.
+        target = str(article_id)
+        new_id = str(new.get("id") or "")
+        rekeyed = new_id.isdigit() and new_id != target
+        if rekeyed:
+            if self.store.get(new_id) is not None:
+                # 앱 경로가 먼저 본 매물이다. 이건 변동이 아니라 중복이므로
+                # 이벤트를 내지 않는다 — 먼저 있던 행이 진실이고 이 행은 껍데기다.
+                self.store.rekey(target, new_id)
+                return []
+            target = new_id
+
         tier = tier_for(new.get("published_at") or old.get("published_at") or 0, now)
         if new.get("status") == STATUS_CLOSED:
             tier = TIER_DEAD
@@ -614,10 +673,13 @@ class WatchTracker:
         changed = (isinstance(price, int) and isinstance(old_price, int)
                    and price != old_price and not seeding)
         self.store.upsert({
-            "id": str(article_id),
+            "id": target,
             "title": new.get("title") or old.get("title"),
             "region": new.get("region") or old.get("region"),
-            "url": new.get("url") or old.get("url"),
+            # 재키잉한 행의 url 은 슬러그 href 를 지킨다. 피드가 커서를 잃고 같은
+            # href 를 다시 내면 already_notified 가 url 로 찾아 중복을 막는다.
+            "url": (old.get("url") or new.get("url")) if rekeyed
+                   else (new.get("url") or old.get("url")),
             "price": price,
             "status": new.get("status"),
             "republish_count": new.get("republish_count") or 0,
@@ -635,8 +697,11 @@ class WatchTracker:
             "last_delta": (price - old_price) if changed
                           else (old.get("last_delta") or 0),
         })
+        if rekeyed:
+            # 새 행을 앉힌 **뒤에** 옮긴다 — 가격 이력이 잠깐도 주인을 잃지 않게.
+            self.store.rekey(article_id, target)
         if changed:
-            self.store.add_price(str(article_id), now, price)
+            self.store.add_price(target, now, price)
         return events
 
     def _note_failure(self, old, article_id, now) -> list[dict]:
