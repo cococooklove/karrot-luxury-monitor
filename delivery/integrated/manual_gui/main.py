@@ -2545,6 +2545,7 @@ class MainWindow(QMainWindow):
         manual_w = self._scroll(self._build_manual_tab())
         # 검색 스윕 스레드 핸들 — 탭은 없어졌지만 엔진은 라우터가 부린다.
         self.auto_monitor = None
+        self.feed_monitor = None
         # 매물 감시는 조건·결과·설정 세 탭으로 나뉜다. 한 탭에 접이식 네 개로
         # 쌓았던 동안 설정은 고급 패널·알림 창·계정 창 세 곳에 흩어졌고,
         # 클라는 어디를 펴야 하는지 몰랐다. 위젯은 한 함수가 다 만든다.
@@ -3066,7 +3067,7 @@ class MainWindow(QMainWindow):
     # 고급 패널 항목으로 스크롤한다). 대응 항목이 없는 칩은 여기 넣지 않는다 —
     # 없는 목적지를 지어내면 사용자가 엉뚱한 곳으로 간다.
     # 상태 한 줄의 조각 순서. 값은 _set_status 가 채운다.
-    STATUS_ORDER = ("token", "accounts", "coverage", "poll", "rules", "notify")
+    STATUS_ORDER = ("token", "accounts", "coverage", "poll", "rules", "feed", "notify")
 
     TAB_HELP = ("키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신.\n"
                 "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국.")
@@ -3570,7 +3571,8 @@ class MainWindow(QMainWindow):
                 policy, self._alert_poll_timer, self._watch_timer,
                 self._sweep_queue,
                 start_search_sweep=self._start_search_sweep,
-                stop_search_sweep=self._stop_search_sweep)
+                stop_search_sweep=self._stop_search_sweep,
+                start_feed=self._start_feed, stop_feed=self._stop_feed)
         except Exception as e:
             self._alog(f"[감시] 초기화 실패: {str(e)[:120]}")
         if self._supervisor is None:
@@ -4778,6 +4780,32 @@ class MainWindow(QMainWindow):
         _nw.addStretch(1)
         gv.addLayout(_nw)
 
+        # ── 웹 동 피드(계정 없이 발굴) ──
+        self.feedEnabledChk = QtWidgets.QCheckBox("동 피드 발굴 (계정 없음)", box); self.feedEnabledChk.setChecked(True)
+        self.feedCat31 = QtWidgets.QCheckBox("여성잡화", box); self.feedCat31.setChecked(True)
+        self.feedCat14 = QtWidgets.QCheckBox("남성패션/잡화", box); self.feedCat14.setChecked(True)
+        self.feedCat5 = QtWidgets.QCheckBox("여성의류", box); self.feedCat5.setChecked(False)
+        _fc = QtWidgets.QHBoxLayout(); _fc.setSpacing(10)
+        for w in (self.feedCat31, self.feedCat14, self.feedCat5): _fc.addWidget(w)
+        _fc.addStretch(1)
+        self.feedProxies = QtWidgets.QPlainTextEdit(box); self.feedProxies.setPlaceholderText("웹 프록시 한 줄에 하나 (비우면 proxies.txt)")
+        self.feedProxies.setMaximumHeight(72)
+        self.feedRps = QtWidgets.QDoubleSpinBox(box); self.feedRps.setRange(0.1, 5.0); self.feedRps.setDecimals(1); self.feedRps.setSingleStep(0.1); self.feedRps.setValue(1.0); self.feedRps.setFixedWidth(72)
+        self.feedRestMin = QtWidgets.QSpinBox(box); self.feedRestMin.setRange(0, 120); self.feedRestMin.setValue(2); self.feedRestMin.setFixedWidth(72)
+        self.sweepAppChk = QtWidgets.QCheckBox("앱 키워드 스윕(보완층, 스윕 계정만)", box); self.sweepAppChk.setChecked(False)
+        gv.addWidget(self._setting_row("동 피드", self.feedEnabledChk))
+        _fcw = QtWidgets.QWidget(box); _fcw.setLayout(_fc)
+        gv.addWidget(self._setting_row("카테고리", _fcw))
+        gv.addWidget(self._setting_row("웹 프록시", self.feedProxies))
+        gv.addWidget(self._setting_row("초당 요청/레인", self.feedRps))
+        gv.addWidget(self._setting_row("사이클 휴식(분)", self.feedRestMin))
+        gv.addWidget(self._setting_row("앱 스윕", self.sweepAppChk))
+        for w in (self.feedEnabledChk, self.feedCat31, self.feedCat14, self.feedCat5, self.sweepAppChk):
+            w.toggled.connect(lambda *_: self._save_alert_settings(self._feed_settings_patch()))
+        for w in (self.feedRps, self.feedRestMin):
+            w.valueChanged.connect(lambda *_: self._save_alert_settings(self._feed_settings_patch()))
+        self.feedProxies.textChanged.connect(lambda: self._save_alert_settings(self._feed_settings_patch()))
+
         self.autoExtra = QtWidgets.QLineEdit(box); self.autoExtra.setPlaceholderText("추가 키워드")
         self.autoExclude = QtWidgets.QLineEdit(box); self.autoExclude.setPlaceholderText("제외 키워드")
         self.autoMin = QtWidgets.QLineEdit(box); self.autoMin.setPlaceholderText("최소가"); self.autoMin.setFixedWidth(96)
@@ -4919,6 +4947,14 @@ class MainWindow(QMainWindow):
                 for leaf in getattr(self, "auto_area_leaves", []):
                     if leaf.data(0, Qt.ItemDataRole.UserRole) in want:
                         leaf.setCheckState(0, Qt.CheckState.Checked)
+            if s.get("feed_enabled") is not None: self.feedEnabledChk.setChecked(bool(s["feed_enabled"]))
+            cats = s.get("feed_categories")
+            if isinstance(cats, list):
+                self.feedCat31.setChecked(31 in cats); self.feedCat14.setChecked(14 in cats); self.feedCat5.setChecked(5 in cats)
+            if isinstance(s.get("feed_proxies"), list): self.feedProxies.setPlainText("\n".join(s["feed_proxies"]))
+            if s.get("feed_rps") is not None: self.feedRps.setValue(float(s["feed_rps"]))
+            if s.get("feed_rest_min") is not None: self.feedRestMin.setValue(int(s["feed_rest_min"]))
+            self.sweepAppChk.setChecked(sweep_app_enabled(s))
         except Exception as e:
             print(f"[스윕설정 복원 실패] {type(e).__name__}: {e}")
 
@@ -5533,6 +5569,58 @@ class MainWindow(QMainWindow):
         if am is not None and am.isRunning():
             am.stop()
             self._alog("[검색스윕] 정지 요청")
+
+    def _feed_settings_patch(self):
+        cats = [c for c, w in ((31, self.feedCat31), (14, self.feedCat14), (5, self.feedCat5)) if w.isChecked()]
+        return {
+            "feed_enabled": bool(self.feedEnabledChk.isChecked()),
+            "feed_categories": cats,
+            "feed_proxies": [ln.strip() for ln in self.feedProxies.toPlainText().splitlines() if ln.strip()],
+            "feed_rps": float(self.feedRps.value()),
+            "feed_rest_min": int(self.feedRestMin.value()),
+            "sweep_app_enabled": bool(self.sweepAppChk.isChecked()),
+        }
+
+    def _start_feed(self):
+        s = self._load_alert_settings()
+        if not s.get("feed_enabled", FEED_DEFAULTS["feed_enabled"]):
+            self._alog("[피드] 설정에서 꺼져 있음"); return
+        if len(self._alert_rules.get().rules) == 0:
+            self._alog("[피드] 조건표가 비어 있어 시작하지 않습니다"); return
+        fm = self.feed_monitor
+        if fm is not None and fm.isRunning():
+            return
+        try:
+            cfg = feed_cfg(s, self._notify, already_notified=self._already_notified, log=self._alog)
+            from daangn.feed_monitor import FeedMonitor
+            self.feed_monitor = FeedMonitor(self, cfg)
+            self.feed_monitor.log.connect(self._alog)
+            self.feed_monitor.found.connect(self._on_feed_found)
+            self.feed_monitor.status.connect(lambda t: self._set_status("feed", t, "ok"))
+            self.feed_monitor.start()
+            self._set_status("feed", f"피드 {len(cfg['regions'])}동 · 레인 {max(1, len(cfg['proxies']))}", "ok")
+        except Exception as e:
+            self._alog(f"[피드] 시작 실패: {str(e)[:120]}")
+
+    def _stop_feed(self):
+        fm = self.feed_monitor
+        if fm is not None and fm.isRunning():
+            fm.stop()
+        self._set_status("feed", "", "off")
+
+    def _on_feed_found(self, payload):
+        """피드가 찾은 매물 → 워치리스트(추적) + 결과 표. GUI 스레드에서 불린다.
+
+        _on_sweep_found 은 대기열 키워드에서 라벨을 다시 찾지만, 피드는 이미
+        payload["keyword"] 에 매칭된 조건표 라벨(브랜드)을 실어 보낸다 —
+        그대로 쓴다."""
+        try:
+            norm = sweep_found_to_match(payload, payload.get("keyword") or "")
+            if norm and self._watch_tracker:
+                if self._watch_tracker.add_from_matches([norm], source="feed"):
+                    self._refresh_listing_table()
+        except Exception as e:
+            self._alog(f"[피드] 추적 등록 실패: {str(e)[:80]}")
 
     def _resync_search_sweep(self):
         """돌고 있는 스윕이 낡은 키워드 집합인지 보고, 다르면 갈아끼운다.

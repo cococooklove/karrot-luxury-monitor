@@ -37,13 +37,16 @@ class SupervisorPolicy:
 
 class SupervisorController:
     def __init__(self, policy, poll_timer, sweep_timer, sweep_queue,
-                 start_search_sweep, stop_search_sweep):
+                 start_search_sweep, stop_search_sweep,
+                 start_feed=None, stop_feed=None):
         self.policy = policy
         self.poll_timer = poll_timer
         self.sweep_timer = sweep_timer
         self.sweep_queue = sweep_queue
         self._start_search = start_search_sweep
         self._stop_search = stop_search_sweep
+        self._start_feed = start_feed or (lambda: None)
+        self._stop_feed = stop_feed or (lambda: None)
         self._running = False
 
     def is_running(self) -> bool:
@@ -59,12 +62,14 @@ class SupervisorController:
         # 요청만 쓰고 아무것도 안 잡는다.
         if len(self.sweep_queue):
             self._start_search()
+        self._start_feed()
 
     def stop(self) -> None:
         self._running = False
         self.poll_timer.stop()
         self.sweep_timer.stop()
         self._stop_search()
+        self._stop_feed()
 
     def retune(self) -> None:
         """정책 값이 바뀌었을 때(주기 변경·야간 진입) 간격만 갈아끼운다."""

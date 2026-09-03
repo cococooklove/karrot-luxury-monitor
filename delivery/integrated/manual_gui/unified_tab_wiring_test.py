@@ -959,6 +959,22 @@ if _win is not None:
     _win._router, m.ask_yes_no = _sv4
     _win.alertLog.clear()
 
+    # ── 웹 동 피드 발굴(계정 0) 배선 ──
+    ck("피드 설정 위젯", all(hasattr(_win, a) for a in (
+        "feedEnabledChk", "feedCat31", "feedCat14", "feedCat5", "feedProxies", "feedRps", "feedRestMin", "sweepAppChk")))
+    ck("피드 기본값: 켬·31·14·rps 1·휴식 2·앱 스윕 꺼짐",
+       _win.feedEnabledChk.isChecked() and _win.feedCat31.isChecked() and _win.feedCat14.isChecked()
+       and not _win.feedCat5.isChecked() and _win.feedRps.value() == 1.0 and _win.feedRestMin.value() == 2
+       and not _win.sweepAppChk.isChecked())
+    p = _win._feed_settings_patch()
+    ck("설정 패치 키", set(p) == {"feed_enabled", "feed_categories", "feed_proxies", "feed_rps", "feed_rest_min", "sweep_app_enabled"}, str(sorted(p)))
+    ck("피드 수명 메서드", all(callable(getattr(_win, a, None)) for a in ("_start_feed", "_stop_feed", "_on_feed_found")))
+    ck("컨트롤러가 피드를 같이 켜고 끈다",
+       _win._supervisor is not None and _win._supervisor._start_feed == _win._start_feed
+       and _win._supervisor._stop_feed == _win._stop_feed)
+    ck("피드 어댑터 모듈", __import__("daangn.feed_monitor", fromlist=["FeedMonitor"]).FeedMonitor is not None)
+    ck("상태줄에 feed 항목", "feed" in _win.STATUS_ORDER)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:
