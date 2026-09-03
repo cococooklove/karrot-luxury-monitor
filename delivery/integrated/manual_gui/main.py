@@ -1629,7 +1629,8 @@ QGroupBox#sectionBox:checked { color: #1F1B16; }
 QGroupBox#sectionBox:hover { color: #9A7B2E; }
 QGroupBox#sectionBox::indicator { width: 0px; height: 0px; margin: 0; border: none; }
 /* 카드 첫 섹션 — 카드 머리글 바로 아래라 구분선이 필요 없다. */
-QGroupBox#sectionBox[firstInCard="true"] { border-top: none; margin-top: 0; padding-top: 6px; }
+QGroupBox#sectionBox[firstInCard="true"] { border-top: none; margin-top: 2px; }
+QGroupBox#sectionBox[firstInCard="bare"] { border-top: none; margin-top: 0; padding-top: 0; }
 
 /* 조건 탭 — 단계 카드. 회색 바탕 위에 흰 카드 두 장(① 조건, ② 지역)이
    순서대로 놓인다. 접이식 줄 세 개가 한 면에 늘어서 있던 동안 어디가 시작이고
@@ -2464,7 +2465,9 @@ class MainWindow(QMainWindow):
         table = self._alert_rules.get()
         rules = table.rules
         src = table.source or ""
-        text = table.detail()
+        # 섹션 제목이 '조건 없음'을 이미 말한다 — 본문은 다음 할 일을 말한다.
+        text = (table.detail() if rules
+                else "아직 넣은 엑셀이 없습니다. [엑셀로 조건 넣기]로 시작하세요.")
         if rules and src:
             text += f"    ·    파일: {os.path.basename(src)}"
         self.rulesSummary.setText(text)
@@ -2485,8 +2488,8 @@ class MainWindow(QMainWindow):
         box = getattr(self, "condBox", None)
         if box is not None:
             n_b = len(brands(rules)) if rules else 0
-            box._baseTitle = (f"감시 조건 · 조건 {len(rules)}개 · 브랜드 {n_b}개"
-                              if rules else "감시 조건 · 없음 — 전부 알립니다")
+            box._baseTitle = (f"조건 {len(rules)}개 · 브랜드 {n_b}개"
+                              if rules else "조건 없음 — 브랜드 매물을 전부 알립니다")
             self._sync_box_visible(box, box.isChecked())
 
     def _sync_box_visible(self, box, on):
@@ -2507,6 +2510,10 @@ class MainWindow(QMainWindow):
         for c in box.findChildren(QtWidgets.QWidget):
             if c.objectName().startswith("qt_") or _kept_hidden(c):
                 continue
+            # 표·트리의 머리글은 뷰가 스스로 관리한다(setHeaderHidden). 여기서
+            # 켜 버리면 숨긴 머리글이 되살아난다.
+            if isinstance(c, QtWidgets.QHeaderView):
+                continue
             c.setVisible(on)
         # 체크박스 대신 화살표로 접힘을 알린다 — 설정을 켜고 끄는 것이 아니라
         # 펼치고 접는 것이므로 체크 표시는 뜻이 어긋난다.
@@ -2515,7 +2522,7 @@ class MainWindow(QMainWindow):
             if base is None:
                 base = box.title().lstrip("▸▾ ").strip()
                 box._baseTitle = base
-            box.setTitle(("▾  " if on else "▸  ") + base)
+            box.setTitle((("▾  " if on else "▸  ") + base) if base else "")
         # 자식을 숨겨도 레이아웃 여백은 남는다 — 접은 그룹이 빈 상자로 화면을
         # 먹는다. 접히면 제목 줄 높이까지 줄인다.
         lay = box.layout()
@@ -2530,11 +2537,32 @@ class MainWindow(QMainWindow):
         box.setMaximumHeight(16777215 if on
                              else box.fontMetrics().height() + 24)
 
-    def _collapsible(self, title, inner, checked=False):
+    def _step_card(self, n, title, sub):
+        """단계 카드 한 장 — 번호 배지 + 제목 + 한 줄 설명. 안에 넣을 레이아웃을
+        같이 돌려준다. 카드는 순서를 말하고, 사용자는 위에서 아래로 읽는다."""
+        card = QtWidgets.QFrame()
+        card.setObjectName("stepCard")
+        cl = QtWidgets.QVBoxLayout(card)
+        cl.setContentsMargins(22, 20, 22, 20); cl.setSpacing(12)
+        head = QtWidgets.QHBoxLayout(); head.setSpacing(12)
+        badge = QtWidgets.QLabel(str(n)); badge.setObjectName("stepBadge")
+        head.addWidget(badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        tv = QtWidgets.QVBoxLayout(); tv.setSpacing(2)
+        t = QtWidgets.QLabel(title); t.setObjectName("stepTitle")
+        d = QtWidgets.QLabel(sub); d.setObjectName("stepSub"); d.setWordWrap(True)
+        tv.addWidget(t); tv.addWidget(d)
+        head.addLayout(tv, 1)
+        cl.addLayout(head)
+        return card, cl
+
+    def _collapsible(self, title, inner, checked=False, first=False):
         """접이식 그룹 한 덩어리. 자주 안 보는 것을 화면에서 치우되 지우지는
-        않는다 — 안의 위젯은 그대로 살아 있어 갱신 코드가 안 바뀐다."""
+        않는다 — 안의 위젯은 그대로 살아 있어 갱신 코드가 안 바뀐다.
+        first=True 는 카드 머리글 바로 아래 오는 섹션 — 위 구분선을 뺀다."""
         box = QtWidgets.QGroupBox(title)
         box.setObjectName("sectionBox")
+        if first:
+            box.setProperty("firstInCard", "true" if title else "bare")
         box.setCheckable(True)
         box.setChecked(bool(checked))
         box.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -2688,7 +2716,7 @@ class MainWindow(QMainWindow):
                 _c, QtWidgets.QHeaderView.ResizeMode.Stretch if _c == ALERT_COL_KEYWORD
                 else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.alertTable.setShowGrid(False)
-        self.alertTable.setMinimumHeight(260)
+        self.alertTable.setMinimumHeight(320)
         # id 는 서버 내부 식별자다 — 사람이 읽을 값이 아니다. 열은 남긴다
         # (인덱스 상수와 셀 생성 함수가 쓴다). 화면에서만 감춘다.
         self.alertTable.setColumnHidden(ALERT_COL_ID, True)
@@ -2721,25 +2749,42 @@ class MainWindow(QMainWindow):
         # ── 조건 페이지: 조건표 → 훑을 지역 → 등록 상태 ──
         # 등록 상태는 클라가 넣은 조건이 아니라 시스템이 당근에 올린 결과다.
         # 조건과 같은 상자에 두면 둘을 같은 것으로 읽는다 — 상자를 가른다.
+        # 두 단계 카드다: ① 조건(엑셀 넣기 → 등록된 조건 표) ② 지역. 접이식
+        # 줄 세 개가 한 면에 늘어서 있던 동안 무엇이 먼저고 무엇이 필수인지
+        # 안 보였다. 카드가 순서를, 배지가 단계를 말한다.
         rules_w = QtWidgets.QWidget()
-        rv = QtWidgets.QVBoxLayout(rules_w); rv.setContentsMargins(16, 14, 16, 14); rv.setSpacing(10)
-        self.condBox = self._collapsible("감시 조건", cond_v, checked=True)
-        rv.addWidget(self.condBox)
-        self.areaBox = self._collapsible("훑을 지역", sweep, checked=True)
-        rv.addWidget(self.areaBox)
+        rules_w.setObjectName("rulesPage")
+        rv = QtWidgets.QVBoxLayout(rules_w); rv.setContentsMargins(20, 18, 20, 18); rv.setSpacing(14)
+        card1, c1 = self._step_card(
+            1, "감시 조건",
+            "엑셀 한 장으로 브랜드와 조건을 넣습니다. 엑셀에서 고친 뒤에는 [다시 읽기]를 누르세요.")
+        self.condBox = self._collapsible("감시 조건", cond_v, checked=True, first=True)
+        c1.addWidget(self.condBox)
         reg_v = QtWidgets.QVBoxLayout()
         # 이 표는 조건표의 복사본이 아니라 '서버에 실제 걸렸나'를 보는 창이다.
         # 이름·설명이 그걸 말하지 않으면 엑셀이 있는데 왜 또 있냐는 질문이 온다.
         _rh = QtWidgets.QLabel(
             "엑셀 조건 ≠ 서버 등록. 빨간 <b>미등록</b>은 조건은 있지만 당근에 아직"
             " 안 올라간 키워드 — 앱 알림이 안 오는 첫 번째 이유입니다.")
+        _rh.setObjectName("mutedNote")
         _rh.setWordWrap(True)
-        _rh.setStyleSheet("color: #555;")
         reg_v.addWidget(_rh)
+        self.alertSubLabel.setObjectName("mutedNote")
         reg_v.addWidget(self.alertSubLabel)
         reg_v.addWidget(self.alertTable, 1)
-        self.regBox = self._collapsible("당근 서버 등록 상태", reg_v, checked=True)
-        rv.addWidget(self.regBox, 1)
+        self.regBox = self._collapsible("등록된 감시 조건 — 당근 서버 등록 상태",
+                                        reg_v, checked=True)
+        c1.addWidget(self.regBox, 1)
+        rv.addWidget(card1)
+
+        card2, c2 = self._step_card(
+            2, "지역 선택",
+            "고른 지역만 훑습니다. 아무것도 안 고르면 서울·경기를 훑습니다.")
+        # 카드 제목이 곧 섹션 제목이다 — 같은 말을 한 줄 아래 또 쓰지 않는다.
+        self.areaBox = self._collapsible("", sweep, checked=True, first=True)
+        c2.addWidget(self.areaBox)
+        rv.addWidget(card2)
+        rv.addStretch(1)
 
         # ── 설정 페이지: 알림(인라인) → 계정·프록시(창) → 고급(접힘) ──
         settings_w = QtWidgets.QWidget()
@@ -4044,12 +4089,15 @@ class MainWindow(QMainWindow):
                     while p:                     # 매칭 리프의 상위 펼침
                         p.setExpanded(True); p = p.parent()
         search.textChanged.connect(do_filter)
-        v.addWidget(search)
 
-        hb = QtWidgets.QHBoxLayout(); hb.setSpacing(6)
-        ball = QtWidgets.QPushButton("전체 선택", panel)
-        bclr = QtWidgets.QPushButton("전체 해제", panel)
+        # 검색·전체 선택/해제·선택 수를 한 줄에 — 트리 위 두 줄이 세로로
+        # 쌓이면 지역 목록이 화면 아래로 밀린다.
+        hb = QtWidgets.QHBoxLayout(); hb.setSpacing(8)
+        hb.addWidget(search, 1)
+        ball = QtWidgets.QPushButton("전체 선택", panel); ball.setObjectName("ghostBtn")
+        bclr = QtWidgets.QPushButton("전체 해제", panel); bclr.setObjectName("ghostBtn")
         cnt = QtWidgets.QLabel("선택 0", panel)
+        cnt.setStyleSheet("color:#8A6D1F; font-weight:800; padding:0 6px;")
         ball.clicked.connect(lambda: [l.setCheckState(0, Qt.CheckState.Checked)
                                       for l in leaves if not l.isHidden()])
         bclr.clicked.connect(lambda: [l.setCheckState(0, Qt.CheckState.Unchecked)
@@ -4064,7 +4112,7 @@ class MainWindow(QMainWindow):
             cnt.setText(f"선택 {n}")
         timer.timeout.connect(do_count)
         tree.itemChanged.connect(lambda *_: timer.start())
-        hb.addWidget(ball); hb.addWidget(bclr); hb.addStretch(1); hb.addWidget(cnt)
+        hb.addWidget(ball); hb.addWidget(bclr); hb.addWidget(cnt)
         v.addLayout(hb)
         v.addWidget(tree, 1)
         return panel
@@ -4087,6 +4135,7 @@ class MainWindow(QMainWindow):
 
         # 지역 — 미선택이면 기본 지역(서울·경기). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
+        self.autoAreaTree.setHeaderHidden(True)     # 카드 제목이 '지역 선택'을 이미 말한다
         area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
         area.setMaximumHeight(280)
         gv.addWidget(area)
@@ -4104,8 +4153,9 @@ class MainWindow(QMainWindow):
             "(서울·경기)만 훑는다.")
         _nw = QtWidgets.QHBoxLayout(); _nw.setSpacing(8)
         _nw.addWidget(self.autoNationwide)
-        _nw.addWidget(QtWidgets.QLabel(
-            f"아무것도 안 고르면 서울·경기 {_dflt_n}동을 훑습니다"))
+        _nl = QtWidgets.QLabel(f"아무것도 안 고르면 서울·경기 {_dflt_n}동을 훑습니다")
+        _nl.setObjectName("mutedNote")
+        _nw.addWidget(_nl)
         _nw.addStretch(1)
         gv.addLayout(_nw)
 
