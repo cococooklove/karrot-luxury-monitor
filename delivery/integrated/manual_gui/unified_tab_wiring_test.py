@@ -195,62 +195,35 @@ if _win is not None:
            not any(b.title() == "지역 훑기"
                    for b in _win.areaBox.findChildren(_QW.QGroupBox)))
         _win.advancedBox.setChecked(False)
-    # ── 상태칩 → 대응 항목 (설계 §1: 칩 클릭은 해당 항목이 있는 탭으로 데려간다) ──
-    ck("상태칩 존재",
-       set(getattr(_win, "_chips", {}))
-       == {"token", "accounts", "coverage", "poll", "rules"},
-       str(sorted(getattr(_win, "_chips", {}))))
-    ck("칩 목적지가 실재하는 위젯",
-       all(getattr(_win, a, None) is not None
-           for a in _win.CHIP_TARGETS.values()),
-       str(_win.CHIP_TARGETS))
-    # 목적지는 어느 탭·어느 상자에 있어도 된다 — on_chip_clicked 가 탭을 바꾸고
-    # 접힌 상자를 편다. 칩은 결과 탭에, 목적지는 조건·설정 탭에 있다.
+    # ── 상태 한 줄 (결과 탭에 누를 것은 감시 시작뿐) ──
+    ck("상태칩 버튼·현황 상자 없음",
+       not hasattr(_win, "_chips") and not hasattr(_win, "on_chip_clicked")
+       and not hasattr(_win, "dashBox"))
+    ck("상태줄은 라벨", isinstance(_win.statusLine, _QW.QLabel))
+
     def _tab_of(wdg):
         for _i in range(_win.tabs.count()):
             if wdg in _win.tabs.widget(_i).findChildren(_QW.QWidget):
                 return _win.tabs.tabText(_i)
         return None
-    ck("칩 목적지는 탭 안에",
-       all(_tab_of(getattr(_win, a)) is not None
-           for a in _win.CHIP_TARGETS.values()), str(_win.CHIP_TARGETS))
-    ck("탭이 스크롤 영역 안에 있다",
-       _win._enclosing_scroll(_win.autoAccountsBtn) is not None)
-    _win.tabs.setCurrentIndex(1)
-    _moved = _win.on_chip_clicked("token")
-    ck("토큰 칩 → 설정 탭으로 간다",
-       _moved and _win.tabs.tabText(_win.tabs.currentIndex()) == "설정",
-       _win.tabs.tabText(_win.tabs.currentIndex()))
-    ck("토큰 칩 → 계정+프록시로 데려간다",
-       _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
-    ck("목적지는 보인다", not _win.autoAccountsBtn.isHidden())
-    ck("이미 그 탭이어도 데려간다", _win.on_chip_clicked("accounts")
-       and _win.focusWidget() is _win.autoAccountsBtn, str(_win.focusWidget()))
-    _win.condBox.setChecked(False)
-    _win.tabs.setCurrentIndex(1)
-    ck("조건 칩 → 조건 탭, 접힌 상자를 편다", _win.on_chip_clicked("rules")
-       and _win.tabs.tabText(_win.tabs.currentIndex()) == "조건"
-       and _win.condBox.isChecked() and _win.focusWidget() is _win.alertRulesBtn,
-       f"{_win.tabs.tabText(_win.tabs.currentIndex())} / {_win.focusWidget()}")
-    _win.tabs.setCurrentIndex(1)
-    # 커버 모드·폴링 주기는 화면에서 뺐다 — 칩은 값만 보여주고 데려가지 않는다.
-    ck("커버리지·폴링 칩은 목적지가 없다",
-       "coverage" not in _win.CHIP_TARGETS and "poll" not in _win.CHIP_TARGETS)
+    _rp = next(_win.tabs.widget(_i) for _i in range(_win.tabs.count())
+               if _win.tabs.tabText(_i) == "결과")
+    _btns = [b for b in _rp.findChildren(_QW.QPushButton)
+             if b.objectName() != "filterChip"]
+    ck("결과 탭 버튼은 감시 시작 하나", _btns == [_win.watchToggleBtn],
+       str([b.text() for b in _btns]))
     ck("커버 모드·주기 위젯은 살아 있되 숨김",
        not _win.alertCoverMode.isVisibleTo(_win.areaBox)
        and not _win.alertPollInterval.isVisibleTo(_win.areaBox))
-    # 대응 항목 없는 칩은 아무 데도 데려가지 않는다(엉뚱한 목적지보다 낫다).
-    ck("추적중은 목적지가 없다", "watch" not in _win.CHIP_TARGETS)
-    ck("모르는 칩은 무시", _win.on_chip_clicked("watch") is False)
     _win.advancedBox.setChecked(False)
-    # 칩 문구는 헬스 갱신이 채운다(자격증명 없어도 크래시 없이 값이 바뀐다).
+    # 상태줄 문구는 헬스 갱신이 채운다(자격증명 없어도 크래시 없이 값이 바뀐다).
     _win._refresh_alert_health()
-    ck("헬스 갱신이 칩 문구를 채운다",
-       _win._chips["token"].text().startswith("토큰")
-       and _win._chips["accounts"].text().startswith("계정")
-       and _win._chips["coverage"].text().startswith("커버리지")
-       and "폴링" in _win._chips["poll"].text(),
-       " / ".join(c.text() for c in _win._chips.values()))
+    _st = _win.statusLine.text()
+    ck("헬스 갱신이 상태줄을 채운다",
+       all(k in _st for k in ("토큰", "계정", "커버리지", "폴링", "텔레그램")), _st)
+    _win._update_coverage([("a", "역삼동", 39), ("b", "정자동", 39)])
+    ck("커버 조회가 상태줄 %를 채운다", "커버리지 1%" in _win.statusLine.text(),
+       _win.statusLine.text())
 
     ck("감시 토글 핸들러", callable(getattr(_win, "on_watch_toggle", None)))
     ck("라우터 속성", hasattr(_win, "_router"))
@@ -472,8 +445,8 @@ if _win is not None:
            _win.notifyToken, _win.autoAccountsBtn, _win.alertDelAllBtn)))
     ck("감시 시작 버튼이 매물 표보다 위",
        _y(_win.watchToggleBtn) < _y(_win.listingTable))
-    # 제 탭이 생긴 상자는 펴 두고, 칩이 요약하는 현황과 되돌리기(고급)만 접는다.
-    for _n, _title, _open in (("dashBox", "현황", False), ("condBox", "감시 조건", True),
+    # 제 탭이 생긴 상자는 펴 두고, 되돌리기(고급)만 접는다.
+    for _n, _title, _open in (("condBox", "감시 조건", True),
                               ("areaBox", "훑을 지역", True),
                               ("regBox", "당근 서버 등록 상태", True),
                               ("advancedBox", "고급", False), ("logBox", "로그", True)):

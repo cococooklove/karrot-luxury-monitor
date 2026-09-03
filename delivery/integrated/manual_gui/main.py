@@ -1642,6 +1642,18 @@ QLabel#stepBadge { background: #9A7B2E; color: #FFFFFF; border-radius: 14px; min
 QLabel#stepTitle { color: #1F1B16; font-size: 19px; font-weight: 800; }
 QLabel#stepSub { color: #8B857A; font-size: 13px; font-weight: 500; }
 QLabel#mutedNote { color: #8B857A; font-size: 13px; }
+
+/* 설정 탭 — 토스웹 문법. 회색 바탕 위 흰 카드, 카드 안은 목록 행(라벨 왼쪽,
+   입력 오른쪽, 행 사이 얇은 선). 주 동작(저장) 하나만 금색이고 나머지는 글자
+   버튼이다. 예전엔 베이지 QGroupBox 세 개가 금색 제목을 띄우고 있어 조건 탭의
+   단계 카드와 다른 앱처럼 보였다. */
+QWidget#settingsPage { background: #F5F3EE; }
+QFrame#settingRow { background: transparent; border: none; border-bottom: 1px solid #F1EEE8; }
+QFrame#settingRow[last="true"] { border-bottom: none; }
+QLabel#rowLabel { color: #3A342B; font-size: 14px; font-weight: 700; }
+QPushButton#dangerBtn { background: transparent; border: none; color: #B4342A; padding: 9px 10px; font-weight: 700; }
+QPushButton#dangerBtn:hover { background: #FCEBE8; border-radius: 10px; }
+QPushButton#dangerBtn:disabled { color: #D8A9A4; background: transparent; }
 /* 보조 동작은 글자 버튼 — 주 동작(금색) 옆에서 같은 무게로 보이면 안 된다. */
 QPushButton#linkBtn { background: transparent; border: none; color: #8A6D1F; padding: 9px 10px; font-weight: 700; }
 QPushButton#linkBtn:hover { background: #FBF6EA; border-radius: 10px; }
@@ -1655,6 +1667,42 @@ QPushButton#filterChip { background: #F2F0EC; color: #6B6357; border: none;
   border-radius: 14px; padding: 7px 16px; font-size: 13px; font-weight: 700; }
 QPushButton#filterChip:hover { background: #E8E4DC; color: #3A342B; }
 QPushButton#filterChip:checked { background: #2A251E; color: #FFFFFF; }
+
+/* ── 결과 탭 — 토스 웹 결. 테두리 대신 여백과 회색 단계가 구조를 말하고,
+   파랑(#3182F6) 하나만 누르는 것에 쓴다. 다른 탭은 건드리지 않는다. */
+QWidget#resultsPage { background: #F9FAFB; }
+QWidget#resultsPage QLabel { color: #4E5968; }
+QWidget#resultsPage QPushButton#startBtn { background: #3182F6; color: #FFFFFF; border: none; border-radius: 12px;
+  padding: 12px 22px; font-size: 15px; font-weight: 700; }
+QWidget#resultsPage QPushButton#startBtn:hover { background: #1B64DA; }
+QWidget#resultsPage QPushButton#startBtn:pressed { background: #1957C2; }
+QWidget#resultsPage QPushButton#startBtn:checked { background: #F2F4F6; color: #191F28; }
+QWidget#resultsPage QPushButton#startBtn:checked:hover { background: #E5E8EB; }
+QWidget#resultsPage QPushButton#startBtn:disabled { background: #E5E8EB; color: #B0B8C1; }
+QWidget#resultsPage QLabel#statusLine { font-size: 14px; color: #6B7684; }
+QWidget#resultsPage QLabel#watchCount { font-size: 14px; color: #8B95A1; }
+QFrame#resultCard { background: #FFFFFF; border: none; border-radius: 20px; }
+QFrame#resultCard QPushButton#filterChip { background: #F2F4F6; color: #4E5968; border: none; border-radius: 17px;
+  padding: 8px 16px; font-size: 14px; font-weight: 600; }
+QFrame#resultCard QPushButton#filterChip:hover { background: #E5E8EB; color: #191F28; }
+QFrame#resultCard QPushButton#filterChip:checked { background: #E8F3FF; color: #3182F6; }
+QFrame#resultCard QTableWidget { background: #FFFFFF; border: none; border-radius: 0; padding: 0; font-size: 15px;
+  color: #191F28; selection-background-color: #F2F4F6; }
+QFrame#resultCard QTableWidget::item { padding: 12px 10px; }
+QFrame#resultCard QTableWidget::item:selected { background: #F2F4F6; color: #191F28; }
+QFrame#resultCard QHeaderView::section { background: #FFFFFF; color: #8B95A1; padding: 10px 10px 12px 10px; border: none;
+  border-bottom: 1px solid #F2F4F6; font-size: 13px; font-weight: 600; letter-spacing: 0; }
+QFrame#resultCard QTableCornerButton::section { background: #FFFFFF; border: none; }
+QWidget#resultsPage QGroupBox#sectionBox { border: none; margin-top: 0; padding: 12px 4px 0 4px;
+  color: #8B95A1; font-size: 14px; font-weight: 600; }
+QWidget#resultsPage QGroupBox#sectionBox:checked { color: #4E5968; }
+QWidget#resultsPage QGroupBox#sectionBox:hover { color: #3182F6; }
+QWidget#resultsPage QTextEdit { background: #FFFFFF; border: none; border-radius: 16px; padding: 12px 14px;
+  font-size: 13px; color: #6B7684; }
+QWidget#resultsPage QProgressBar { background: #F2F4F6; border: none; border-radius: 3px; min-height: 6px; max-height: 6px; }
+QWidget#resultsPage QProgressBar::chunk { border-radius: 3px; background: #3182F6; }
+QWidget#resultsPage QScrollBar::handle:vertical { background: #E5E8EB; }
+QWidget#resultsPage QScrollBar::handle:vertical:hover { background: #D1D6DB; }
 
 QTreeWidget, QListWidget, QTableWidget, QTextEdit, QTextBrowser { background: #FFFFFF; border: 1px solid #DDD6C9; border-radius: 13px; padding: 4px; font-size: 14px; color: #1F1B16; }
 QTreeWidget::item, QListWidget::item { padding: 6px 4px; border-radius: 8px; }
@@ -1902,9 +1950,9 @@ class MainWindow(QMainWindow):
         # 상태바는 3탭 공용이다 — 여기 찍으면 수동 검색 화면에도 자동수확 로그가
         # 따라다닌다. 이 메시지의 자리는 '매물 감시' 탭 로그다.
         self._alog(msg)
-        # 계정수 대시보드 즉시 갱신
+        # 상태 한 줄 즉시 갱신
         try:
-            self._init_dashboard()
+            self._refresh_alert_health()
         except Exception:
             pass
 
@@ -2439,14 +2487,8 @@ class MainWindow(QMainWindow):
     # 보고 그 설정으로 가는 길이 없으면 칩은 죽은 글자다(설계 §1: 칩 클릭은 해당
     # 고급 패널 항목으로 스크롤한다). 대응 항목이 없는 칩은 여기 넣지 않는다 —
     # 없는 목적지를 지어내면 사용자가 엉뚱한 곳으로 간다.
-    CHIP_TARGETS = {
-        "token": "autoAccountsBtn",     # 토큰 유효/만료 → 계정+프록시(안에 계정 현황)
-        "accounts": "autoAccountsBtn",  # 계정 수 → 같은 곳
-        # coverage·poll 칩은 목적지가 없다 — 커버 모드·폴링 주기는 화면에서
-        # 뺐다(감시 시작이 정한다). 보이지 않는 위젯으로 데려가면 아무 일도
-        # 안 일어난 것처럼 보이므로 아예 안 데려간다.
-        "rules": "alertRulesBtn",       # 조건 수 → 조건표 엑셀 넣는 자리
-    }
+    # 상태 한 줄의 조각 순서. 값은 _set_status 가 채운다.
+    STATUS_ORDER = ("token", "accounts", "coverage", "poll", "rules", "notify")
 
     TAB_HELP = ("키워드 알림을 계정에 등록 → 매물 뜨면 토큰폴링으로 실시간 수신.\n"
                 "1계정 = 인증동네 + 인접 지역 커버. 여러 계정(다른 동네) = 전국.")
@@ -2481,7 +2523,7 @@ class MainWindow(QMainWindow):
                 if src else "아직 넣은 엑셀이 없습니다"))
         self.rulesOpenBtn.setToolTip(tip)
         self.rulesReloadBtn.setToolTip(tip)
-        self._set_chip("rules",
+        self._set_status("rules",
                        f"조건 {len(rules)}" if rules else "조건 없음",
                        "ok" if rules else "off")
         # 접혀 있어도 무엇이 걸려 있는지는 보여야 한다 — 섹션 제목이 그 자리다.
@@ -2539,14 +2581,16 @@ class MainWindow(QMainWindow):
 
     def _step_card(self, n, title, sub):
         """단계 카드 한 장 — 번호 배지 + 제목 + 한 줄 설명. 안에 넣을 레이아웃을
-        같이 돌려준다. 카드는 순서를 말하고, 사용자는 위에서 아래로 읽는다."""
+        같이 돌려준다. 카드는 순서를 말하고, 사용자는 위에서 아래로 읽는다.
+        n=None 이면 배지 없는 일반 카드(설정 탭처럼 순서가 없는 곳)."""
         card = QtWidgets.QFrame()
         card.setObjectName("stepCard")
         cl = QtWidgets.QVBoxLayout(card)
         cl.setContentsMargins(22, 20, 22, 20); cl.setSpacing(12)
         head = QtWidgets.QHBoxLayout(); head.setSpacing(12)
-        badge = QtWidgets.QLabel(str(n)); badge.setObjectName("stepBadge")
-        head.addWidget(badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        if n is not None:
+            badge = QtWidgets.QLabel(str(n)); badge.setObjectName("stepBadge")
+            head.addWidget(badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         tv = QtWidgets.QVBoxLayout(); tv.setSpacing(2)
         t = QtWidgets.QLabel(title); t.setObjectName("stepTitle")
         d = QtWidgets.QLabel(sub); d.setObjectName("stepSub"); d.setWordWrap(True)
@@ -2554,6 +2598,22 @@ class MainWindow(QMainWindow):
         head.addLayout(tv, 1)
         cl.addLayout(head)
         return card, cl
+
+    def _setting_row(self, label, widget, last=False):
+        """설정 카드의 목록 행 — 왼쪽 라벨(고정폭), 오른쪽 입력. 행 아래 얇은 선.
+        QFormLayout 은 라벨을 입력 높이에 맞춰 띄우고 선이 없어 어디까지가 한
+        행인지 안 보였다."""
+        row = QtWidgets.QFrame()
+        row.setObjectName("settingRow")
+        if last:
+            row.setProperty("last", "true")
+        h = QtWidgets.QHBoxLayout(row)
+        h.setContentsMargins(0, 10, 0, 10); h.setSpacing(14)
+        lab = QtWidgets.QLabel(label, row); lab.setObjectName("rowLabel")
+        lab.setFixedWidth(112)
+        h.addWidget(lab, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(widget, 1)
+        return row
 
     def _collapsible(self, title, inner, checked=False, first=False):
         """접이식 그룹 한 덩어리. 자주 안 보는 것을 화면에서 치우되 지우지는
@@ -2583,43 +2643,21 @@ class MainWindow(QMainWindow):
         맨 아래 조립부가 한 번에 정한다. 한 탭에 접이식 네 개로 쌓았던
         동안 클라는 하루에 수십 번 보는 매물 표 아래 접힌 것을 못 찾았다."""
         w = QtWidgets.QWidget()               # 결과 페이지 — 매물 표의 집
-        v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
+        w.setObjectName("resultsPage")        # 토스 결(QSS) 은 이 이름 아래서만 산다
+        v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(24, 20, 24, 20); v.setSpacing(16)
         cond_v = QtWidgets.QVBoxLayout()      # '감시 조건' 에 들어갈 것
         listing_v = QtWidgets.QVBoxLayout()   # 매물 — 화면의 주인공
 
-        # ── 현황 대시보드 ──
-        dash = QtWidgets.QGroupBox("현황"); dl = QtWidgets.QVBoxLayout(dash)
-        self.dashHealth = QtWidgets.QLabel("상태 확인 중…")
-        self.dashHealth.setWordWrap(True)
-        self.dashHealth.setStyleSheet(
-            "font-size:14px; font-weight:700; padding:8px 10px; border-radius:8px;"
-            "background:#F7F5F1; color:#3A342B; border:1px solid #DDD6C9;")
-        self.dashAccounts = QtWidgets.QLabel("계정: - (집계 전)")
-        self.dashCoverage = QtWidgets.QLabel("커버리지: - ")
-        self.dashBar = QtWidgets.QProgressBar(); self.dashBar.setRange(0, 100); self.dashBar.setValue(0)
-        self.dashBar.setFormat("전국 커버 %p%")
-        self.dashBar.setFixedHeight(26)            # 높이 붕괴 방지(라벨 사이 끼임 깨짐 수정)
-        self.dashBar.setTextVisible(True)
-        dl.setSpacing(8)
-        self.dashCadence = QtWidgets.QLabel("폴링 주기: -")
-        self.dashGuide = QtWidgets.QLabel("증설 안내: 감시를 시작하면 커버 현황을 계산합니다")
-        self.dashGuide.setWordWrap(True)
-        for wdg in (self.dashHealth, self.dashAccounts, self.dashCoverage, self.dashBar,
-                    self.dashCadence, self.dashGuide):
-            dl.addWidget(wdg)
-        # 같은 값이 위 상태칩에도 있다. 칩이 요약, 여기가 상세 — 기본은 접는다.
-        dash.setObjectName("sectionBox")
-        dash.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        dash.setCheckable(True)
-        dash.setChecked(False)
-        dash.toggled.connect(lambda on, b=dash: self._sync_box_visible(b, on))
-        self._sync_box_visible(dash, False)
-        self.dashBox = dash
+        # 전국 커버 %. 감시 시작이 계산해 넣고 상태 한 줄이 보여 준다.
+        self._cover_pct = 0
 
         self._watch_label = QtWidgets.QLabel("추적 중 0건")
-        self._watch_label.setStyleSheet("color:#5C5449; font-size:13px;")
+        self._watch_label.setObjectName("watchCount")
 
-        # ── 컨트롤 바: 토글 하나 + 상태칩 ──
+        # ── 컨트롤 바: 토글 하나 + 상태 한 줄 ──
+        # 결과 탭에서 누를 것은 감시 시작뿐이다. 상태칩 다섯 개가 버튼처럼
+        # 서 있던 동안 클라는 눌러 봤고, 둘은 아무 데도 안 데려갔다. 현황
+        # 상자는 같은 값을 한 번 더 보였다. 상태는 읽는 것이다 — 라벨 한 줄.
         top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
         self.watchToggleBtn = QtWidgets.QPushButton("▶ 감시 시작")
         self.watchToggleBtn.setObjectName("startBtn")
@@ -2627,23 +2665,12 @@ class MainWindow(QMainWindow):
         self.watchToggleBtn.setToolTip(self.TAB_HELP)
         self.watchToggleBtn.clicked.connect(self.on_watch_toggle)
         top.addWidget(self.watchToggleBtn)
-        # 칩 — 읽기 전용 상태 표시지만 죽은 글자는 아니다. 누르면 그 값을 다루는
-        # 탭(조건·설정)의 항목까지 데려간다.
-        self._chips = {}
-        for key, text in (("token", "토큰 -"), ("accounts", "계정 -"),
-                          ("coverage", "커버리지 -"), ("poll", "다음폴링 -"),
-                          ("rules", "조건 -")):
-            chip = QtWidgets.QPushButton(text)
-            chip.setObjectName("statChip")
-            chip.setFlat(True)
-            chip.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            chip.setToolTip("누르면 그 값을 다루는 탭으로 이동합니다")
-            chip.clicked.connect(lambda _c=False, k=key: self.on_chip_clicked(k))
-            self._chips[key] = chip
-            self._style_chip(key, "ok")
-            top.addWidget(chip)
-        # 추적중 칩은 대응 항목이 없다(스윕 주기는 정책 상수다).
-        # 목적지 없는 칩은 누르지 않는 편이 낫다 — 라벨로 둔다.
+        self._status = {k: ("", "off") for k in self.STATUS_ORDER}
+        self.statusLine = QtWidgets.QLabel("")
+        self.statusLine.setObjectName("statusLine")
+        self.statusLine.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        top.addWidget(self.statusLine)
+        top.addSpacing(8)
         top.addWidget(self._watch_label, 1)
 
         # 등록 경로는 엑셀 하나다. 예전에는 '명품20 전계정등록' 버튼과 수동
@@ -2787,38 +2814,54 @@ class MainWindow(QMainWindow):
         rv.addStretch(1)
 
         # ── 설정 페이지: 알림(인라인) → 계정·프록시(창) → 고급(접힘) ──
+        # 조건 탭과 같은 회색 바탕 위 흰 카드 세 장. 카드 머리 = 제목 + 한 줄
+        # 설명, 안은 목록 행. 배지는 없다 — 설정엔 순서가 없다.
         settings_w = QtWidgets.QWidget()
-        sv = QtWidgets.QVBoxLayout(settings_w); sv.setContentsMargins(16, 14, 16, 14); sv.setSpacing(10)
-        self.notifyBox = QtWidgets.QGroupBox("알림 — 텔레그램 · 구글시트")
-        self._build_notify_form(self.notifyBox)
+        settings_w.setObjectName("settingsPage")
+        sv = QtWidgets.QVBoxLayout(settings_w); sv.setContentsMargins(20, 18, 20, 18); sv.setSpacing(14)
+        self.notifyBox, nl = self._step_card(
+            None, "알림", "새 매물과 가격 변동을 텔레그램·구글시트로 보냅니다.")
+        self._build_notify_form(self.notifyBox, nl)
         sv.addWidget(self.notifyBox)
         # 계정 현황·프록시 목록·프록시 진단은 계정+프록시 창 안에 있다 —
         # 전부 같은 accounts.json 을 보는 화면이라 한 입구로 모았다. fleet
         # 상태·진단 서브창이 딸려 있어 이것만은 인라인으로 펴지 않는다.
-        acct = QtWidgets.QGroupBox("계정 · 프록시")
-        al = QtWidgets.QHBoxLayout(acct); al.setSpacing(10)
-        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시 열기", acct)
+        acct, al_v = self._step_card(
+            None, "계정 · 프록시", "계정 현황과 프록시 목록·진단은 한 창에 모여 있습니다.")
+        al = QtWidgets.QHBoxLayout(); al.setSpacing(10)
+        self.healthLabel.setObjectName("statusLine")
+        al.addWidget(self.healthLabel, 1)
+        self.autoAccountsBtn = QtWidgets.QPushButton("계정+프록시 열기  ›", acct)
+        self.autoAccountsBtn.setObjectName("ghostBtn")
+        self.autoAccountsBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.autoAccountsBtn.clicked.connect(self.on_accounts_btn_clicked)
         self.autoAccountsBtn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                                           QtWidgets.QSizePolicy.Policy.Fixed)
-        al.addWidget(self.autoAccountsBtn)
-        al.addWidget(self.healthLabel, 1)
+        al.addWidget(self.autoAccountsBtn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        al_v.addLayout(al)
         sv.addWidget(acct)
-        # 고급 = 되돌리기. 평소엔 쓸 일이 없어 접어 둔다.
+        # 고급 = 되돌리기. 평소엔 쓸 일이 없어 카드 안에서 접어 둔다. 삭제는
+        # 빨간 글자 버튼 — 금색 주 동작과 같은 무게로 보이면 안 된다.
+        adv, adv_l = self._step_card(
+            None, "고급", "되돌리기 동작입니다. 평소엔 쓸 일이 없습니다.")
         adv_v = QtWidgets.QVBoxLayout()
         _dr = QtWidgets.QHBoxLayout(); _dr.setSpacing(10)
-        _dr.addWidget(self.alertDelAllBtn)
         _dl = QtWidgets.QLabel("당근에 등록된 키워드를 전부 지웁니다. "
                                "조건표 엑셀을 다시 넣으면 다시 등록됩니다.")
-        _dl.setWordWrap(True)
+        _dl.setObjectName("mutedNote"); _dl.setWordWrap(True)
         _dr.addWidget(_dl, 1)
+        self.alertDelAllBtn.setObjectName("dangerBtn")
+        self.alertDelAllBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        _dr.addWidget(self.alertDelAllBtn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         adv_v.addLayout(_dr)
-        self.advancedBox = self._collapsible("고급", adv_v)
-        sv.addWidget(self.advancedBox)
+        self.advancedBox = self._collapsible("되돌리기 보기", adv_v, first=True)
+        adv_l.addWidget(self.advancedBox)
+        sv.addWidget(adv)
         sv.addStretch(1)
 
         # ── 매물 (신규·추적을 한 표에) ──
-        fbar = QtWidgets.QHBoxLayout(); fbar.setSpacing(6)
+        listing_v.setContentsMargins(20, 16, 20, 8); listing_v.setSpacing(12)
+        fbar = QtWidgets.QHBoxLayout(); fbar.setSpacing(8)
         self.listingFilter = QtWidgets.QButtonGroup(w)
         for i, (key, label) in enumerate(
                 (("all", "전체"), ("new", "🆕 신규"),
@@ -2844,11 +2887,17 @@ class MainWindow(QMainWindow):
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.listingTable.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.listingTable.horizontalHeader().setSectionResizeMode(
-            LISTING_COL_TITLE, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        # 제목만 늘어나고 나머지는 내용 폭이다 — 기본 폭에선 가격·날짜가 "…" 로 잘렸다.
+        _lh = self.listingTable.horizontalHeader()
+        for _c in range(len(LISTING_COLS)):
+            _lh.setSectionResizeMode(
+                _c, QtWidgets.QHeaderView.ResizeMode.Stretch if _c == LISTING_COL_TITLE
+                else QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.listingTable.setShowGrid(False)
         self.listingTable.setAlternatingRowColors(False)
-        self.listingTable.verticalHeader().setDefaultSectionSize(40)
+        self.listingTable.verticalHeader().setDefaultSectionSize(48)
+        self.listingTable.itemDelegate().LINE = "#F2F4F6"
+        self.listingTable.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.listingTable.setMinimumHeight(440)
         self.listingTable.setToolTip(
             "앱 알림과 검색 스윕이 같은 표로 들어옵니다. 두 번 누르면 매물이 열립니다.")
@@ -2859,12 +2908,13 @@ class MainWindow(QMainWindow):
         self.alertLog = QtWidgets.QTextEdit(); self.alertLog.setReadOnly(True); self.alertLog.setMaximumHeight(110)
 
         # ── 결과 페이지 조립: 자주 보는 것이 위 ──
-        # ① 지금 상태 한 줄  ② 매물  ③ 현황(접힘 — 칩이 요약이다)  ④ 로그
+        # ① 지금 상태 한 줄  ② 매물  ③ 로그
         v.addLayout(top)
         v.addWidget(self.alertBusyRow)
-        v.addLayout(listing_v, 1)
+        card = QtWidgets.QFrame(w); card.setObjectName("resultCard")
+        card.setLayout(listing_v)
+        v.addWidget(card, 1)
         self.logBox = self._collapsible("로그", self.alertLog, checked=True)
-        v.addWidget(dash)
         v.addWidget(self.logBox)
 
         self.alertDelAllBtn.clicked.connect(self.on_alert_delete_all)
@@ -2958,86 +3008,29 @@ class MainWindow(QMainWindow):
         if self._alert_setting("autostart"):
             if getattr(self, "_mode_cfg", {}).get("background", True):
                 QtCore.QTimer.singleShot(8000, self._autostart_poll)
-        self._init_dashboard()
         self._refresh_rules_view()
         return rules_w, w, settings_w
 
-    _CHIP_COLORS = {"ok": ("#F7F5F1", "#3A342B", "#DDD6C9"),
-                    "warn": ("#FBF1DC", "#8A6210", "#E7D3A6"),
-                    "bad": ("#FCEBE8", "#A32B1E", "#F0C4BC"),
-                    "off": ("#F2F1EE", "#7A7367", "#E0DCD3")}
+    _STATUS_COLORS = {"ok": "#4E5968", "warn": "#F27A00",
+                      "bad": "#F04452", "off": "#B0B8C1"}
 
-    def _style_chip(self, key, level="ok"):
-        chip = getattr(self, "_chips", {}).get(key)
-        if chip is None:
+    def _set_status(self, key, text, level="ok"):
+        """상태 한 줄의 조각 하나를 바꾸고 줄을 다시 그린다. 나쁜 값만 색이 난다."""
+        import html as _html
+        st = getattr(self, "_status", None)
+        line = getattr(self, "statusLine", None)
+        if st is None or line is None:
             return
-        bg, fg, br = self._CHIP_COLORS.get(level, self._CHIP_COLORS["ok"])
-        # 테두리 없는 pill — 읽는 값이지 누르는 명령이 아니다. 색만으로 상태를
-        # 말하고, 경계선은 상태가 나쁠 때(warn/bad)만 눈에 걸리게 둔다.
-        _bd = "none" if level == "ok" else f"1px solid {br}"
-        chip.setStyleSheet(
-            "QPushButton#statChip{padding:6px 12px; border-radius:13px; font-size:12px;"
-            f"font-weight:700; background:{bg}; color:{fg}; border:{_bd};}}"
-            f"QPushButton#statChip:hover{{border:1px solid #8A6D1F;}}")
-
-    def _set_chip(self, key, text, level="ok"):
-        chip = getattr(self, "_chips", {}).get(key)
-        if chip is None:
-            return
-        chip.setText(text)
-        self._style_chip(key, level)
-
-    @staticmethod
-    def _enclosing_scroll(widget):
-        """위젯을 담고 있는 QScrollArea. 탭은 _scroll() 로 감싸여 있다."""
-        p = widget.parentWidget() if widget is not None else None
-        while p is not None:
-            if isinstance(p, QtWidgets.QScrollArea):
-                return p
-            p = p.parentWidget()
-        return None
-
-    def on_chip_clicked(self, key):
-        """상태칩 → 대응 항목이 있는 탭으로 가서 그 항목을 보여 준다. 목적지
-        없으면 무시.
-
-        칩은 결과 탭에 있고 목적지는 조건·설정 탭에 있다 — 탭을 먼저 바꾸고,
-        접힌 상자 뒤면 펴고, 스크롤로 데려간다. 반환값은 실제로 데려갔는지다
-        (테스트가 확인한다)."""
-        target = getattr(self, self.CHIP_TARGETS.get(key) or "", None)
-        if target is None:
-            return False
-        page = None
-        for i in range(self.tabs.count()):
-            p = self.tabs.widget(i)
-            if target in p.findChildren(QtWidgets.QWidget):
-                page = p
-                if self.tabs.currentIndex() != i:
-                    self.tabs.setCurrentIndex(i)
-                break
-        # 목적지가 어느 상자에 있든 그 상자를 편다 — '고급' 하나만 펴던 동안
-        # 조건표로 가는 칩은 접힌 섹션 뒤로 데려가고 끝났다.
-        p = target.parentWidget()
-        while p is not None and p is not page:
-            if (isinstance(p, QtWidgets.QGroupBox) and p.isCheckable()
-                    and not p.isChecked()):
-                p.setChecked(True)                  # toggled → 자식 표시
-            p = p.parentWidget()
-        # 방금 펼친 위젯은 아직 좌표가 없다 — 레이아웃을 먼저 확정시켜야
-        # ensureWidgetVisible 이 옛 자리로 스크롤하지 않는다.
-        inner = page.widget() if isinstance(page, QtWidgets.QScrollArea) else page
-        if inner is not None and inner.layout() is not None:
-            inner.layout().activate()
-        area = self._enclosing_scroll(target)
-
-        def _reveal():
-            if area is not None:
-                area.ensureWidgetVisible(target, 0, 60)
-            target.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-
-        _reveal()
-        QtCore.QTimer.singleShot(0, _reveal)   # 애니메이션/지연 레이아웃 뒤 한 번 더
-        return True
+        st[key] = (text, level)
+        parts = []
+        for k in self.STATUS_ORDER:
+            t, lv = st.get(k, ("", "off"))
+            if not t:
+                continue
+            c = self._STATUS_COLORS.get(lv, self._STATUS_COLORS["ok"])
+            w = 800 if lv in ("warn", "bad") else 600
+            parts.append(f'<span style="color:{c}; font-weight:{w};">{_html.escape(t)}</span>')
+        line.setText("&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts))
 
     def _sync_advanced_visible(self, on):
         """고급 패널 접기 — 접이식 공통 규칙(_sync_box_visible)을 그대로 쓴다."""
@@ -3219,27 +3212,23 @@ class MainWindow(QMainWindow):
         tg = "🟢 텔레그램 연결" if (nt.get("tg_token") and nt.get("tg_chat")) else "⚪ 텔레그램 미설정"
         if nt.get("sheet_url"):
             tg += " · 🟢 시트"
-        # 컨트롤 바 칩 — 같은 값을 한 줄 요약으로. 누르면 해당 설정으로 간다.
-        self._set_chip("token", f"토큰 {alive}", "ok" if tok_ok else "bad")
+        # 상태 한 줄 — 같은 값을 짧게. 자세한 문장은 툴팁에.
+        self._set_status("token", f"토큰 {alive}", "ok" if tok_ok else "bad")
         n_acc = alive + expired
-        self._set_chip("accounts", f"계정 {n_acc}",
+        self._set_status("accounts", f"계정 {n_acc}",
                        "ok" if n_acc else "warn")
-        try:
-            pct = int(self.dashBar.value())
-        except Exception:
-            pct = 0
-        self._set_chip("coverage", f"커버리지 {pct}%" if pct else "커버리지 -",
+        pct = int(getattr(self, "_cover_pct", 0) or 0)
+        self._set_status("coverage", f"커버리지 {pct}%" if pct else "커버리지 -",
                        "ok" if pct else "warn")
         if self._alert_poll_timer.isActive():
             rem = max(0, self._alert_poll_timer.remainingTime()) // 1000
-            self._set_chip("poll", f"다음폴링 {rem // 60}:{rem % 60:02d}", "ok")
+            self._set_status("poll", f"다음폴링 {rem // 60}:{rem % 60:02d}", "ok")
         else:
-            self._set_chip("poll", "폴링 OFF", "off")
-        self.dashHealth.setText("   ".join([tok, hv, pl, tg]))
-        bg = "#FCEBE8" if not tok_ok else "#F7F5F1"
-        self.dashHealth.setStyleSheet(
-            "font-size:14px; font-weight:700; padding:8px 10px; border-radius:8px;"
-            f"background:{bg}; color:#3A342B; border:1px solid #DDD6C9;")
+            self._set_status("poll", "폴링 OFF", "off")
+        tg_ok = bool(nt.get("tg_token") and nt.get("tg_chat"))
+        self._set_status("notify", "텔레그램 연결" if tg_ok else "텔레그램 미설정",
+                         "ok" if tg_ok else "warn")
+        self.statusLine.setToolTip("\n".join([tok, hv, pl, tg]))
         self._refresh_watch_panel()
 
     def _refresh_watch_panel(self):
@@ -3359,28 +3348,6 @@ class MainWindow(QMainWindow):
         resetBtn.clicked.connect(do_reset)
         cancelBtn.clicked.connect(dlg.reject)
         dlg.exec()
-
-    def _init_dashboard(self):
-        """탭 열릴 때 계정수 즉시 표시(토큰 불필요, accounts.json만). 커버리지는 버튼."""
-        import json as _json
-        n_total = n_valid = 0
-        try:
-            from daangn_ext.keyword_alert_api import token_remaining
-            with open("./accounts.json", encoding="utf-8") as _f:
-                _accs = _json.load(_f)
-            for a in _accs:
-                n_total += 1
-                if a.get("access") and token_remaining(a["access"]) > 60:
-                    n_valid += 1
-        except Exception:
-            pass
-        self.dashAccounts.setText(
-            f"계정: 총 {n_total}개 · 유효토큰 {n_valid}개"
-            + ("  (수확 필요 — 유효토큰 0)" if n_valid == 0 else ""))
-        self.dashCadence.setText(f"폴링 주기: {self.alertPollInterval.value()}초 (자동폴링 시)")
-        self.dashGuide.setText(
-            "커버리지·전국% 는 감시 시작 때 계산합니다. "
-            "1계정≈39지역 · 전국(~3500동)엔 서로 다른 동네 ~90~250계정 필요.")
 
     def _alert_api(self):
         """스레드 내에서 호출 — thread-safe 토큰 수확 후 KeywordAlertAPI 반환."""
@@ -3988,7 +3955,7 @@ class MainWindow(QMainWindow):
         def done(out):
             out = out or {}
             self._match_populate(out.get("matches"))
-            self._update_dashboard(out.get("cov"))
+            self._update_coverage(out.get("cov"))
             self._alert_populate(out.get("list"))
 
         self._alert_run(job, done, queue=True, label="첫 확인 중")
@@ -4008,9 +3975,10 @@ class MainWindow(QMainWindow):
             for code, name, cnt in cov:
                 log(f"  {code}: {name} ({cnt}지역)")
             return cov
-        self._alert_run(job, self._update_dashboard, label="커버 동네 조회 중")
+        self._alert_run(job, self._update_coverage, label="커버 동네 조회 중")
 
-    def _update_dashboard(self, cov):
+    def _update_coverage(self, cov):
+        """커버 동네 조회 결과 → 전국 커버 %(상태 한 줄) + 증설 안내 한 줄(로그)."""
         if cov is None:
             return
         KOREA_DONG = 3500            # 전국 행정동 대략
@@ -4022,19 +3990,12 @@ class MainWindow(QMainWindow):
         # 겹침 감안 실효 커버(대략 70%)
         eff = int(total_regions * 0.7)
         pct = min(100, int(eff / KOREA_DONG * 100))
-        interval = self.alertPollInterval.value()
-        cycle = round(n_acc * 1.5)                  # 순차 폴 1순환(초)
         need_full = max(0, round(KOREA_DONG / (AVG_RANGE * 0.7)) - n_acc)  # 전국까지 추가계정(대략)
-
-        self.dashAccounts.setText(f"계정: {n_acc}개 (유효토큰) · 동네 {len(dongs)}곳")
-        self.dashCoverage.setText(f"커버리지: 합산 {total_regions}지역 · 실효 ~{eff}지역 / 전국 {KOREA_DONG}동")
-        self.dashBar.setValue(pct)
-        self.dashCadence.setText(
-            f"폴링 주기: {interval}초 · 전계정 1순환 ~{cycle}초 (순차) · 매칭 감지지연 ≈ 주기")
-        self.dashGuide.setText(
-            f"증설 안내: 현재 {n_acc}계정 → 전국까지 약 +{need_full}계정 필요(잘 분산 시). "
-            f"각 계정을 서로 다른 동네에 배치(LDPlayer GPS)해야 커버가 넓어집니다. "
-            f"계정 늘어도 폴링은 병렬화하면 주기 유지(순차면 계정당 ~1.5초 가산).")
+        self._cover_pct = pct
+        self._alog(f"[커버] 계정 {n_acc}개 · 동네 {len(dongs)}곳 · 실효 ~{eff}지역"
+                   f" / 전국 {KOREA_DONG}동 ({pct}%) · 전국까지 약 +{need_full}계정"
+                   " — 계정은 서로 다른 동네에 두어야 커버가 넓어집니다")
+        self._refresh_alert_health()
 
     def _build_auto_area_tree(self, parent):
         """자동용 지역 트리 — 수동과 동일한 시도>구>동 3단계. 미선택 시 전국."""
@@ -4356,16 +4317,17 @@ class MainWindow(QMainWindow):
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
 
-    def _build_notify_form(self, box):
+    def _build_notify_form(self, box, lay=None):
         """알림 설정 — 설정 탭에 바로 펼친 폼(텔레그램·구글시트).
 
         예전엔 '알림 설정' 버튼 → 다이얼로그였다. 고급 패널을 펴고, 버튼을
         찾고, 창을 띄우는 세 걸음 뒤에야 토큰 칸이 나왔다. 설정 탭이 생긴
         뒤로는 폼이 그 자리에 있다. 값은 self._notify 가 원본이고 저장은
-        notify.json 이다 — 다이얼로그 때와 같다."""
+        notify.json 이다 — 다이얼로그 때와 같다.
+        lay 를 주면 그 레이아웃(카드 본문)에 이어 붙인다."""
         n = self._notify
-        v = QtWidgets.QVBoxLayout(box); v.setSpacing(8)
-        f = QtWidgets.QFormLayout(); f.setSpacing(8)
+        v = lay if lay is not None else QtWidgets.QVBoxLayout(box)
+        v.setSpacing(8)
         self.notifyToken = QtWidgets.QLineEdit(n["tg_token"], box)
         self.notifyToken.setPlaceholderText("텔레그램 봇 토큰 (예: 123456:AA...)")
         self.notifyChat = QtWidgets.QLineEdit(n["tg_chat"], box)
@@ -4387,18 +4349,23 @@ class MainWindow(QMainWindow):
                 self.notifyCred.setText(path)
         self.notifyCredBtn.clicked.connect(pick_cred)
 
-        f.addRow("텔레그램 토큰", self.notifyToken); f.addRow("텔레그램 방", self.notifyChat)
-        f.addRow("구글시트", self.notifySheet); f.addRow("시트 인증파일", credRow)
-        v.addLayout(f)
-        v.addWidget(QtWidgets.QLabel(
-            "신규/가격변동 매물을 텔레그램·구글시트로 알림. [저장]을 눌러야 적용되고, "
-            "notify.json 에 남습니다.", box))
+        rows = QtWidgets.QVBoxLayout(); rows.setSpacing(0)
+        fields = (("텔레그램 토큰", self.notifyToken), ("텔레그램 방", self.notifyChat),
+                  ("구글시트", self.notifySheet), ("시트 인증파일", credRow))
+        for i, (lab, wdg) in enumerate(fields):
+            rows.addWidget(self._setting_row(lab, wdg, last=(i == len(fields) - 1)))
+        v.addLayout(rows)
+        _hint = QtWidgets.QLabel("[저장]을 눌러야 적용되고, notify.json 에 남습니다.", box)
+        _hint.setObjectName("mutedNote"); _hint.setWordWrap(True)
+        v.addWidget(_hint)
         self.notifyResult = QtWidgets.QLabel("", box); self.notifyResult.setWordWrap(True)
         self.notifyResult.setStyleSheet("color:#5C5449; font-size:14px;")
         v.addWidget(self.notifyResult)
 
         bb = QtWidgets.QHBoxLayout()
         self.notifyTestBtn = QtWidgets.QPushButton("테스트 발송", box)
+        self.notifyTestBtn.setObjectName("linkBtn")
+        self.notifyTestBtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.notifySaveBtn = QtWidgets.QPushButton("저장", box)
         self.notifySaveBtn.setObjectName("startBtn")
         bb.addWidget(self.notifyTestBtn); bb.addStretch(1); bb.addWidget(self.notifySaveBtn)

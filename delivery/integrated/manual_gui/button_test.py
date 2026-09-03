@@ -76,9 +76,8 @@ ck("알림 다이얼로그 핸들러 없음", not hasattr(w, "on_auto_notify_cli
 _wm = main.MainWindow(mode="manual")
 ck("검색 버튼 연결됨",
    _wm.ui.startBtn.receivers(_wm.ui.startBtn.clicked) > 0)
-for key in main.MainWindow.CHIP_TARGETS:
-    c = w._chips[key]
-    ck(f"상태칩 {key} 연결됨", c.receivers(c.clicked) > 0)
+ck("상태는 라벨 한 줄 — 누르는 칩 없음",
+   isinstance(w.statusLine, main.QtWidgets.QLabel) and not hasattr(w, "_chips"))
 
 print("\n=== 다이얼로그가 선다(자격증명 없이도) ===")
 for name, fn in (("계정·프록시", "on_accounts_btn_clicked"),

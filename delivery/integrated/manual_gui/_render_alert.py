@@ -23,7 +23,7 @@ app.processEvents()
 
 # 샘플 대시보드(멀티계정 커버)
 try:
-    w._update_dashboard([("530029", "역삼동", 39), ("452902", "분당 정자동", 44),
+    w._update_coverage([("530029", "역삼동", 39), ("452902", "분당 정자동", 44),
                          ("z", "해운대", 33), ("561030", "수원 영통", 41)])
 except Exception as e:
     print("dashboard err", e)
