@@ -935,18 +935,33 @@ def sweep_conditions(entries, extra=None, exclude=None,
 SWEEP_NATIONWIDE_KEY = "sweep_nationwide"
 
 
+FEED_DEFAULTS = {
+    "feed_enabled": True,
+    "feed_categories": [31, 14],          # 여성잡화 · 남성패션/잡화
+    "feed_proxies": [],                   # 비면 proxies.txt
+    "feed_rps": 1.0,                      # 레인(프록시)당 초당 요청
+    "feed_rest_min": 2,                   # 사이클 휴식(분)
+    "sweep_app_enabled": False,           # 앱 키워드 스윕(보완층) — 버릴 계정만
+    "sweep_regions_app": ["역삼동-6035"],
+}
+
+
+def sweep_app_enabled(settings) -> bool:
+    """앱 키워드 스윕(계정 토큰으로 검색) 스위치. 기본 꺼짐.
+
+    발굴 주경로가 계정 없는 웹 피드로 옮겨 가면서(2026-09-03 스펙) 이 경로는
+    타지역 택배 매물 보완층이 됐다. 옛 키 sweep_mirror_app 은 읽어만 준다."""
+    s = settings or {}
+    if s.get("sweep_app_enabled") is not None:
+        return bool(s["sweep_app_enabled"])
+    if s.get("sweep_mirror_app") is not None:
+        return bool(s["sweep_mirror_app"])
+    return bool(FEED_DEFAULTS["sweep_app_enabled"])
+
+
 def sweep_mirror_enabled(settings, n_rules) -> bool:
-    """앱 알림 키워드를 스윕에도 돌릴지.
-
-    조건표가 있으면 켠다. 조건표가 물량을 정하므로 예전처럼 '켜면 지역 전체가
-    쏟아진다'가 성립하지 않는다. 조건표가 없으면 켜지 않는다 — 그때는 매칭이
-    곧 알림이라 서울·경기 물량이 그대로 나간다.
-
-    설정에 값을 적어 두면 그것이 이긴다(운영자 강제 스위치)."""
-    forced = (settings or {}).get("sweep_mirror_app")
-    if forced is not None:
-        return bool(forced)
-    return int(n_rules or 0) > 0
+    """호환 이름 — 답은 sweep_app_enabled 하나다."""
+    return sweep_app_enabled(settings)
 
 # 지역을 아무도 고르지 않았을 때 훑을 기본 범위: 서울 + 경기(동 1,857곳).
 # 명품 물량이 여기 몰려 있고, 실측 수렴 한계(지역 × 조건 ≈ 17,900) 안에서
@@ -1378,6 +1393,45 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
         days=_num("sweep_days", 7) or None)
     if already_notified is not None:
         # 앱 알림이 이미 알린 매물은 스윕이 다시 안 알린다(저장소가 둘이다).
+        cfg["already_notified"] = already_notified
+    return cfg
+
+
+def feed_cfg(settings, notify, proxies_file="./proxies.txt", out_json="./OUT.json",
+             already_notified=None, log=None) -> dict:
+    """웹 동 피드 엔진 cfg — GUI·헤드리스 공용. 지역은 스윕 지역 설정을 그대로 쓴다."""
+    from daangn_ext.adaptive import load_dong_regions
+    s = settings or {}
+
+    def _get(key):
+        v = s.get(key)
+        return FEED_DEFAULTS[key] if v is None else v
+
+    scope = sweep_scope_for(s.get("sweep_regions"), s.get(SWEEP_NATIONWIDE_KEY),
+                            out_json=out_json, log=log, n_conditions=1, lanes=8)
+    if scope.get("scope") == "nationwide":
+        regions = [r["in"] for r in load_dong_regions(out_json)]
+    else:
+        regions = list(scope.get("regions") or [])
+    proxies = [p for p in (_get("feed_proxies") or []) if p]
+    if not proxies:
+        try:
+            with open(proxies_file, encoding="utf-8") as f:
+                proxies = [ln.strip() for ln in f if ln.strip()]
+        except OSError:
+            proxies = []
+    cfg = {
+        "regions": regions,
+        "categories": [int(c) for c in _get("feed_categories")],
+        "proxies": proxies,
+        "rps": float(_get("feed_rps")),
+        "rest_min": float(_get("feed_rest_min")),
+        "rules_path": "./data/alert_rules.json",
+        "cursor_fp": "./data/feed_cursor.json",
+        "tg_token": (notify or {}).get("tg_token") or None,
+        "tg_chat": (notify or {}).get("tg_chat") or None,
+    }
+    if already_notified is not None:
         cfg["already_notified"] = already_notified
     return cfg
 
