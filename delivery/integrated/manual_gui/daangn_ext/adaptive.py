@@ -166,6 +166,7 @@ def collect_region(
     proxies: list | None = None,
     sort_option: str | None = None,
     stop_before=None,
+    share_ip: bool = False,
 ) -> tuple[list, dict]:
     """한 지역(구) 완전 수집. (articles, stats) 반환. 포화면 가격분할.
     proxies 풀 주면 시작 IP 만 풀에서 고르고, 빈응답이 나는 즉시 robust 가 다음 IP 로 넘긴다.
@@ -181,6 +182,7 @@ def collect_region(
     웹 결과를 '이 시각 이후 전부'로 오해하고 다음 사이클의 stop_before 를 앞당겨
     그 사이 매물을 영구히 잃는다(app_api_failed 를 남기는 것과 같은 이유)."""
     app_failed: str | None = None
+    app_status = None          # AppApiError.status — 차단 판정은 문자열이 아니라 이걸로
     if access_token:
         try:
             src = _app_source_for(access_token)
@@ -192,6 +194,7 @@ def collect_region(
             # 폴백은 안전망이라 유지한다. 다만 절대 조용히 넘어가지 않는다 —
             # 로그로 알리고 stats["app_api_failed"] 로 상위(sweep_engine/GUI)까지 올린다.
             app_failed = _exc_summary(_e)
+            app_status = getattr(_e, "status", None)
             _warn_app_fallback(region_in, keyword, app_failed, key=_fallback_key(_e))
     seen: dict = {}
     # missed = 재시도 소진으로 "확인 못 한" 가격구간. 0건과 반드시 구분해야 한다.
@@ -200,6 +203,17 @@ def collect_region(
     if app_failed:
         # 이 지역 결과가 '앱API 없이 얻은 것'임을 결과에 박아둔다.
         stats["app_api_failed"] = app_failed
+        stats["app_api_status"] = app_status
+    if app_failed and share_ip:
+        # IP 공유 레인(앱API 8동시)에서 웹크롤로 떨어지면 같은 IP 동시요청 = 전부
+        # 빈응답이고, 어차피 웹 결과는 워터마크를 못 올린다. 폴백을 건너뛰고
+        # '못 봤다'로 남긴다 — 다음 사이클이 같은 구간을 다시 훑는다.
+        stats["fallback_skipped"] = True
+        if stop_before is not None:
+            stats["stop_before_unapplied"] = stop_before
+        if sort_option is not None:
+            stats["sort_option_unapplied"] = sort_option
+        return [], stats
     # 앱 전용 인자를 요청받고도 웹으로 내려온 경우(폴백이든 토큰 없음이든) 그 사실을 남긴다.
     # app_failed 유무와 무관하게 검사한다 — 토큰이 아예 없어 앱 분기를 못 탄 경우도
     # 결과는 똑같이 '정지 규칙이 안 걸린 웹 결과'이기 때문이다.
@@ -503,8 +517,27 @@ def shard_proxies(proxies: list, lanes: int) -> list[list]:
     return [g for g in out if g]
 
 
-def plan_lanes(proxies: list | None, lanes: int | None, max_lanes: int = 16) -> int:
-    """실제로 돌릴 레인 수. 프록시 수를 넘을 수 없다(넘으면 IP 를 공유하게 됨)."""
+# 계정 차단 신호로 보는 앱API 상태코드. 그 밖(5xx·전송오류·빈응답)은 IP/서버 사정이라
+# 계정을 격리하면 안 된다 — 프록시 쿨다운(app_source)이 따로 처리한다.
+# 토큰 만료(TokenExpired 는 status 가 없고 app_source 가 예외 없이 token_expired=True 로
+# 돌려준다)는 collect_lanes 가 401 과 같은 차단 신호로 센다.
+BLOCK_STATUSES = frozenset({401, 403, 429})
+
+# 앱API 경로의 레인 수이자 **상한**. 토큰 1개·IP 1개로 동시 8 = 13 req/s, 429/403
+# 없음(2026-09-01 실측, 클라 운영 계정이라 그 위로는 안 밀었다). 사용자가 더 적어도
+# 여기서 잘린다 — 429 는 계정 격리 신호라 스스로 상한을 넘기면 함대가 돌아가며 멈춘다.
+APP_API_LANES = 8
+
+
+def plan_lanes(proxies: list | None, lanes: int | None, max_lanes: int = 16,
+               share_ip: bool = False) -> int:
+    """실제로 돌릴 레인 수.
+
+    share_ip=False(웹크롤): 프록시 수를 넘을 수 없다 — 같은 IP 동시요청은 전부 빈응답.
+    share_ip=True(앱API): 레인이 IP 를 공유한다. 프록시 수와 무관하게 lanes(기본·상한
+      APP_API_LANES)."""
+    if share_ip:
+        return max(1, min(lanes or APP_API_LANES, APP_API_LANES, max_lanes))
     if not proxies:
         return 1                       # 프록시 없으면 IP 1개 = 레인 1개
     want = lanes or len(proxies)
@@ -526,10 +559,16 @@ def collect_lanes(
     on_result: Callable[[dict, list, dict], None] | None = None,
     sort_option: str | None = None,
     stop_before=None,
+    share_ip: bool = False,
 ) -> tuple[list, dict]:
-    """지역 목록을 레인 N개로 병렬 수집. 레인끼리 프록시를 공유하지 않는다.
+    """지역 목록을 레인 N개로 병렬 수집.
 
-    lanes 미지정이면 프록시 수(최대 max_lanes)만큼. 프록시가 없으면 1레인 = 순차.
+    share_ip=False 면 레인끼리 프록시를 공유하지 않는다(웹크롤 규칙). lanes 미지정이면
+    프록시 수(최대 max_lanes)만큼, 프록시가 없으면 1레인 = 순차.
+    share_ip=True 면 모든 레인이 같은 풀을 쓴다 — 앱API 는 IP 공유 동시요청이 실측상
+    안전하고, 안정화 모드(계정당 고정 IP 1개)에서 레인을 프록시 수로 묶으면 항상 1레인
+    순차가 되기 때문이다. lanes 미지정·초과 = APP_API_LANES. 이 경로에서 앱API 가
+    실패한 지역은 웹크롤로 떨어지지 않는다(collect_region 의 share_ip 참고).
     on_region(reg, 건수, stats) / on_result(reg, 매물리스트, stats) 는 레인들이 동시에
     부르므로 내부에서 락으로 직렬화한다. on_result 는 지역이 끝나는 즉시 그 지역 매물을
     넘겨받아 스트리밍 처리(중복제거·알림)를 할 수 있게 한다 — 전체가 끝날 때까지
@@ -543,15 +582,18 @@ def collect_lanes(
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    n_lanes = plan_lanes(proxies, lanes, max_lanes)
-    shards = shard_proxies(list(proxies or []), n_lanes) or [[]]
-    n_lanes = len(shards)
+    n_lanes = plan_lanes(proxies, lanes, max_lanes, share_ip=share_ip)
+    if share_ip:
+        shards = [list(proxies or []) for _ in range(n_lanes)]
+    else:
+        shards = shard_proxies(list(proxies or []), n_lanes) or [[]]
+        n_lanes = len(shards)
 
     queue = list(regions)
     q_lock = threading.Lock()
     w_lock = threading.Lock()
     seen: dict = {}
-    total_req = sat = rested = app_fb = sb_unapplied = 0
+    total_req = sat = rested = app_fb = sb_unapplied = app_blocked = tok_exp = 0
     app_fb_last = None
     per_lane = [{"regions": 0, "requests": 0, "articles": 0, "proxies": len(s)}
                 for s in shards]
@@ -561,7 +603,7 @@ def collect_lanes(
             return queue.pop(0) if queue else None
 
     def lane(idx: int):
-        nonlocal total_req, sat, rested, app_fb, app_fb_last, sb_unapplied
+        nonlocal total_req, sat, rested, app_fb, app_fb_last, sb_unapplied, app_blocked, tok_exp
         pool = shards[idx] or None
         first = True
         while True:
@@ -579,7 +621,8 @@ def collect_lanes(
                 keyword, reg["in"], only_on_sale=only_on_sale,
                 access_token=access_token, should_stop=should_stop, proxies=pool,
                 sort_option=region_arg(reg, "sort_option", sort_option),
-                stop_before=region_arg(reg, "stop_before", stop_before))
+                stop_before=region_arg(reg, "stop_before", stop_before),
+                share_ip=share_ip)
             with w_lock:
                 for a in arts:
                     seen[a["id"]] = a
@@ -590,6 +633,13 @@ def collect_lanes(
                 if st.get("app_api_failed"):
                     app_fb += 1
                     app_fb_last = st["app_api_failed"]
+                    if st.get("app_api_status") in BLOCK_STATUSES:
+                        app_blocked += 1
+                if st.get("token_expired"):
+                    # 예외가 아니라 빈 결과로 돌아온다 — 401 과 같은 차단 신호로 센다.
+                    # 안 세면 죽은 토큰의 계정이 빈 결과로 워터마크를 올리며 계속 뽑힌다.
+                    tok_exp += 1
+                    app_blocked += 1
                 if st.get("stop_before_unapplied") is not None:
                     sb_unapplied += 1
                 per_lane[idx]["regions"] += 1
@@ -613,6 +663,9 @@ def collect_lanes(
         # 앱API 폴백이 몇 지역에서 일어났는지 + 마지막 예외 요약(운영자 통지용)
         "app_api_fallbacks": app_fb,
         "app_api_failed": app_fb_last,
+        # 계정 차단 신호(401/403/429 또는 토큰 만료)였던 지역 수. 계정 격리는 이것만 본다.
+        "app_api_blocked": app_blocked,
+        "token_expired_regions": tok_exp,
         # 정지 규칙을 요청했지만 웹 결과라 못 건 지역 수. >0 이면 '이 시각 이후 전부'가 아니다.
         "stop_before_unapplied_regions": sb_unapplied,
     }
@@ -634,6 +687,7 @@ async def collect_lanes_async(
 ) -> tuple[list, dict]:
     """auto(aiohttp)용 레인 병렬. **레인마다 ClientSession 을 따로 만든다**
     (세션을 공유하면 커넥션풀·쿠키가 섞여 레인 격리가 깨진다).
+    웹크롤 전용 경로라 share_ip 가 없다 — 레인은 언제나 프록시를 샤딩한다.
     session_factory() 로 세션 생성을 주입할 수 있다(기본 aiohttp.ClientSession)."""
     import asyncio
 

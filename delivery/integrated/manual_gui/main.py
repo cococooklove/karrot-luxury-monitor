@@ -11,6 +11,7 @@ from daangn.detail import render_to_html
 from daangn.utils import image_contain_resize
 from daangn.workers import CancelableImageDownloader, ExportExcel
 from daangn.model import Product
+from daangn.sweep_engine import APP_API_LANES, MIN_IP_PER_LANE, sweep_capacity
 from daangn.task import CrawlTask
 from daangn.ui_mainwindow import Ui_MainWindow
 
@@ -348,6 +349,242 @@ def row_lines(table):
     table.setItemDelegate(RowLineDelegate(table))
     return table
 
+
+# 지역 트리 — 행에는 짧은 이름(부암동)만 보이고, 검색·표시용 전체 경로
+# (서울특별시 종로구 부암동)는 이 role 에 둔다. 예전엔 모든 행이 전체 경로를
+# 되풀이해 트리가 한 화면에 열 줄도 못 담았다.
+AREA_FULL_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
+
+
+def area_full_name(item):
+    """트리 항목의 전체 경로 — 없으면 보이는 글자."""
+    return item.data(0, AREA_FULL_ROLE) or item.text(0)
+
+
+class TossTreeDelegate(QtWidgets.QStyledItemDelegate):
+    """토스 결 지역 트리 — 행 하나를 통째로 그린다: 들여쓰기 · 셰브런 ·
+    둥근 체크 · 이름. Qt 기본 트리는 브랜치 화살표와 네모 체크박스를 이미지
+    파일 없이는 못 바꾸고 플랫폼마다 다르게 그린다. 델리게이트가 직접 그리면
+    파일도 플랫폼 차이도 없다. 클릭도 여기서 받는다 — 부모 행은 어디를
+    눌러도 접히고 펴지며, 체크는 상자를 눌러야 바뀐다. 리프는 어디를 눌러도
+    체크가 바뀐다."""
+    ROW_H = 40
+    INDENT = 24
+    BOX = 20
+    BLUE = "#3182F6"
+    HOVER = "#F2F4F6"
+    BORDER = "#D1D6DB"
+    CHEVRON = "#B0B8C1"
+    TEXT = "#191F28"
+    TEXT_LEAF = "#333D4B"
+
+    def __init__(self, tree):
+        super().__init__(tree)
+        self.tree = tree
+
+    @staticmethod
+    def _depth(index):
+        d = 0
+        p = index.parent()
+        while p.isValid():
+            d += 1; p = p.parent()
+        return d
+
+    def _zones(self, option, index):
+        """행 안의 세 구역 → (셰브런 rect, 체크 rect, 글자 x)."""
+        r = option.rect
+        x = r.left() + 10 + self._depth(index) * self.INDENT
+        cy = r.center().y()
+        chev = QtCore.QRect(x, cy - 10, 20, 20)
+        x += 22
+        box = QtCore.QRect(x, cy - self.BOX // 2, self.BOX, self.BOX)
+        return chev, box, x + self.BOX + 10
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        s.setHeight(self.ROW_H)
+        return s
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        r = option.rect
+        if option.state & QtWidgets.QStyle.StateFlag.State_MouseOver:
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(self.HOVER))
+            painter.drawRoundedRect(QtCore.QRectF(r).adjusted(4, 2, -4, -2), 10, 10)
+        chev, box, tx = self._zones(option, index)
+        has_kids = index.model().hasChildren(index)
+        if has_kids:
+            pen = QtGui.QPen(QtGui.QColor(self.CHEVRON), 1.8)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen); painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            c = chev.center()
+            path = QtGui.QPainterPath()
+            if option.state & QtWidgets.QStyle.StateFlag.State_Open:
+                path.moveTo(c.x() - 4, c.y() - 2); path.lineTo(c.x(), c.y() + 2); path.lineTo(c.x() + 4, c.y() - 2)
+            else:
+                path.moveTo(c.x() - 2, c.y() - 4); path.lineTo(c.x() + 2, c.y()); path.lineTo(c.x() - 2, c.y() + 4)
+            painter.drawPath(path)
+        state = index.data(QtCore.Qt.ItemDataRole.CheckStateRole)
+        try:
+            state = QtCore.Qt.CheckState(state)
+        except Exception:
+            state = QtCore.Qt.CheckState.Unchecked
+        bf = QtCore.QRectF(box)
+        if state == QtCore.Qt.CheckState.Unchecked:
+            painter.setPen(QtGui.QPen(QtGui.QColor(self.BORDER), 1.5))
+            painter.setBrush(QtGui.QColor("#FFFFFF"))
+            painter.drawRoundedRect(bf.adjusted(0.75, 0.75, -0.75, -0.75), 6, 6)
+        else:
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(self.BLUE))
+            painter.drawRoundedRect(bf, 6, 6)
+            pen = QtGui.QPen(QtGui.QColor("#FFFFFF"), 2.2)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen); painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            x0, y0 = bf.left(), bf.top()
+            path = QtGui.QPainterPath()
+            if state == QtCore.Qt.CheckState.Checked:
+                path.moveTo(x0 + 5, y0 + 10.5); path.lineTo(x0 + 8.5, y0 + 14); path.lineTo(x0 + 15, y0 + 6.5)
+            else:                                   # 부분 선택 = 파란 상자에 '−'
+                path.moveTo(x0 + 5.5, y0 + 10); path.lineTo(x0 + 14.5, y0 + 10)
+            painter.drawPath(path)
+        depth = self._depth(index)
+        font = QtGui.QFont(option.font)
+        if has_kids:
+            font.setPointSizeF(15 if depth == 0 else 14)
+            font.setWeight(QtGui.QFont.Weight.Bold if depth == 0 else QtGui.QFont.Weight.DemiBold)
+            painter.setPen(QtGui.QColor(self.TEXT))
+        else:
+            font.setPointSizeF(14); font.setWeight(QtGui.QFont.Weight.Normal)
+            painter.setPen(QtGui.QColor(self.TEXT_LEAF))
+        painter.setFont(font)
+        painter.drawText(QtCore.QRect(tx, r.top(), r.right() - tx - 8, r.height()),
+                         int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
+                         index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
+            return True                             # 두 번 누름 = 두 번 토글. 트리 기본 펼침과 겹치지 않게 막는다
+        if (event.type() != QtCore.QEvent.Type.MouseButtonRelease
+                or event.button() != QtCore.Qt.MouseButton.LeftButton):
+            return False
+        if not (index.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable) or not (
+                index.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled):
+            return False
+        pos = event.position().toPoint()
+        chev, box, _ = self._zones(option, index)
+        has_kids = model.hasChildren(index)
+        hit_box = box.adjusted(-6, -6, 6, 6).contains(pos)
+        if hit_box or not has_kids:
+            cur = index.data(QtCore.Qt.ItemDataRole.CheckStateRole)
+            new = (QtCore.Qt.CheckState.Unchecked
+                   if QtCore.Qt.CheckState(cur) == QtCore.Qt.CheckState.Checked
+                   else QtCore.Qt.CheckState.Checked)
+            model.setData(index, new, QtCore.Qt.ItemDataRole.CheckStateRole)
+            return True
+        self.tree.setExpanded(index, not self.tree.isExpanded(index))
+        return True
+
+
+def toss_tree(tree):
+    """QTreeWidget 을 토스 결로 — 델리게이트가 그리므로 Qt 의 브랜치·들여쓰기·
+    선택 강조는 전부 끈다. 트리 자체는 그대로라 항목을 만드는 코드는 안 바뀐다."""
+    tree.setObjectName("tossTree")
+    tree.setHeaderHidden(True)
+    tree.setRootIsDecorated(False)
+    tree.setIndentation(0)
+    tree.setExpandsOnDoubleClick(False)
+    tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+    tree.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+    tree.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    tree.setUniformRowHeights(True)
+    tree.setMouseTracking(True)
+    tree.setItemDelegate(TossTreeDelegate(tree))
+    _wire_tristate(tree)
+    return tree
+
+
+def _wire_tristate(tree):
+    """부모↔자식 체크 전파를 직접 한다 — Qt 의 ItemIsAutoTristate 는 숨은
+    자식을 계산에서 뺀다. 검색으로 동 하나만 남기고 [전체 선택]을 누르면 구가
+    '전부 체크'로 읽혀 숨은 동 88곳까지 딸려 왔다(압구정 1 → 89). 항목 flag 에
+    AutoTristate 를 주면 안 된다 — 둘이 겹쳐 서로를 되돌린다."""
+    C, U, P = (Qt.CheckState.Checked, Qt.CheckState.Unchecked,
+               Qt.CheckState.PartiallyChecked)
+    busy = [False]
+
+    def on_changed(item, col):
+        if busy[0] or col != 0:
+            return
+        busy[0] = True
+        try:
+            st = item.checkState(0)
+            if item.childCount() and st != P:        # 아래로: 자손 전부. 부분은 안 내려간다
+                stack = [item]
+                while stack:
+                    it = stack.pop()
+                    for i in range(it.childCount()):
+                        c = it.child(i)
+                        if c.checkState(0) != st:
+                            c.setCheckState(0, st)
+                        stack.append(c)
+            p = item.parent()
+            while p is not None:                      # 위로: 자식 상태로 부모를 다시 센다
+                states = {p.child(i).checkState(0) for i in range(p.childCount())}
+                new = C if states == {C} else U if states == {U} else P
+                if p.checkState(0) != new:
+                    p.setCheckState(0, new)
+                p = p.parent()
+        finally:
+            busy[0] = False
+    tree.itemChanged.connect(on_changed)
+
+
+class FlowLayout(QtWidgets.QLayout):
+    """줄바꿈되는 가로 배치 — 선택 칩이 창 폭에 맞춰 흐른다. Qt 에 없다."""
+
+    def __init__(self, parent=None, hspace=6, vspace=6):
+        super().__init__(parent)
+        self._items = []
+        self._h, self._v = hspace, vspace
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item): self._items.append(item)
+    def count(self): return len(self._items)
+    def itemAt(self, i): return self._items[i] if 0 <= i < len(self._items) else None
+    def takeAt(self, i): return self._items.pop(i) if 0 <= i < len(self._items) else None
+    def expandingDirections(self): return QtCore.Qt.Orientation(0)
+    def hasHeightForWidth(self): return True
+    def heightForWidth(self, w): return self._lay(QtCore.QRect(0, 0, w, 0), True)
+    def sizeHint(self): return self.minimumSize()
+
+    def minimumSize(self):
+        s = QtCore.QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        return s
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._lay(rect, False)
+
+    def _lay(self, rect, test):
+        x, y, line_h = rect.x(), rect.y(), 0
+        for it in self._items:
+            s = it.sizeHint()
+            if x + s.width() > rect.right() + 1 and line_h > 0:
+                x = rect.x(); y += line_h + self._v; line_h = 0
+            if not test:
+                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), s))
+            x += s.width() + self._h
+            line_h = max(line_h, s.height())
+        return y + line_h - rect.y()
+
 # 등록 표의 열. 인덱스를 손으로 세면 열이 하나 끼는 순간 조용히 어긋난다
 # (실제로 삭제가 id 대신 다른 열을 읽을 뻔했다). 이름으로만 참조한다.
 ALERT_COLS = ["키워드", "상태", "수집 방식", "가격범위", "제외", "추가", "끌올 기간", "id"]
@@ -542,7 +779,39 @@ DEFAULT_SWEEP_SIDO = ("서울특별시", "경기도")
 # 한 사이클이 주기 안에 끝나는 상한. 2026-09-01 실측: 최신순 한 페이지가
 # 23분을 덮고 토큰·IP 하나로 13 req/s 가 나온다 → 1380초 × 13 ≈ 17,900.
 # 넘기면 사이클이 주기보다 길어져 뒤로 밀린다(클라에게는 '알림이 늦다'로만 보인다).
-SWEEP_BUDGET = 17900
+# 한 사이클 예산 = 페이지폭(sweep_engine.PAGE_SPAN_MIN) × 초당 요청. 지역 × 조건이 이걸
+# 넘으면 사이클이 페이지폭보다 길어져 워터마크 사이 매물을 놓치기 시작한다.
+# 페이지폭 상수는 엔진의 수렴 판정(sweep_capacity)과 한 곳을 쓴다 — 재측정하면 거기만.
+SWEEP_REQ_PER_LANE = 1.6        # 실측 동시 8 = 13 req/s → 레인당 1.6
+
+
+def sweep_budget(lanes=None):
+    """레인 수에 따른 한 사이클 예산. 0/None = 앱API 기본 레인(APP_API_LANES).
+
+    상수로 두면 레인 1개(웹크롤 경로·수동 지정)에서도 8레인 예산으로 판정해
+    동 단위를 고른 채 사이클이 8배 길어진다 — 증상은 '알림이 늦다' 뿐이다.
+    호출측이 엔진과 같은 규칙으로 실제 레인 수를 넘겨야 한다(sweep_lanes_effective)."""
+    n = max(1, int(lanes or 0) or APP_API_LANES)
+    return int(sweep_capacity(SWEEP_REQ_PER_LANE * n))
+
+
+def sweep_lanes_effective(lanes, has_token, n_proxies):
+    """엔진이 실제로 돌릴 레인 수 — SweepEngine._plan_lanes 와 같은 규칙.
+
+    토큰이 있으면 앱API 경로(IP 공유, 기본·상한 APP_API_LANES). 없으면 웹크롤 경로라
+    프록시 수 ÷ MIN_IP_PER_LANE 로 묶인다. 예산은 이 수로 잡아야 엔진과 어긋나지 않는다."""
+    want = int(lanes or 0)
+    if has_token:
+        return max(1, min(want or APP_API_LANES, APP_API_LANES))
+    n_proxy = int(n_proxies or 0)
+    if n_proxy <= 1:
+        return 1
+    auto = max(1, n_proxy // MIN_IP_PER_LANE)
+    n = want if want > 0 else auto
+    return max(1, min(n, n_proxy // MIN_IP_PER_LANE or 1))
+
+
+SWEEP_BUDGET = sweep_budget(APP_API_LANES)
 
 
 def default_sweep_regions(out_json="./OUT.json"):
@@ -606,23 +875,25 @@ def default_sweep_regions_coarse(out_json="./OUT.json"):
     return out
 
 
-def sweep_fit_budget(regions, n_conditions, coarse, log=None):
+def sweep_fit_budget(regions, n_conditions, coarse, log=None, budget=None):
     """지역 × 조건이 예산을 넘으면 성긴 목록으로 내린다 → (지역, 낮췄는지).
 
     넘긴 채로 두면 사이클이 주기보다 길어져 뒤로 밀리기만 한다. 그때 화면에
-    보이는 증상은 '알림이 늦다' 뿐이라 원인을 못 찾는다."""
+    보이는 증상은 '알림이 늦다' 뿐이라 원인을 못 찾는다.
+    budget 미지정 = 기본 레인 예산(SWEEP_BUDGET)."""
     n = max(1, int(n_conditions or 1))
-    if len(regions) * n <= SWEEP_BUDGET or not coarse:
+    budget = int(budget or SWEEP_BUDGET)
+    if len(regions) * n <= budget or not coarse:
         return regions, False
     if log:
         log(f"[지역 훑기] 조건 {n}개 × {len(regions)}곳 = {len(regions) * n:,} —"
-            f" 한 사이클 예산({SWEEP_BUDGET:,})을 넘어 구·시 단위 {len(coarse)}곳으로"
+            f" 한 사이클 예산({budget:,})을 넘어 구·시 단위 {len(coarse)}곳으로"
             f" 낮춰 돕니다 ({len(coarse) * n:,}건)")
     return coarse, True
 
 
 def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None,
-                    n_conditions=1):
+                    n_conditions=1, lanes=None):
     """지역 설정 → cfg 의 scope/regions. GUI(_auto_cfg_base)·헤드리스 공용.
 
     셋 중 하나다:
@@ -641,7 +912,8 @@ def sweep_scope_for(regions, nationwide, out_json="./OUT.json", log=None,
     # 조건이 늘면 같은 지역 수라도 사이클이 길어진다. 예산을 넘으면 성긴
     # 목록으로 내린다 — 조용히 뒤처지는 것보다 한 바퀴를 도는 편이 낫다.
     dflt, lowered = sweep_fit_budget(
-        dflt, n_conditions, default_sweep_regions_coarse(out_json), log=log)
+        dflt, n_conditions, default_sweep_regions_coarse(out_json), log=log,
+        budget=sweep_budget(lanes))
     if log and not lowered:
         log(f"[지역 훑기] 기본 범위 서울·경기 {len(dflt)}곳")
     return {"scope": "regions", "regions": dflt}
@@ -896,7 +1168,7 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
         "token_provider": token_provider,
         "stabilize": bool(token_provider),
         "accounts_fp": "./accounts.json",
-        "daily_cap": 300,
+        "daily_cap": 0,        # 0 = 상한 없음(account_scheduler 참고). 회전·격리만 쓴다.
         "warmup_days": 3,
         "out_json": "./OUT.json",
         "db_path": "./auto_seen.db",
@@ -904,7 +1176,9 @@ def headless_sweep_cfg(settings, entries, notify, proxies=None,
     cfg.update(sweep_scope_for(s.get("sweep_regions"),
                                s.get(SWEEP_NATIONWIDE_KEY),
                                out_json=cfg["out_json"], log=log,
-                               n_conditions=len(entries or []) or 1))
+                               n_conditions=len(entries or []) or 1,
+                               lanes=sweep_lanes_effective(
+                                   cfg["lanes"], bool(token_provider), len(cfg["proxies"]))))
     cfg["conditions"] = sweep_conditions(
         entries,
         extra=[x for x in (s.get("sweep_extra") or []) if x],
@@ -1648,6 +1922,7 @@ QLabel#mutedNote { color: #8B857A; font-size: 13px; }
    버튼이다. 예전엔 베이지 QGroupBox 세 개가 금색 제목을 띄우고 있어 조건 탭의
    단계 카드와 다른 앱처럼 보였다. */
 QWidget#settingsPage { background: #F5F3EE; }
+QWidget#settingsCol { background: transparent; }
 QFrame#settingRow { background: transparent; border: none; border-bottom: 1px solid #F1EEE8; }
 QFrame#settingRow[last="true"] { border-bottom: none; }
 QLabel#rowLabel { color: #3A342B; font-size: 14px; font-weight: 700; }
@@ -1660,6 +1935,30 @@ QPushButton#linkBtn:hover { background: #FBF6EA; border-radius: 10px; }
 QPushButton#linkBtn:disabled { color: #B5AC9A; background: transparent; }
 QPushButton#ghostBtn { background: #F2F0EC; border: none; border-radius: 10px; color: #3A342B; padding: 8px 14px; font-size: 13px; }
 QPushButton#ghostBtn:hover { background: #E8E4DC; }
+
+/* 지역 트리 — 토스 결. 테두리 없는 흰 면, 행은 델리게이트가 그린다(둥근
+   파란 체크·셰브런·hover 회색). 검색은 회색 알약, 보조 동작은 글자 버튼,
+   선택 수는 파란 칩. 결과 탭과 같은 파랑(#3182F6) 하나만 쓴다. */
+QTreeWidget#tossTree { background: #FFFFFF; border: none; border-radius: 0; padding: 0; outline: none; }
+QTreeWidget#tossTree::item { padding: 0; border: none; background: transparent; }
+QTreeWidget#tossTree::item:selected, QTreeWidget#tossTree::item:hover { background: transparent; color: #191F28; }
+QTreeWidget#tossTree QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 2px; }
+QTreeWidget#tossTree QScrollBar::handle:vertical { background: #E5E8EB; border-radius: 4px; min-height: 36px; }
+QTreeWidget#tossTree QScrollBar::handle:vertical:hover { background: #D1D6DB; }
+QLineEdit#tossSearch { background: #F2F4F6; border: 1.5px solid transparent; border-radius: 12px;
+  padding: 9px 14px; font-size: 15px; color: #191F28; min-height: 22px; }
+QLineEdit#tossSearch:focus { background: #FFFFFF; border: 1.5px solid #3182F6; }
+QPushButton#tossTextBtn { background: transparent; border: none; border-radius: 10px; color: #4E5968;
+  padding: 9px 10px; font-size: 13px; font-weight: 700; }
+QPushButton#tossTextBtn:hover { background: #F2F4F6; color: #191F28; }
+QLabel#tossCountChip { background: #F2F4F6; color: #8B95A1; border-radius: 13px; padding: 5px 12px;
+  font-size: 13px; font-weight: 800; }
+QLabel#tossCountChip[some="true"] { background: #E8F3FF; color: #3182F6; }
+QWidget#tossChipRow { background: transparent; }
+QPushButton#tossChip { background: #E8F3FF; color: #1B64DA; border: none; border-radius: 14px;
+  padding: 6px 12px; font-size: 13px; font-weight: 700; }
+QPushButton#tossChip:hover { background: #D6E9FF; }
+QLabel#tossChipMore { color: #8B95A1; font-size: 13px; font-weight: 700; padding: 6px 4px; }
 
 /* 목록 필터 — 고르는 값이지 누르는 명령이 아니다. 버튼처럼 도드라지면
    [감시 시작] 과 같은 무게로 보인다. 선택된 하나만 진하게. */
@@ -2608,9 +2907,9 @@ class MainWindow(QMainWindow):
         if last:
             row.setProperty("last", "true")
         h = QtWidgets.QHBoxLayout(row)
-        h.setContentsMargins(0, 10, 0, 10); h.setSpacing(14)
+        h.setContentsMargins(0, 6, 0, 6); h.setSpacing(12)
         lab = QtWidgets.QLabel(label, row); lab.setObjectName("rowLabel")
-        lab.setFixedWidth(112)
+        lab.setFixedWidth(96)
         h.addWidget(lab, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         h.addWidget(widget, 1)
         return row
@@ -2816,9 +3115,16 @@ class MainWindow(QMainWindow):
         # ── 설정 페이지: 알림(인라인) → 계정·프록시(창) → 고급(접힘) ──
         # 조건 탭과 같은 회색 바탕 위 흰 카드 세 장. 카드 머리 = 제목 + 한 줄
         # 설명, 안은 목록 행. 배지는 없다 — 설정엔 순서가 없다.
+        # 내용은 입력 네 칸과 버튼 셋뿐이다 — 카드를 창 폭에 늘리면 빈 흰 면만
+        # 커진다. 본문 열을 720px 로 묶어 가운데 두고 나머지는 회색 여백.
         settings_w = QtWidgets.QWidget()
         settings_w.setObjectName("settingsPage")
-        sv = QtWidgets.QVBoxLayout(settings_w); sv.setContentsMargins(20, 18, 20, 18); sv.setSpacing(14)
+        _outer = QtWidgets.QHBoxLayout(settings_w); _outer.setContentsMargins(20, 18, 20, 18)
+        _col = QtWidgets.QWidget(settings_w); _col.setObjectName("settingsCol")
+        _col.setMaximumWidth(720)
+        # 좌우 여백 1 : 열 6 — 열은 720 에서 잘리고, 창이 좁으면 비율대로 준다.
+        _outer.addStretch(1); _outer.addWidget(_col, 6); _outer.addStretch(1)
+        sv = QtWidgets.QVBoxLayout(_col); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(12)
         self.notifyBox, nl = self._step_card(
             None, "알림", "새 매물과 가격 변동을 텔레그램·구글시트로 보냅니다.")
         self._build_notify_form(self.notifyBox, nl)
@@ -4000,11 +4306,10 @@ class MainWindow(QMainWindow):
     def _build_auto_area_tree(self, parent):
         """자동용 지역 트리 — 수동과 동일한 시도>구>동 3단계. 미선택 시 전국."""
         import json as _json
-        tree = QtWidgets.QTreeWidget(parent)
-        tree.setHeaderLabel("지역 선택")
+        tree = toss_tree(QtWidgets.QTreeWidget(parent))
         tree.setMinimumWidth(240)
         self.auto_area_leaves = []
-        CK = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate
+        CK = Qt.ItemFlag.ItemIsUserCheckable       # 전파는 toss_tree 가 한다(AutoTristate 금지)
         try:
             with open("./OUT.json", encoding="utf-8") as _f:
                 data = _json.load(_f)
@@ -4014,17 +4319,20 @@ class MainWindow(QMainWindow):
         sido = {}          # name1(시도) -> [블록(구), ...]
         for block in data:
             sido.setdefault(block["name1"], []).append(block)
-        root = QtWidgets.QTreeWidgetItem(tree, ["지역"])
-        root.setFlags(root.flags() | CK); root.setCheckState(0, Qt.CheckState.Unchecked)
+        # 시도가 최상위다. '지역' 루트 행은 [전체 선택] 버튼이 대신한다.
+        # 행에는 그 단계 이름만(종로구 · 부암동), 전체 경로는 AREA_FULL_ROLE.
         for s in sido:                      # 원본 순서(수동과 동일). 정렬 안 함
-            top = QtWidgets.QTreeWidgetItem(root, [s])
+            top = QtWidgets.QTreeWidgetItem(tree, [s])
+            top.setData(0, AREA_FULL_ROLE, s)
             top.setFlags(top.flags() | CK); top.setCheckState(0, Qt.CheckState.Unchecked)
             for block in sido[s]:
                 gu_txt = f"{block['name1']} {block['name2']}".strip()
-                guit = QtWidgets.QTreeWidgetItem(top, [gu_txt])
+                guit = QtWidgets.QTreeWidgetItem(top, [(block["name2"] or "").strip() or gu_txt])
+                guit.setData(0, AREA_FULL_ROLE, gu_txt)
                 guit.setFlags(guit.flags() | CK); guit.setCheckState(0, Qt.CheckState.Unchecked)
                 for loc in block["locations"]:
-                    leaf = QtWidgets.QTreeWidgetItem(guit, [f"{gu_txt} {loc['name']}".strip()])
+                    leaf = QtWidgets.QTreeWidgetItem(guit, [loc["name"]])
+                    leaf.setData(0, AREA_FULL_ROLE, f"{gu_txt} {loc['name']}".strip())
                     leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     leaf.setCheckState(0, Qt.CheckState.Unchecked)
                     leaf.setData(0, Qt.ItemDataRole.UserRole, f"{loc['name']}-{loc['id']}")
@@ -4032,49 +4340,106 @@ class MainWindow(QMainWindow):
         return tree
 
     def _tree_panel(self, tree, leaves):
-        """트리 + 지역검색 + 전체선택/해제 (UX). 검색은 리프 텍스트 부분일치."""
+        """트리 + 지역검색 + 전체선택/해제 + 선택 칩 (토스 결).
+
+        검색은 전체 경로(AREA_FULL_ROLE) 부분일치 — 행에는 '부암동'만 보여도
+        '종로'로 찾힌다. 검색 중엔 맞는 동이 없는 시도·구 행을 숨긴다.
+        고른 동은 검색줄 아래 칩으로 보인다(× 로 해제) — 트리가 접혀 있어도
+        무엇을 골랐는지 한눈에 본다."""
         panel = QtWidgets.QWidget(self)
+        panel.setObjectName("tossTreePanel")
         v = QtWidgets.QVBoxLayout(panel)
-        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
         search = QtWidgets.QLineEdit(panel)
-        search.setPlaceholderText("🔍 지역 검색…")
+        search.setObjectName("tossSearch")
+        search.setPlaceholderText("지역 검색  (예: 강남, 분당)")
         search.setClearButtonEnabled(True)
+
+        def _parents():
+            seen, out = set(), []
+            for leaf in leaves:
+                p = leaf.parent()
+                while p is not None and id(p) not in seen:
+                    seen.add(id(p)); out.append(p); p = p.parent()
+            return out
+        parents = _parents()
 
         def do_filter(text):
             text = text.strip()
             for leaf in leaves:
-                match = (text == "" or text in leaf.text(0))
+                match = (text == "" or text in area_full_name(leaf))
                 leaf.setHidden(not match)
-                if match and text:
-                    p = leaf.parent()
-                    while p:                     # 매칭 리프의 상위 펼침
-                        p.setExpanded(True); p = p.parent()
+            # 리프를 정한 뒤 부모 — 보이는 자식이 하나도 없으면 숨긴다.
+            # 깊은 쪽(구)부터 봐야 시도가 구의 결과를 읽는다.
+            for p in sorted(parents, key=lambda it: -TossTreeDelegate._depth(
+                    tree.indexFromItem(it))):
+                if not text:
+                    p.setHidden(False); continue
+                any_vis = any(not p.child(i).isHidden() for i in range(p.childCount()))
+                p.setHidden(not any_vis)
+                p.setExpanded(any_vis)
         search.textChanged.connect(do_filter)
 
         # 검색·전체 선택/해제·선택 수를 한 줄에 — 트리 위 두 줄이 세로로
         # 쌓이면 지역 목록이 화면 아래로 밀린다.
-        hb = QtWidgets.QHBoxLayout(); hb.setSpacing(8)
+        hb = QtWidgets.QHBoxLayout(); hb.setSpacing(4)
         hb.addWidget(search, 1)
-        ball = QtWidgets.QPushButton("전체 선택", panel); ball.setObjectName("ghostBtn")
-        bclr = QtWidgets.QPushButton("전체 해제", panel); bclr.setObjectName("ghostBtn")
-        cnt = QtWidgets.QLabel("선택 0", panel)
-        cnt.setStyleSheet("color:#8A6D1F; font-weight:800; padding:0 6px;")
+        ball = QtWidgets.QPushButton("전체 선택", panel); ball.setObjectName("tossTextBtn")
+        bclr = QtWidgets.QPushButton("전체 해제", panel); bclr.setObjectName("tossTextBtn")
+        for b in (ball, bclr):
+            b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        cnt = QtWidgets.QLabel("0곳 선택", panel)
+        cnt.setObjectName("tossCountChip")
         ball.clicked.connect(lambda: [l.setCheckState(0, Qt.CheckState.Checked)
                                       for l in leaves if not l.isHidden()])
         bclr.clicked.connect(lambda: [l.setCheckState(0, Qt.CheckState.Unchecked)
                                       for l in leaves])
+
+        # 선택 칩 — 고른 동을 '종로구 부암동' 칩으로. 8개 넘으면 '외 N곳'.
+        chips = QtWidgets.QWidget(panel)
+        chips.setObjectName("tossChipRow")
+        chips_l = FlowLayout(chips)
+        chips.hide()
+        CHIP_MAX = 8
+
+        def _clear_chips():
+            while chips_l.count():
+                it = chips_l.takeAt(0)
+                if it.widget():
+                    it.widget().deleteLater()
+
+        def _rebuild_chips(picked):
+            _clear_chips()
+            for leaf in picked[:CHIP_MAX]:
+                gu = leaf.parent().text(0) if leaf.parent() is not None else ""
+                b = QtWidgets.QPushButton(f"{gu} {leaf.text(0)}".strip() + "  ✕", chips)
+                b.setObjectName("tossChip")
+                b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+                b.setToolTip("누르면 선택에서 뺍니다")
+                b.clicked.connect(lambda _=False, l=leaf: l.setCheckState(0, Qt.CheckState.Unchecked))
+                chips_l.addWidget(b)
+            if len(picked) > CHIP_MAX:
+                more = QtWidgets.QLabel(f"외 {len(picked) - CHIP_MAX:,}곳", chips)
+                more.setObjectName("tossChipMore")
+                chips_l.addWidget(more)
+            chips.setVisible(bool(picked))
+            chips.updateGeometry()
 
         # 디바운스: 시도/구 체크 시 itemChanged 수천 발생 → 매번 전체스캔하면 O(N²) 폭발.
         # 타이머로 변경을 모아 한 번만 카운트.
         timer = QtCore.QTimer(panel); timer.setSingleShot(True); timer.setInterval(150)
 
         def do_count():
-            n = sum(1 for l in leaves if l.checkState(0) == Qt.CheckState.Checked)
-            cnt.setText(f"선택 {n}")
+            picked = [l for l in leaves if l.checkState(0) == Qt.CheckState.Checked]
+            cnt.setText(f"{len(picked):,}곳 선택")
+            cnt.setProperty("some", bool(picked))
+            cnt.style().unpolish(cnt); cnt.style().polish(cnt)
+            _rebuild_chips(picked)
         timer.timeout.connect(do_count)
         tree.itemChanged.connect(lambda *_: timer.start())
-        hb.addWidget(ball); hb.addWidget(bclr); hb.addWidget(cnt)
+        hb.addSpacing(4); hb.addWidget(ball); hb.addWidget(bclr); hb.addSpacing(4); hb.addWidget(cnt)
         v.addLayout(hb)
+        v.addWidget(chips)
         v.addWidget(tree, 1)
         return panel
 
@@ -4096,9 +4461,8 @@ class MainWindow(QMainWindow):
 
         # 지역 — 미선택이면 기본 지역(서울·경기). 전국은 아래 체크박스로만.
         self.autoAreaTree = self._build_auto_area_tree(box)
-        self.autoAreaTree.setHeaderHidden(True)     # 카드 제목이 '지역 선택'을 이미 말한다
         area = self._tree_panel(self.autoAreaTree, self.auto_area_leaves)
-        area.setMaximumHeight(280)
+        area.setMaximumHeight(420)                   # 행 40px — 검색줄·칩 빼고 여덟 줄쯤
         gv.addWidget(area)
 
         # 전국은 의식적으로 켜야 한다 — 동 6537곳 × 키워드가 한 사이클이라
@@ -4144,16 +4508,16 @@ class MainWindow(QMainWindow):
         self.autoRestMax.setToolTip("사이클(전국 1바퀴) 사이 랜덤 휴식. 10~3600초")
         self.autoGapMin.setToolTip("지역(구) 요청 사이 랜덤 휴식. 0.3~10.0초")
         self.autoGapMax.setToolTip("지역(구) 요청 사이 랜덤 휴식. 0.3~10.0초")
-        # 레인 = 동시에 도는 수집 갈래. 프록시를 샤딩해 나눠 쓰므로 프록시 수를 넘을 수 없고,
-        # 레인당 IP 가 3개 미만이면 빈응답 시 교체할 곳이 없어 오히려 느려진다.
-        # 0 = 자동(프록시 수 ÷ 3). 실측: 레인4 = 순차 대비 2.5배, 매물 손실 0.
+        # 레인 = 동시에 도는 수집 갈래. 앱API(토큰 있음)는 IP 를 공유해 동시요청하므로
+        # 0 = APP_API_LANES(8, 실측 13 req/s 무스로틀). 웹크롤 폴백 경로만 프록시를
+        # 샤딩해 프록시 수 ÷ 3 으로 묶인다(같은 IP 동시요청 = 빈응답).
         self.autoLanes = QtWidgets.QSpinBox(box)
         self.autoLanes.setRange(0, 16); self.autoLanes.setValue(0)
         self.autoLanes.setSpecialValueText("자동"); self.autoLanes.setFixedWidth(72)
         self.autoLanes.setToolTip(
-            "동시 수집 갈래(레인) 수. 0=자동(프록시 수 ÷ 3).\n"
-            "레인은 프록시를 나눠 갖는다 — 같은 IP 로 동시요청하면 전부 빈응답이 된다.\n"
-            "프록시가 부족하면 지정값보다 낮게 자동 조정된다.")
+            f"동시 수집 갈래(레인) 수. 0=자동(앱API {APP_API_LANES}개, 실측 무스로틀 상한).\n"
+            "앱API 는 레인이 IP 를 공유한다 — 프록시 수와 무관.\n"
+            "웹크롤 폴백은 프록시 수 ÷ 3 으로 자동 조정된다(같은 IP 동시요청 = 빈응답).")
         # 토큰 갱신 체크박스는 없다 — LDPlayer 앱이 갱신한 토큰을 수확하는 것이
         # 유일한 경로라(PC 직접 갱신은 WAF 가 막는다) 끄는 순간 토큰 0 이 된다.
         self._notify = self._load_notify()
@@ -4327,7 +4691,7 @@ class MainWindow(QMainWindow):
         lay 를 주면 그 레이아웃(카드 본문)에 이어 붙인다."""
         n = self._notify
         v = lay if lay is not None else QtWidgets.QVBoxLayout(box)
-        v.setSpacing(8)
+        v.setSpacing(6)
         self.notifyToken = QtWidgets.QLineEdit(n["tg_token"], box)
         self.notifyToken.setPlaceholderText("텔레그램 봇 토큰 (예: 123456:AA...)")
         self.notifyChat = QtWidgets.QLineEdit(n["tg_chat"], box)
@@ -4851,7 +5215,7 @@ class MainWindow(QMainWindow):
             # + daily_cap/warmup. 수확 갱신 켜졌을 때 함께 활성(다계정 전제).
             "stabilize": True,
             "accounts_fp": "./accounts.json",
-            "daily_cap": 300,
+            "daily_cap": 0,        # 0 = 상한 없음(account_scheduler 참고). 회전·격리만 쓴다.
             "warmup_days": 3,
             "out_json": "./OUT.json",
             "db_path": "./auto_seen.db",
@@ -4862,7 +5226,9 @@ class MainWindow(QMainWindow):
                                    self.autoNationwide.isChecked(),
                                    out_json=cfg["out_json"],
                                    log=self._alog,
-                                   n_conditions=len(self._queue_entries()) or 1))
+                                   n_conditions=len(self._queue_entries()) or 1,
+                                   # GUI 는 항상 수확 토큰 경로(앱API)다.
+                                   lanes=sweep_lanes_effective(cfg["lanes"], True, 0)))
         return cfg
 
     @staticmethod
@@ -5147,7 +5513,7 @@ class MainWindow(QMainWindow):
 
         # 좌: 지역 선택 (검색+전체선택 패널)
         self.ui.areaTree.setMinimumWidth(200)
-        self.ui.areaTree.setHeaderLabel("지역 선택")
+        toss_tree(self.ui.areaTree)
         split.addWidget(self._tree_panel(self.ui.areaTree, self.all_last_child))
 
         # 중앙: 슬림 필터바(2줄) + 대형 결과 테이블 + 하단 보조바
@@ -5251,25 +5617,15 @@ class MainWindow(QMainWindow):
             lis = AREA_ROOT.setdefault(area["name1"], [])
             lis.append(area)
 
-        tree_root = QtWidgets.QTreeWidgetItem(self.ui.areaTree)
-        tree_root.setText(0, "지역")
-        tree_root.setFlags(
-            tree_root.flags()
-            | Qt.ItemFlag.ItemIsAutoTristate
-            | Qt.ItemFlag.ItemIsUserCheckable
-        )
-        tree_root.setCheckState(0, Qt.CheckState.Unchecked)
-
+        # 시도가 최상위 — '지역' 루트 행은 [전체 선택] 버튼이 대신한다. 행에는
+        # 그 단계 이름만 보이고 전체 경로는 AREA_FULL_ROLE 에 둔다(자동 트리와 같다).
         all_locations: list[tuple[str, str]] = []
 
         for sido in AREA_ROOT:
-            parent = QtWidgets.QTreeWidgetItem(tree_root)
+            parent = QtWidgets.QTreeWidgetItem(self.ui.areaTree)
             parent.setText(0, f"{sido}")
-            parent.setFlags(
-                parent.flags()
-                | Qt.ItemFlag.ItemIsAutoTristate
-                | Qt.ItemFlag.ItemIsUserCheckable
-            )
+            parent.setData(0, AREA_FULL_ROLE, f"{sido}")
+            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable)   # 전파는 toss_tree 가 한다
             parent.setCheckState(0, Qt.CheckState.Unchecked)
 
             sido_locations: list[tuple[str, str]] = []
@@ -5280,12 +5636,9 @@ class MainWindow(QMainWindow):
                 child1_txt = f"{name1} {name2}".strip()
 
                 child1 = QtWidgets.QTreeWidgetItem(parent)
-                child1.setText(0, child1_txt)
-                child1.setFlags(
-                    child1.flags()
-                    | Qt.ItemFlag.ItemIsAutoTristate
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                )
+                child1.setText(0, name2.strip() or child1_txt)
+                child1.setData(0, AREA_FULL_ROLE, child1_txt)
+                child1.setFlags(child1.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 child1.setCheckState(0, Qt.CheckState.Unchecked)
 
                 area_locations: list[tuple[str, str]] = []
@@ -5293,7 +5646,8 @@ class MainWindow(QMainWindow):
                 for loc in area["locations"]:
                     child2 = QtWidgets.QTreeWidgetItem(child1)
                     child2.setFlags(child2.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    child2.setText(0, f"{child1_txt} {loc['name']}".strip())
+                    child2.setText(0, loc["name"])
+                    child2.setData(0, AREA_FULL_ROLE, f"{child1_txt} {loc['name']}".strip())
                     child2.setData(
                         0, Qt.ItemDataRole.UserRole, f"{loc['name']}-{loc['id']}"
                     )
@@ -5301,14 +5655,14 @@ class MainWindow(QMainWindow):
                     self.all_last_child.append(child2)
 
                     location_entry = (
-                        child2.text(0),
+                        area_full_name(child2),
                         child2.data(0, Qt.ItemDataRole.UserRole),
                     )
                     area_locations.append(location_entry)
                     sido_locations.append(location_entry)
                     all_locations.append(location_entry)
 
-                    self._register_area_mapping(child2.text(0), [location_entry])
+                    self._register_area_mapping(area_full_name(child2), [location_entry])
                     self._register_area_mapping(str(loc["id"]), [location_entry])
 
                 self._register_area_mapping(child1_txt, area_locations)
@@ -5405,7 +5759,7 @@ class MainWindow(QMainWindow):
         area_id_list = []
         for ch in self.all_last_child:
             if ch.checkState(0) == Qt.CheckState.Checked:
-                area_id_list.append((ch.text(0), ch.data(0, Qt.ItemDataRole.UserRole)))
+                area_id_list.append((area_full_name(ch), ch.data(0, Qt.ItemDataRole.UserRole)))
 
         if not area_id_list:
             self.alert("선택된 지역이 없습니다")

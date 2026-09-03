@@ -285,6 +285,106 @@ ck("[robust_test] _regions 언바운드 호출", AM.__dict__["_regions"](_dummy)
    str(AM.__dict__["_regions"](_dummy)))
 ck("엔진 _regions 도 동일 동작", se.SweepEngine._regions(_dummy) == ["강남구-381"])
 
+
+print("\n=== D. 앱API 레인 = IP 공유, 계정 격리 = 401/403/429 만 ===")
+import daangn_ext.adaptive as adp
+
+ck("APP_API_LANES = 실측 무스로틀 동시 8", se.APP_API_LANES == 8)
+eng_d = se.SweepEngine(_cfg(), on_log=lambda m: None)
+ck("앱API: 프록시 1개여도 기본 8레인", eng_d._plan_lanes(["p1"], share_ip=True) == 8)
+ck("앱API: 프록시 0개여도 8레인", eng_d._plan_lanes([], share_ip=True) == 8)
+eng_d2 = se.SweepEngine(_cfg(lanes=3), on_log=lambda m: None)
+ck("앱API: cfg lanes 가 이긴다", eng_d2._plan_lanes(["p1"], share_ip=True) == 3)
+eng_d3 = se.SweepEngine(_cfg(lanes=99), on_log=lambda m: None)
+ck("앱API: 상한도 APP_API_LANES(실측 밖 동시성 = 429 = 계정 격리)",
+   eng_d3._plan_lanes(["p1"], share_ip=True) == se.APP_API_LANES)
+ck("APP_API_LANES 는 adaptive 소유, 엔진은 재수출", se.APP_API_LANES is adp.APP_API_LANES)
+ck("웹크롤: 프록시 1개면 1레인(종전)", eng_d._plan_lanes(["p1"]) == 1)
+ck("웹크롤: 프록시 3개면 1레인(종전, MIN_IP_PER_LANE)", eng_d._plan_lanes(["a", "b", "c"]) == 1)
+ck("adaptive.plan_lanes share_ip 도 프록시 수 무시",
+   adp.plan_lanes(["p1"], 8, share_ip=True) == 8 and adp.plan_lanes(["p1"], 8) == 1)
+ck("adaptive.plan_lanes share_ip 기본·상한 = APP_API_LANES",
+   adp.plan_lanes(["p1"], None, share_ip=True) == 8 and adp.plan_lanes(["p1"], 99, share_ip=True) == 8)
+
+_orig_cr = adp.collect_region
+_calls = []
+_share_seen = []
+def _fake_cr(keyword, region_in, **kw):
+    _calls.append((region_in, kw.get("proxies")))
+    _share_seen.append(kw.get("share_ip"))
+    st = {"requests": 1, "saturated": False, "missed": [], "expanded": []}
+    if region_in == "만료":
+        st.update({"token_expired": True, "stopped_by": "token"})
+    if region_in == "차단":
+        st.update({"app_api_failed": "AppApiError: HTTP 403", "app_api_status": 403,
+                   "missed": [(0, 1)]})
+    elif region_in == "서버오류":
+        st.update({"app_api_failed": "AppApiError: HTTP 502", "app_api_status": 502})
+    elif region_in == "전송":
+        st.update({"app_api_failed": "AppApiError: 요청 실패", "app_api_status": None,
+                   "missed": [(0, 1), (1, 2)]})
+    return [], st
+adp.collect_region = _fake_cr
+try:
+    regs = [{"in": r} for r in ["가", "차단", "서버오류", "전송", "나", "다", "라", "마", "바", "만료"]]
+    _, lsm = adp.collect_lanes("샤넬", regs, proxies=["p1"], lanes=8, share_ip=True,
+                               rest_range=None, access_token="t")
+    ck("IP 공유: 프록시 1개로 8레인", lsm["lanes"] == 8, str(lsm["lanes"]))
+    ck("모든 레인이 같은 풀을 쥔다", all(pl["proxies"] == 1 for pl in lsm["per_lane"]))
+    ck("모든 호출이 그 프록시로 나간다", _calls and all(p == ["p1"] for _, p in _calls))
+    ck("지역 누락 없음", lsm["regions"] == 10 and lsm["skipped"] == 0 and len(_calls) == 10)
+    ck("share_ip 가 collect_region 까지 간다(웹 폴백 차단용)", all(_share_seen))
+    ck("폴백 3건 중 차단 신호는 403 + 토큰만료 = 2", lsm["app_api_fallbacks"] == 3
+       and lsm["app_api_blocked"] == 2 and lsm["token_expired_regions"] == 1,
+       str((lsm["app_api_fallbacks"], lsm["app_api_blocked"], lsm["token_expired_regions"])))
+    _calls.clear()
+    _, lsm2 = adp.collect_lanes("샤넬", regs[:3], proxies=["p1"], lanes=8,
+                                rest_range=None, access_token="t")
+    ck("share_ip 없으면 종전대로 프록시 수 = 1레인", lsm2["lanes"] == 1)
+finally:
+    adp.collect_region = _orig_cr
+
+ck("BLOCK_STATUSES = 401/403/429", adp.BLOCK_STATUSES == frozenset({401, 403, 429}))
+
+# 앱API 가 죽었을 때 IP 공유 레인은 웹크롤로 떨어지면 안 된다(같은 IP 8동시 = 빈응답).
+class _DeadSrc:
+    def collect_region(self, *a, **k):
+        from daangn_ext.app_api import AppApiError
+        raise AppApiError("HTTP 502", status=502)
+_orig_src, _orig_web = adp._app_source_for, adp.robust_fetch_articles
+_web_calls = []
+adp._app_source_for = lambda tok: _DeadSrc()
+adp.robust_fetch_articles = lambda *a, **k: (_web_calls.append(1), ([], {}))[1]
+try:
+    arts_s, st_s = adp.collect_region("샤넬", "강남구-1", access_token="t", proxies=["p1"],
+                                      stop_before="2026-09-03T00:00:00", share_ip=True)
+    ck("share_ip: 앱API 실패 시 웹 폴백 생략", not _web_calls and arts_s == []
+       and st_s.get("fallback_skipped") is True, str(st_s))
+    ck("share_ip: 워터마크 못 올리게 stop_before_unapplied 남김",
+       st_s.get("stop_before_unapplied") == "2026-09-03T00:00:00"
+       and st_s.get("app_api_status") == 502)
+    _web_calls.clear()
+    adp.collect_region("샤넬", "강남구-1", access_token="t", proxies=["p1"])
+    ck("share_ip 없으면 종전대로 웹 폴백", len(_web_calls) >= 1)
+finally:
+    adp._app_source_for, adp.robust_fetch_articles = _orig_src, _orig_web
+
+ck("엔진: 토큰 만료 결과는 워터마크·커서를 안 올린다",
+   'if cstats.get("token_expired"):' in eng_src
+   and 'if not cstats.get("missed") and not cstats.get("token_expired"):' in eng_src)
+ck("엔진: 알림 전송은 전용 스레드(레인 콜백은 적재만)",
+   '"sweep-notify"' in eng_src and eng_src.count("self._flush_notify()") == 1
+   and "self._flush_notify(final=True)" in eng_src)
+ck("엔진: daily_cap 기본 0 (네 번째 복사본 정리)", 'cfg.get("daily_cap", 0)' in eng_src
+   and 'cfg.get("daily_cap", 300)' not in eng_src)
+ck("collect_region 이 status 를 구조적으로 남긴다",
+   'stats["app_api_status"] = app_status' in open("daangn_ext/adaptive.py", encoding="utf-8").read())
+ck("엔진 격리 조건 = app_api_blocked (missed 아님)",
+   'if lsm.get("app_api_blocked"):\n                                sched.note_block' in eng_src
+   and "if missed_total:\n                                sched.note_block" not in eng_src)
+ck("엔진이 앱API 경로에서 share_ip 를 넘긴다",
+   "share_ip = bool(token)" in eng_src and "share_ip=share_ip," in eng_src)
+
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
 for name, ok in R:

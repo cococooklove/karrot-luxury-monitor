@@ -18,6 +18,7 @@
 import itertools
 import json
 import os
+import threading
 import time
 import sqlite3
 import traceback
@@ -25,7 +26,8 @@ from datetime import datetime, timedelta, timezone
 
 from daangn_ext.app_api import SORT_RECENT
 from daangn_ext.search_filters import KeywordRule
-from daangn_ext.adaptive import (collect_region, collect_lanes, load_dong_regions,
+from daangn_ext.adaptive import (APP_API_LANES,
+                                 collect_region, collect_lanes, load_dong_regions,
                                  get_app_fallback_logger,
                                  reset_app_fallback_notices,
                                  set_app_fallback_logger)
@@ -46,6 +48,11 @@ REGION_GAP_MAX = 10.0      # 지역 간 최대 휴식(초). 이상 = 전국 1바
 # 레인당 최소 이만큼은 줘야 교체가 의미를 갖는다.
 MIN_IP_PER_LANE = 3
 MAX_LANES = 16
+# 앱API 경로의 레인 수·상한은 adaptive.APP_API_LANES(8). 여기가 스윕 처리량의 상한이므로
+# main.sweep_budget 도 같은 수로 예산을 잡는다(엔진 모듈이 재수출).
+# 알림 전송 스레드 주기(초). 레인 콜백 안에서 텔레그램·시트를 보내면 그 네트워크
+# 시간만큼 8레인이 콜백 락 앞에 줄을 선다 — 전송은 이 스레드 하나가 맡는다.
+NOTIFY_TICK_SEC = 1.0
 
 
 def _clamp_range(lo, hi, floor, ceil, dflt_lo, dflt_hi):
@@ -340,19 +347,27 @@ class SweepEngine:
         it = itertools.cycle(proxies)
         return next(it), (lambda: next(it))
 
-    def _plan_lanes(self, proxies) -> int:
+    def _plan_lanes(self, proxies, share_ip=False) -> int:
         """이번 사이클에 쓸 레인 수.
 
-        레인은 프록시를 **샤딩**해 쓴다(같은 IP 동시요청 = 전멸, 실측 8/8 빈응답).
-        따라서 레인 수는 프록시 수를 절대 넘을 수 없고, 레인당 IP 가 너무 적으면
-        빈응답 교체 여지가 사라져 오히려 느려진다 → 레인당 최소 MIN_IP_PER_LANE 개 확보.
+        share_ip(앱API 경로): 레인이 IP 를 공유한다. 프록시 수와 무관하게
+        cfg["lanes"] 또는 APP_API_LANES. 안정화 모드는 계정당 IP 1개라 이게 없으면
+        영원히 1레인 순차다.
 
-        cfg["lanes"] 로 사용자가 지정 가능. 0/None 이면 자동(프록시 수 기준).
+        웹크롤 경로: 레인은 프록시를 **샤딩**해 쓴다(같은 IP 동시요청 = 전멸, 실측 8/8
+        빈응답). 레인 수는 프록시 수를 넘을 수 없고, 레인당 IP 가 너무 적으면 빈응답
+        교체 여지가 사라져 오히려 느려진다 → 레인당 최소 MIN_IP_PER_LANE 개 확보.
+
+        cfg["lanes"] 로 사용자가 지정 가능. 0/None 이면 자동.
         """
+        want = _pi(self.cfg.get("lanes")) or 0
+        if share_ip:
+            # 상한도 APP_API_LANES — 실측 안 한 동시성으로 429 를 부르면 그게 계정
+            # 격리 신호가 되어 함대가 돌아가며 멈춘다.
+            return max(1, min(want or APP_API_LANES, APP_API_LANES, MAX_LANES))
         n_proxy = len(proxies or [])
         if n_proxy <= 1:
             return 1
-        want = _pi(self.cfg.get("lanes")) or 0
         auto = max(1, n_proxy // MIN_IP_PER_LANE)
         n = want if want > 0 else auto
         return max(1, min(n, n_proxy // MIN_IP_PER_LANE or 1, MAX_LANES))
@@ -511,7 +526,7 @@ class SweepEngine:
                 from daangn_ext.account_scheduler import AccountScheduler
                 sched = AccountScheduler(
                     accounts_fp=cfg.get("accounts_fp", "./accounts.json"),
-                    daily_cap=int(cfg.get("daily_cap", 300)),
+                    daily_cap=int(cfg.get("daily_cap", 0)),
                     warmup_days=int(cfg.get("warmup_days", 3)),
                     log=self._log)
                 self._log("[안정화] 계정 라운드로빈 + daily_cap/warmup ON")
@@ -528,6 +543,17 @@ class SweepEngine:
         set_app_fallback_logger(self._log)
         self._log(f"[시작] 조건 {len(conditions)}개, 프록시 {len(cur_proxies)}개")
         self._log(f"[휴식] 사이클 {rmin:.0f}~{rmax:.0f}s · 지역 간 {gmin:.1f}~{gmax:.1f}s")
+        # 알림 전송은 이 스레드 하나가 한다. 레인 콜백(on_result)은 큐에 넣기만 한다.
+        notify_stop = threading.Event()
+
+        def _notifier():
+            while not notify_stop.wait(NOTIFY_TICK_SEC):
+                try:
+                    self._flush_notify()
+                except Exception as e:
+                    self._log(f"[알림 전송 오류] {type(e).__name__}: {e}")
+        notify_thread = threading.Thread(target=_notifier, name="sweep-notify", daemon=True)
+        notify_thread.start()
         try:
             regions = self._regions()
             self._log(f"[지역] {len(regions)}개 (동 단위)")
@@ -564,8 +590,9 @@ class SweepEngine:
                     cur_code = pick["code"]
                     token = pick["access"]
                     sched_proxies = [pick["proxy"]] if pick["proxy"] else None
+                    _rem = pick['remaining']
                     self._log(
-                        f"[계정] {cur_code[:6]} · 잔여 {pick['remaining']} · "
+                        f"[계정] {cur_code[:6]} · 잔여 {'무제한' if _rem is None else _rem} · "
                         f"프록시 {'고정1' if pick['proxy'] else 'KR네이티브'}  ({sched.status()})")
                 # 자동수확 연동(스케줄러 미사용 시): 최신 access 재조회. access 30분 만료 대응.
                 elif token_provider:
@@ -602,7 +629,8 @@ class SweepEngine:
                     done = 0
                     total_new = 0
                     missed_total = 0
-                    n_lanes = self._plan_lanes(lane_proxies or [])
+                    share_ip = bool(token)          # 앱API 경로 = IP 공유 동시요청 OK
+                    n_lanes = self._plan_lanes(lane_proxies or [], share_ip=share_ip)
 
                     def on_result(reg_d, arts, cstats, _cond=cond, _rule=rule,
                                   _lanes=n_lanes, _regs=cond_regions):
@@ -626,7 +654,6 @@ class SweepEngine:
                             new, chg = self._dedup_notify(
                                 filtered, reg, _cond.get("min"), _cond.get("max"),
                                 _cond.get("days"))
-                            self._flush_notify()
                             done += 1
                             total_new += new
                             self._log(
@@ -634,16 +661,25 @@ class SweepEngine:
                                 f"수집 {len(filtered)} · 신규 {new}"
                                 + (f" · 변동 {chg}" if chg else "")
                                 + f"  (누적 신규 {total_new})")
-                            if cstats.get("stop_before_unapplied") is not None:
-                                # 앱API 가 죽어 웹크롤로 떨어진 지역이다. 웹 결과에는
-                                # 정지 규칙이 안 걸렸으므로 '이 시각 이후 전부'가
-                                # 아니다. 워터마크를 올리면 그 구간이 영영 빈다.
+                            if cstats.get("token_expired"):
+                                # 앱API 가 예외 없이 빈 결과를 준 경우다. 워터마크를
+                                # 올리면 그 구간 매물을 영영 잃는다 — 다음 사이클이
+                                # 새 토큰(수확)으로 같은 구간을 다시 본다.
                                 self._log(
-                                    f"⚠️ [{reg}] 정지 규칙 미적용(웹크롤 폴백) — "
+                                    f"⚠️ [{reg}] 토큰 만료로 수집 안 됨 — "
+                                    "다음 사이클에 같은 구간을 다시 훑는다")
+                            elif cstats.get("stop_before_unapplied") is not None:
+                                # 앱API 가 죽은 지역이다. 웹크롤로 떨어졌든(정지 규칙
+                                # 없음) IP 공유라 폴백을 건너뛰었든 '이 시각 이후
+                                # 전부'가 아니다. 워터마크를 올리면 그 구간이 영영 빈다.
+                                how = ("앱API 실패, IP 공유라 웹 폴백 생략"
+                                       if cstats.get("fallback_skipped") else "웹크롤 폴백")
+                                self._log(
+                                    f"⚠️ [{reg}] 정지 규칙 미적용({how}) — "
                                     "이 지역은 다음 사이클에 같은 구간을 다시 훑는다")
                             elif not cstats.get("missed"):
                                 cursor.set_watermark(_ckey(_cond, reg), visit_iso)
-                            if not cstats.get("missed"):
+                            if not cstats.get("missed") and not cstats.get("token_expired"):
                                 # 이 지역은 이번 패스에서 **끝났다**. 사이클이 중간에
                                 # 죽어도 다음 실행이 여기부터 이어간다.
                                 #
@@ -659,10 +695,17 @@ class SweepEngine:
                             f"사이클 {cycle} · [{done}/{len(_regs)}] "
                             f"'{_cond['keyword']}' 수집 중… (레인 {_lanes})")
 
-                    self._log(
-                        f"[레인] {n_lanes}개 병렬 (프록시 {len(cur_proxies)}개"
-                        + (f", 레인당 IP {len(cur_proxies)//n_lanes}개 전용)"
-                           if n_lanes > 1 else " — 1레인 순차)"))
+                    if share_ip:
+                        _want = _pi(cfg.get("lanes")) or 0
+                        self._log(
+                            f"[레인] {n_lanes}개 병렬 (앱API · IP {len(lane_proxies or [])}개 공유)"
+                            + (f" — 지정 {_want} 은 실측 상한 {APP_API_LANES} 으로 잘랐다"
+                               if _want > n_lanes else ""))
+                    else:
+                        self._log(
+                            f"[레인] {n_lanes}개 병렬 (프록시 {len(cur_proxies)}개"
+                            + (f", 레인당 IP {len(cur_proxies)//n_lanes}개 전용)"
+                               if n_lanes > 1 else " — 1레인 순차)"))
                     # 이번 방문의 기준 시각. 최신순 + 정지 규칙이라 이 시각 이후에
                     # 올라온 것은 다음 방문에서 반드시 보인다. 지역이 끝나면
                     # 워터마크를 여기로 올린다(수집이 온전했을 때만).
@@ -689,6 +732,7 @@ class SweepEngine:
                             # 최신순이라야 정지 규칙이 성립한다. 관련도 정렬에서는
                             # 최근 1시간 신규의 1페이지 재현율이 15% 뿐이었다.
                             sort_option=cfg.get("sort_option", SORT_RECENT),
+                            share_ip=share_ip,
                         )
                         cycle_requests += int(lsm.get("requests") or 0)
                         if lsm.get("skipped"):
@@ -701,10 +745,13 @@ class SweepEngine:
                                 f"{lsm['app_api_fallbacks']}/{len(cond_regions)}개가 웹크롤로 폴백 "
                                 f"({lsm.get('app_api_failed')}) — 명품 키워드는 0건으로 보일 수 있음. "
                                 "토큰/헤더(data/config.json) 확인 필요")
-                        # 안정화: 이 계정의 일일 사용량 기록(≈지역수). 차단신호면 격리.
+                        # 안정화: 이 계정의 일일 사용량 기록(≈지역수). 격리는 앱API 가
+                        # 401/403/429 를 준 때만 — missed(가격구간 확인 실패)는 웹크롤
+                        # 폴백의 IP 사정이라 계정 잘못이 아닌데, 그걸로 30분 격리하면
+                        # 빈응답 한 번에 함대가 돌아가며 멈춘다.
                         if sched and cur_code:
                             sched.note(cur_code, len(cond_regions))
-                            if missed_total:
+                            if lsm.get("app_api_blocked"):
                                 sched.note_block(cur_code)
                     except Exception as e:
                         self._log(f"[수집 오류] {type(e).__name__}: {e}")
@@ -752,6 +799,9 @@ class SweepEngine:
                 set_app_fallback_logger(_prev_fallback_log)
             except Exception:
                 pass
+            # 전송 스레드를 먼저 세운 뒤 마지막 전송 — 둘이 같은 큐를 동시에 비우지 않게.
+            notify_stop.set()
+            notify_thread.join(timeout=10)
             # 정지 시에도 대기 중인 알림은 마저 보낸다(유실 방지, 최대 30초)
             try:
                 self._flush_notify(final=True)

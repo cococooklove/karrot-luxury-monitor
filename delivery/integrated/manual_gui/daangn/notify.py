@@ -10,6 +10,7 @@
 import html as _html
 import json
 import os
+import threading
 import time
 from datetime import datetime as _dt
 
@@ -168,6 +169,10 @@ class TelegramSender:
         self._log = log or (lambda m: None)
         self.should_stop = should_stop or (lambda: False)
         self._q = []
+        # 큐는 레인 스레드(적재)와 전송 스레드(비움)가 같이 만진다. 락은 목록 뮤테이션만
+        # 감싼다 — 네트워크 전송을 락 안에 두면 적재 쪽이 그 시간만큼 선다.
+        self._qlock = threading.Lock()
+        self._flush_lock = threading.Lock()
         self._last_sent = 0.0
         self._fail_total = 0
         self._sent_total = 0
@@ -223,20 +228,25 @@ class TelegramSender:
                           "이번 창의 남은 알림은 묶어서 요약합니다")
             return
         _CAP_WINDOWS[self._cap_key]["sent"] += 1
-        self._q.append((text, n_items))
-        if len(self._q) >= TG_QUEUE_SOFT_CAP:
+        with self._qlock:
+            self._q.append((text, n_items))
+            over = len(self._q) >= TG_QUEUE_SOFT_CAP
+        if over:
             self.flush()
 
     def pending(self):
         return len(self._q)
 
-    def _chunks(self):
+    def _chunks(self, q=None):
         """대기열 → (본문, 매물건수) 3900자 이하 묶음. 단건이 한도를 넘으면 잘라 보낸다.
 
-        큐 항목은 (text, n_items) 튜플. 맨 문자열도 받는다(테스트가 직접 넣는다)."""
+        큐 항목은 (text, n_items) 튜플. 맨 문자열도 받는다(테스트가 직접 넣는다).
+        q 를 주면 그 목록을 비운다(flush 가 락 안에서 떼어 낸 스냅샷)."""
+        if q is None:
+            q = self._q
         chunk, n = "", 0
-        while self._q:
-            entry = self._q.pop(0)
+        while q:
+            entry = q.pop(0)
             msg, k = entry if isinstance(entry, tuple) else (str(entry), 0)
             while len(msg) > TG_MAX_CHARS:
                 if chunk:
@@ -271,28 +281,32 @@ class TelegramSender:
         """
         if not self._q:
             return 0, 0
-        if not self.enabled:
-            self._q.clear()
-            return 0, 0
-        prev_stop = self.should_stop
-        if ignore_stop:
-            self.should_stop = lambda: False
-        sent = failed = 0
-        try:
-            for chunk, n in self._chunks():
-                if self.should_stop() or (deadline and time.monotonic() > deadline):
-                    self._q.insert(0, (chunk, n))
-                    self._log(f"[텔레그램] 시간 초과로 {len(self._q)}건 미전송 (다음 사이클에 재전송)")
-                    break
-                ok, err = self.send(self.with_header(chunk, n))
-                if ok:
-                    sent += 1
-                else:
-                    failed += 1
-                    self._report_failure(err)
-        finally:
-            self.should_stop = prev_stop
-        return sent, failed
+        with self._flush_lock:               # 전송은 한 번에 하나(페이싱·순서 보존)
+            with self._qlock:
+                q, self._q = self._q, []     # 스냅샷을 떼어 내고 락을 푼다
+            if not self.enabled:
+                return 0, 0
+            prev_stop = self.should_stop
+            if ignore_stop:
+                self.should_stop = lambda: False
+            sent = failed = 0
+            try:
+                for chunk, n in self._chunks(q):
+                    if self.should_stop() or (deadline and time.monotonic() > deadline):
+                        with self._qlock:
+                            self._q[0:0] = [(chunk, n)] + q      # 남은 것은 앞에 되돌린다
+                            left = len(self._q)
+                        self._log(f"[텔레그램] 시간 초과로 {left}건 미전송 (다음 사이클에 재전송)")
+                        break
+                    ok, err = self.send(self.with_header(chunk, n))
+                    if ok:
+                        sent += 1
+                    else:
+                        failed += 1
+                        self._report_failure(err)
+            finally:
+                self.should_stop = prev_stop
+            return sent, failed
 
     # ── 전송 ──
     def _pace(self):

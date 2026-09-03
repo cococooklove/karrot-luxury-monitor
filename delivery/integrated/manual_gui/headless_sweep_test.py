@@ -157,7 +157,9 @@ ck("키워드 없으면 빈 문자열", m.sweep_keyword_for({"title": "x"}, []) 
 ck("payload 없어도 안 죽음", m.sweep_keyword_for(None, ["샤넬"]) == "샤넬")
 
 print("=== D. headless_sweep_cfg ===")
-cfg = m.headless_sweep_cfg({}, E, {})
+# 운영 헤드리스는 수확 토큰 경로(앱API)다 — --no-harvest 만 예외. 예산 판정이 이걸 본다.
+_TP = lambda: "t"
+cfg = m.headless_sweep_cfg({}, E, {}, token_provider=_TP)
 ck("conditions 채움", len(cfg["conditions"]) == 2)
 ck("기본 휴식 30~90", (cfg["rest_min"], cfg["rest_max"]) == (30, 90), str(cfg["rest_min"]))
 ck("기본 지역간격 0.4~1.2",
@@ -167,7 +169,8 @@ ck("지역 미지정 → 기본 지역",
    cfg["regions"] == m.default_sweep_regions("./OUT.json"), str(len(cfg["regions"])))
 ck("db/out 경로는 GUI 와 같음",
    cfg["db_path"] == "./auto_seen.db" and cfg["out_json"] == "./OUT.json")
-ck("token_provider 없으면 stabilize off", cfg["stabilize"] is False)
+ck("token_provider 없으면 stabilize off",
+   m.headless_sweep_cfg({}, E, {})["stabilize"] is False and cfg["stabilize"] is True)
 cfg2 = m.headless_sweep_cfg(
     {"sweep_regions": ["6110"], "sweep_rest_min": 40, "sweep_days": 3,
      "sweep_min": 1000, "sweep_exclude": ["레플"]},
@@ -451,13 +454,13 @@ ck("빈 문자열 지역은 무시", m.sweep_scope_for(["", None], True)["scope"
 ck("헤드리스: 전국 키를 켜면 전국",
    m.headless_sweep_cfg({m.SWEEP_NATIONWIDE_KEY: True}, E, {})["scope"] == "nationwide")
 ck("헤드리스: 전국 키가 꺼져 있으면 기본 지역",
-   m.headless_sweep_cfg({m.SWEEP_NATIONWIDE_KEY: False}, E, {})["regions"] == _dflt)
+   m.headless_sweep_cfg({m.SWEEP_NATIONWIDE_KEY: False}, E, {}, token_provider=_TP)["regions"] == _dflt)
 ck("헤드리스: 지역 지정이 전국 키를 이긴다",
    m.headless_sweep_cfg({"sweep_regions": ["가-1"], m.SWEEP_NATIONWIDE_KEY: True},
                         E, {})["regions"] == ["가-1"])
 ck("전국 설정 키 이름", m.SWEEP_NATIONWIDE_KEY == "sweep_nationwide")
 _cfgl = []
-m.headless_sweep_cfg({}, E, {}, log=_cfgl.append)
+m.headless_sweep_cfg({}, E, {}, log=_cfgl.append, token_provider=_TP)
 ck("헤드리스도 기본 범위를 로그로 알린다", any("기본 범위" in x for x in _cfgl),
    str(_cfgl))
 # 조건이 늘면 같은 지역 수라도 사이클이 길어진다 — 예산을 넘으면 구·시 단위로 내린다.
@@ -473,7 +476,7 @@ ck("예산 넘으면 구·시 단위로 내린다", _kept2 == _coarse and _low2 
 ck("낮췄다는 사실을 로그로 알린다",
    any("한 사이클 예산" in x for x in _fitl), str(_fitl))
 ck("조건 수가 범위 판정까지 간다",
-   len(m.headless_sweep_cfg({}, E, {})["regions"]) == len(_dflt),
+   len(m.headless_sweep_cfg({}, E, {}, token_provider=_TP)["regions"]) == len(_dflt),
    "조건 2개 = 예산 안")
 # 범위 판정은 GUI 와 한 함수여야 한다 — 갈라지면 서버가 다른 범위를 돈다.
 ck("GUI cfg 가 공용 범위 판정 사용",
@@ -622,6 +625,44 @@ from daangn_ext import keyword_router as _kr
 _capsrc = _inspect.getsource(_kr.KeywordRouter._observe_cap_full)
 ck("하향 로그가 실제 조작법을 알려준다",
    "전체 삭제" in _capsrc and "--reset-cap" in _capsrc, _capsrc[-160:])
+
+
+print("\n=== 예산은 레인 수에서 유도된다 ===")
+ck("기본 예산 = 8레인 예산", m.SWEEP_BUDGET == m.sweep_budget(8) == m.sweep_budget(0)
+   == m.sweep_budget(None), str(m.SWEEP_BUDGET))
+ck("8레인 ≈ 실측 17,900(1380s × 13 req/s)", 17000 <= m.SWEEP_BUDGET <= 18000)
+ck("1레인 예산은 8분의 1", m.sweep_budget(1) * 8 == m.SWEEP_BUDGET, str(m.sweep_budget(1)))
+_fitl2 = []
+_k1, _l1 = m.sweep_fit_budget(_dflt, 2, _coarse, log=_fitl2.append, budget=m.sweep_budget(1))
+ck("1레인이면 서울·경기 × 조건 2 도 구·시 단위로 내린다", _k1 == _coarse and _l1 is True)
+ck("로그에 그 예산이 찍힌다", any(f"{m.sweep_budget(1):,}" in x for x in _fitl2), str(_fitl2))
+_k8, _l8 = m.sweep_fit_budget(_dflt, 2, _coarse, budget=m.sweep_budget(8))
+ck("8레인이면 그대로", _k8 is _dflt and _l8 is False)
+ck("scope 판정이 lanes 를 받는다",
+   len(m.sweep_scope_for([], False, n_conditions=2, lanes=1)["regions"]) == len(_coarse)
+   and len(m.sweep_scope_for([], False, n_conditions=2, lanes=0)["regions"]) == len(_dflt))
+ck("헤드리스 cfg 가 lanes 를 범위 판정에 넘긴다",
+   len(m.headless_sweep_cfg({"sweep_lanes": 1}, E, {}, token_provider=_TP)["regions"]) == len(_coarse)
+   and len(m.headless_sweep_cfg({}, E, {}, token_provider=_TP)["regions"]) == len(_dflt))
+ck("GUI cfg 도 실제 레인 수를 넘긴다(토큰 경로 고정)",
+   'lanes=sweep_lanes_effective(cfg["lanes"], True, 0)'
+   in open("main.py", encoding="utf-8").read().split("def _auto_cfg_base", 1)[1][:6000])
+ck("daily_cap 기본 0(상한 없음)", m.headless_sweep_cfg({}, E, {})["daily_cap"] == 0)
+# 예산의 레인 수는 엔진이 실제로 돌릴 수와 같아야 한다.
+ck("토큰 있으면 8 (지정 0·99 모두 상한 8)",
+   m.sweep_lanes_effective(0, True, 0) == 8 and m.sweep_lanes_effective(99, True, 1) == 8
+   and m.sweep_lanes_effective(3, True, 0) == 3)
+ck("토큰 없으면 프록시 ÷ 3 (웹크롤 규칙)",
+   m.sweep_lanes_effective(0, False, 3) == 1 and m.sweep_lanes_effective(0, False, 9) == 3
+   and m.sweep_lanes_effective(0, False, 0) == 1 and m.sweep_lanes_effective(8, False, 3) == 1)
+_web3 = m.headless_sweep_cfg({}, E, {}, proxies=["a", "b", "c"], token_provider=None)
+_app3 = m.headless_sweep_cfg({}, E, {}, proxies=["a", "b", "c"], token_provider=lambda: "t")
+ck("헤드리스 웹크롤 경로(프록시 3, 토큰 없음)는 1레인 예산 → 구·시 단위",
+   len(_web3["regions"]) == len(_coarse), str(len(_web3["regions"])))
+ck("같은 프록시라도 토큰 있으면 8레인 예산 → 동 단위",
+   len(_app3["regions"]) == len(_dflt), str(len(_app3["regions"])))
+ck("페이지폭은 엔진 상수 한 곳", not hasattr(m, "SWEEP_PAGE_WINDOW_SEC")
+   and m.sweep_budget(8) == int(m.sweep_capacity(1.6 * 8)))
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")
