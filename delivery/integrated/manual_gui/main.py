@@ -1550,6 +1550,68 @@ class HeadlessSweepRunner:
             self.start()
 
 
+class HeadlessFeedRunner:
+    """헤드리스 런타임의 동 피드 수명 — HeadlessSweepRunner 와 같은 모양."""
+
+    def __init__(self, cfg_builder, log, on_found, engine_factory=None, thread_factory=None):
+        self.cfg_builder = cfg_builder
+        self.log = log
+        self.on_found = on_found
+        self._engine_factory = engine_factory
+        self._thread_factory = thread_factory
+        self.engine = None
+        self.thread = None
+
+    def _make_engine(self, cfg):
+        if self._engine_factory is not None:
+            return self._engine_factory(cfg, self.log, self.on_found)
+        from daangn.feed_sweep import FeedSweep
+        return FeedSweep(cfg, on_log=self.log, on_found=self.on_found)
+
+    def _make_thread(self, target):
+        if self._thread_factory is not None:
+            return self._thread_factory(target)
+        import threading
+        return threading.Thread(target=target, name="feed-sweep", daemon=True)
+
+    def running(self) -> bool:
+        t = self.thread
+        return t is not None and t.is_alive()
+
+    def start(self) -> bool:
+        if self.running():
+            self.log("[피드] 이미 돌고 있음 — 시작 요청 건너뜀")
+            return False
+        try:
+            cfg = self.cfg_builder()
+            if not cfg.get("regions"):
+                self.log("[피드] 지역이 비어 시작하지 않습니다")
+                return False
+            self.engine = self._make_engine(cfg)
+            self.thread = self._make_thread(self.engine.run)
+            self.thread.start()
+            self.log(f"[피드] 시작 — 동 {len(cfg['regions'])}곳 · 카테고리 {cfg.get('categories')}")
+            return True
+        except Exception as e:
+            self.log(f"[피드] 시작 실패: {str(e)[:120]}")
+            return False
+
+    def stop(self, join=0):
+        eng, t = self.engine, self.thread
+        if eng is None or not self.running():
+            return
+        try:
+            eng.stop()
+        except Exception:
+            pass
+        self.log("[피드] 정지 요청")
+        if join:
+            try:
+                t.join(join)
+            except Exception:
+                pass
+
+
 def filter_by_conditions(matches, router, log=None, rules=None):
     """앱 경로 매칭에 조건표를 태운다. **조건표가 유일한 진실이다.**
 
@@ -7123,7 +7185,7 @@ def _run_headless():
 
     # ── 라우터 · 검색 스윕 — GUI(MainWindow.__init__)와 같은 생성 경로 ──
     # 이게 없으면 앱 슬롯 상한을 넘긴 키워드는 서버에서 아무도 안 본다.
-    router = sweep_queue = sweep_runner = None
+    router = sweep_queue = sweep_runner = feed_runner = None
     alert_rules = AlertRulesCache()
     seed_state = {}
     # 스윕 스레드가 찾은 매물은 여기로만 건너온다 — sqlite 는 폴링 스레드 소유다.
@@ -7193,6 +7255,12 @@ def _run_headless():
         log("[검색스윕] 초기화 실패 — 앱 슬롯 밖 키워드는 커버되지 않습니다: "
             f"{str(e)[:120]}")
 
+    # ── 동 피드 — 앱 슬롯·조건표 무관, 웹 동 피드로 넓게 훑는다 ──
+    feed_runner = HeadlessFeedRunner(
+        lambda: feed_cfg(_settings(), _notify_cfg(), log=log,
+                         already_notified=lambda h: bool(watch_store.get(str(h))) if watch_store else False),
+        log, _sweep_found)
+
     # 관측 상한 되돌리기 — 등록 엔드포인트의 일시적 오류 하나로 유효 상한이
     # 잘못 내려앉았을 때의 탈출구. 이 플래그가 생기기 전에는 서버에서
     # data/keyword_routes.json 을 손으로 고치는 것 말고 방법이 없었다.
@@ -7244,6 +7312,8 @@ def _run_headless():
             log("--register --once 완료")
             if sweep_runner is not None:
                 sweep_runner.stop(join=8)
+            if feed_runner is not None:
+                feed_runner.stop(join=8)
             return
     try:
         while True:
@@ -7286,6 +7356,22 @@ def _run_headless():
                         st, len(load_alert_rules())))
             if sweep_runner is not None:
                 sweep_runner.resync()
+            if feed_runner is not None:
+                if once:
+                    # --once 는 스레드를 띄우지 않고 한 회차만 동기로 돈다 —
+                    # 안 그러면 스레드가 뜨자마자 프로세스가 끝나 아무것도 못 본다.
+                    try:
+                        from daangn.feed_sweep import FeedSweep as _FeedSweepOnce
+                        _fcfg = feed_runner.cfg_builder()
+                        _fresult = _FeedSweepOnce(
+                            _fcfg, on_log=log, on_found=_sweep_found).cycle_once()
+                        log(f"[피드] 1회 결과: {_fresult}")
+                    except Exception as e:
+                        log(f"[피드] 1회 실패: {str(e)[:120]}")
+                elif not feed_runner.running() and \
+                        _settings().get("feed_enabled", FEED_DEFAULTS["feed_enabled"]) and \
+                        len(load_alert_rules().rules):
+                    feed_runner.start()
             # 스윕 스레드가 넘긴 매물을 여기(폴링 스레드)서 워치리스트에 넣는다.
             if sweep_found_dropped[0]:
                 log(f"[검색스윕] 인계 큐가 차서 {sweep_found_dropped[0]}건 버림")
@@ -7360,6 +7446,8 @@ def _run_headless():
         # --once·KeyboardInterrupt·예외 어느 경로로 나가도 여기를 지난다.
         if sweep_runner is not None:
             sweep_runner.stop(join=8)
+        if feed_runner is not None:
+            feed_runner.stop(join=8)
         # 멈춘 뒤 큐에 남은 것까지 넣는다. 안 그러면 --once 는 스윕이 찾은 걸
         # 하나도 기록하지 못하고(시작하자마자 비어 있는 큐를 훑고 끝난다),
         # 상시 운영에서도 종료 때 마지막 주기 분이 통째로 사라진다.
