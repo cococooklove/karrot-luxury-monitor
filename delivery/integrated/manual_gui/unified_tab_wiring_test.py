@@ -974,6 +974,14 @@ if _win is not None:
        and _win._supervisor._stop_feed == _win._stop_feed)
     ck("피드 어댑터 모듈", __import__("daangn.feed_monitor", fromlist=["FeedMonitor"]).FeedMonitor is not None)
     ck("상태줄에 feed 항목", "feed" in _win.STATUS_ORDER)
+    _win.feed_monitor = None
+    try:
+        _win._dispose_feed_monitor()
+        _fdm_ok = True
+    except Exception:
+        _fdm_ok = False
+    ck("피드 모니터 폐기(빈 상태에서도 안 죽는다)",
+       callable(getattr(_win, "_dispose_feed_monitor", None)) and _fdm_ok)
 
 passed = sum(1 for _, ok in R if ok)
 print(f"\n===== {passed}/{len(R)} PASS =====")

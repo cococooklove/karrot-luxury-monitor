@@ -4797,8 +4797,14 @@ class MainWindow(QMainWindow):
         _fcw = QtWidgets.QWidget(box); _fcw.setLayout(_fc)
         gv.addWidget(self._setting_row("카테고리", _fcw))
         gv.addWidget(self._setting_row("웹 프록시", self.feedProxies))
-        gv.addWidget(self._setting_row("초당 요청/레인", self.feedRps))
-        gv.addWidget(self._setting_row("사이클 휴식(분)", self.feedRestMin))
+        _frps = QtWidgets.QHBoxLayout(); _frps.setContentsMargins(0, 0, 0, 0)
+        _frps.addWidget(self.feedRps); _frps.addStretch(1)
+        _frpsw = QtWidgets.QWidget(box); _frpsw.setLayout(_frps)
+        gv.addWidget(self._setting_row("초당 요청/레인", _frpsw))
+        _frest = QtWidgets.QHBoxLayout(); _frest.setContentsMargins(0, 0, 0, 0)
+        _frest.addWidget(self.feedRestMin); _frest.addStretch(1)
+        _frestw = QtWidgets.QWidget(box); _frestw.setLayout(_frest)
+        gv.addWidget(self._setting_row("사이클 휴식(분)", _frestw))
         gv.addWidget(self._setting_row("앱 스윕", self.sweepAppChk))
         for w in (self.feedEnabledChk, self.feedCat31, self.feedCat14, self.feedCat5, self.sweepAppChk):
             w.toggled.connect(lambda *_: self._save_alert_settings(self._feed_settings_patch()))
@@ -5581,6 +5587,26 @@ class MainWindow(QMainWindow):
             "sweep_app_enabled": bool(self.sweepAppChk.isChecked()),
         }
 
+    def _dispose_feed_monitor(self):
+        """다 쓴 FeedMonitor 를 놓아준다 — 시그널을 끊고 Qt 에 반납한다.
+
+        _dispose_auto_monitor 와 같은 모양이다: 돌고 있는 스레드는 건드리지
+        않는다(호출자가 이미 정지시켰거나, 끝나서 죽은 것만 부른다)."""
+        fm = self.feed_monitor
+        self.feed_monitor = None
+        if fm is None:
+            return False
+        for sig in ("log", "found", "status"):
+            try:
+                getattr(fm, sig).disconnect()
+            except (TypeError, RuntimeError, AttributeError):
+                pass                    # 연결이 없으면 disconnect 가 TypeError
+        try:
+            fm.deleteLater()
+        except (RuntimeError, AttributeError):
+            pass
+        return True
+
     def _start_feed(self):
         s = self._load_alert_settings()
         if not s.get("feed_enabled", FEED_DEFAULTS["feed_enabled"]):
@@ -5591,6 +5617,7 @@ class MainWindow(QMainWindow):
         if fm is not None and fm.isRunning():
             return
         try:
+            self._dispose_feed_monitor()
             cfg = feed_cfg(s, self._notify, already_notified=self._already_notified, log=self._alog)
             from daangn.feed_monitor import FeedMonitor
             self.feed_monitor = FeedMonitor(self, cfg)
