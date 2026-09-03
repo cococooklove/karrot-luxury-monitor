@@ -91,7 +91,7 @@ ck("임시파일 → os.replace 로 원자적 교체", "os.replace(tmp, self.pat
 
 print("\n=== 7. 화면에서 쓸 수 있게 배선됐다 ===")
 m = open("main.py", encoding="utf-8").read()
-ck("프록시 저장 버튼이 있다", "선택 계정에 프록시 저장" in m)
+ck("프록시 저장 버튼이 있다", "선택 계정 저장" in m)
 ck("set_proxy 를 부른다", "store.set_proxy(" in m)
 ck("고른 계정의 현재 프록시를 보여준다", "listw.currentRowChanged.connect" in m)
 ck("code 로도 이름을 표시한다", 'r.get("label") or r.get("code")' in m)

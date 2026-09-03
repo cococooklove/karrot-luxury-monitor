@@ -23,8 +23,8 @@ def ck(name, cond, extra=""):
 def _mk(daily_cap, n=2):
     d = tempfile.mkdtemp()
     fp = os.path.join(d, "accounts.json")
-    json.dump([{"code": f"{i}00000000", "access": "t", "proxy": f"http://p{i}"}
-               for i in range(n)], open(fp, "w"))
+    json.dump([{"code": f"{i}00000000", "access": "t", "proxy": f"http://p{i}",
+                "role": "sweep"} for i in range(n)], open(fp, "w"))
     return AccountScheduler(accounts_fp=fp, state_fp=os.path.join(d, "state.json"),
                             daily_cap=daily_cap, warmup_days=3, cooldown_sec=60)
 

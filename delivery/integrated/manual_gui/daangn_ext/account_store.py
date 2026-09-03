@@ -15,6 +15,16 @@ import threading
 
 DEFAULT_PATH = "accounts.json"
 
+ROLE_ALERT = "alert"      # 앱 알림 받기·브랜드 등록·수확. 검색 API 호출 없음
+ROLE_SWEEP = "sweep"      # 앱 키워드 스윕(검색) 전용 — 버려도 되는 계정
+ROLES = (ROLE_ALERT, ROLE_SWEEP)
+
+
+def account_role(row: dict) -> str:
+    """역할 필드. 없거나 모르는 값이면 alert — 기존 계정이 전부 알림 계정이 된다."""
+    r = str((row or {}).get("role") or "").strip().lower()
+    return r if r in ROLES else ROLE_ALERT
+
 
 class AccountStore:
     def __init__(self, path: str = DEFAULT_PATH):
@@ -39,8 +49,9 @@ class AccountStore:
 
     # ── UI 연동 ──
     def add(self, refresh: str, proxy: str | None = None,
-            access: str = "", label: str = "") -> dict:
-        row = {"refresh": refresh, "access": access, "proxy": proxy, "label": label}
+            access: str = "", label: str = "", role: str = ROLE_ALERT) -> dict:
+        row = {"refresh": refresh, "access": access, "proxy": proxy, "label": label,
+               "role": role}
         with self._lock:
             # 중복(같은 refresh) 갱신
             self.rows = [r for r in self.rows if r.get("refresh") != refresh]
@@ -177,6 +188,19 @@ class AccountStore:
                     json.dump(rows, f, ensure_ascii=False, indent=2)
                 os.replace(tmp, self.path)
                 self.rows = rows
+        return True
+
+    def set_role(self, key, role: str) -> bool:
+        if role not in ROLES:
+            return False
+        with self._lock:
+            for r in self.rows:
+                if key in (r.get("code"), r.get("label"), r.get("refresh")):
+                    r["role"] = role
+                    break
+            else:
+                return False
+        self.save()
         return True
 
     def proxies(self) -> list[str]:

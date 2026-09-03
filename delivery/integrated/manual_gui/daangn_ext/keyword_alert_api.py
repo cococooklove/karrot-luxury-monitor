@@ -303,13 +303,15 @@ class MultiAccountAlerts:
         r = region_name or ""
         return any(k in r for k in self.core_keywords())
 
-    def _valid(self, core_only=False):
-        """(code, access, proxy) 리스트 — access 살아있는 계정만.
+    def _valid(self, core_only=False, role="alert"):
+        """(code, access, proxy) — access 살아 있고 **역할이 맞는** 계정만.
+        기본 alert: 폴링·등록은 알림 계정만 쓴다. 검색은 sweep 계정의 몫(AccountScheduler).
         core_only=True 면 인증동네가 명품 밀집 핵심지역인 계정만(지역명 캐시, 최초 1회 조회)."""
+        from daangn_ext.account_store import account_role
         alive = []
         for a in self._accounts():
             acc = a.get("access") or ""
-            if acc and token_remaining(acc) > 60:
+            if acc and token_remaining(acc) > 60 and account_role(a) == role:
                 alive.append((str(a.get("code") or ""), acc, a.get("proxy")))
         if not core_only:
             return alive

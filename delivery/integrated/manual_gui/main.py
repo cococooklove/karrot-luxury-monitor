@@ -6279,6 +6279,7 @@ class MainWindow(QMainWindow):
     def on_accounts_btn_clicked(self):
         """계정+프록시 추가/관리 다이얼로그."""
         from daangn_ext import AccountStore
+        from daangn_ext.account_store import account_role
         store = AccountStore("./accounts.json")
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("계정 + 프록시 관리")
@@ -6296,7 +6297,9 @@ class MainWindow(QMainWindow):
             keep = listw.currentRow()
             listw.clear()
             for r in store.rows:
-                listw.addItem(f"{_name(r)}  |  {r.get('proxy') or '프록시없음'}")
+                listw.addItem(
+                    f"{_name(r)}  |  {'스윕' if account_role(r) == 'sweep' else '알림'}"
+                    f"  |  {r.get('proxy') or '프록시없음'}")
             if 0 <= keep < listw.count():
                 listw.setCurrentRow(keep)
         reload_list()
@@ -6308,6 +6311,10 @@ class MainWindow(QMainWindow):
         proxyEdit = QtWidgets.QLineEdit(dlg); proxyEdit.setPlaceholderText("http://user:pass@host:port")
         form.addRow("별칭", labelEdit)
         form.addRow("프록시", proxyEdit)
+        roleBox = QtWidgets.QComboBox(dlg)
+        roleBox.addItem("알림 계정 (앱 알림·등록만, 검색 안 함)", "alert")
+        roleBox.addItem("스윕 계정 (앱 키워드 검색 전용 — 버려도 되는 계정)", "sweep")
+        form.addRow("역할", roleBox)
         v.addLayout(form)
 
         v.addWidget(QtWidgets.QLabel(
@@ -6334,7 +6341,7 @@ class MainWindow(QMainWindow):
         v.addLayout(sub)
 
         btns = QtWidgets.QHBoxLayout()
-        saveProxyBtn = QtWidgets.QPushButton("선택 계정에 프록시 저장", dlg)
+        saveProxyBtn = QtWidgets.QPushButton("선택 계정 저장", dlg)
         saveProxyBtn.setObjectName("startBtn")
         delBtn = QtWidgets.QPushButton("선택 삭제", dlg)
         closeBtn = QtWidgets.QPushButton("닫기", dlg)
@@ -6348,6 +6355,7 @@ class MainWindow(QMainWindow):
                 r = store.rows[i]
                 proxyEdit.setText(r.get("proxy") or "")
                 labelEdit.setText(r.get("label") or "")
+                roleBox.setCurrentIndex(0 if account_role(r) == "alert" else 1)
         listw.currentRowChanged.connect(on_pick)
 
         def do_save_proxy():
@@ -6360,6 +6368,8 @@ class MainWindow(QMainWindow):
             val = proxyEdit.text().strip()
             if store.set_proxy(key, val):
                 self._alog(f"[프록시] {_name(r)} → {val or '직결'}")
+                store.set_role(key, roleBox.currentData())
+                self._alog(f"[계정] {_name(r)} 역할 → {roleBox.currentText()}")
                 reload_list()
                 QtWidgets.QMessageBox.information(
                     dlg, "저장됨",

@@ -12,6 +12,8 @@ daily_cap=0(기본) = 상한 없음. 앱API 실측(2026-09-01)이 토큰 1개·I
 캡과 무관하게 그대로 동작한다.
 
 상태(일일 카운트·최초관측일)는 accounts.json 옆 account_state.json 에 보존.
+
+sweep 역할 계정만 고른다(2026-09-03).
 """
 from __future__ import annotations
 
@@ -28,13 +30,15 @@ def _today():
 
 class AccountScheduler:
     def __init__(self, accounts_fp="./accounts.json", state_fp=STATE_FILE,
-                 daily_cap=0, warmup_days=3, cooldown_sec=1800, log=None):
+                 daily_cap=0, warmup_days=3, cooldown_sec=1800, log=None,
+                 role="sweep"):
         self.accounts_fp = accounts_fp
         self.state_fp = state_fp
         self.daily_cap = int(daily_cap)
         self.warmup_days = max(1, int(warmup_days))
         self.cooldown_sec = cooldown_sec
         self.log = log or (lambda m: None)
+        self.role = role
         self._rr = 0
         self.state = self._load_state()
 
@@ -44,8 +48,11 @@ class AccountScheduler:
             rows = json.load(open(self.accounts_fp, encoding="utf-8"))
         except Exception:
             return []
+        from daangn_ext.account_store import account_role
         out = []
         for r in rows:
+            if account_role(r) != self.role:
+                continue
             acc = r.get("access") or ""
             if not acc:
                 continue
